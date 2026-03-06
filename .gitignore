@@ -1,0 +1,30 @@
+# .gitignore
+
+# 环境
+.env
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 数据
+data/
+models/
+logs/
+bin/
+
+# Go
+go-collector/go-collector
+*.exe
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.swp
