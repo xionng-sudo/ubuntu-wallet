@@ -52,6 +52,8 @@ class ETHPredictionSystem:
             "analysis": {},
             "price_levels": [],
             "market_data": {},
+            # 新增：按 timeframe 缓存不同周期的分析/预测，避免互相覆盖
+            "timeframes": {},
         }
 
         # 尝试加载已有模型
@@ -74,8 +76,7 @@ class ETHPredictionSystem:
         self.cache["market_data"] = market_data
 
         # 2. 获取K线数据 (直接从交易所或本地文件)
-        df = self.collector.fetch_multi_exchange_ohlcv(
-            symbol="ETH/USDT", timeframe="1h", limit=500)
+        df = self.collector.fetch_multi_exchange_ohlcv(symbol="ETH/USDT", timeframe="1h", limit=500)
 
         if df.empty:
             print("[SYSTEM] 无法从交易所获取数据，尝试本地文件...")
@@ -83,9 +84,11 @@ class ETHPredictionSystem:
 
         self.cache["klines_df"] = df
 
-        print(f"[SYSTEM] 数据采集完成: {len(df)} 条K线, "
-              f"{len(self.cache['traders_df'])} 个交易员, "
-              f"{len(self.cache['trades_df'])} 条交易")
+        print(
+            f"[SYSTEM] 数据采集完成: {len(df)} 条K线, "
+            f"{len(self.cache['traders_df'])} 个交易员, "
+            f"{len(self.cache['trades_df'])} 条交易"
+        )
 
     def run_analysis(self):
         """运行技术分析"""
@@ -148,7 +151,7 @@ class ETHPredictionSystem:
 
         df = self.cache.get("analyzed_df")
         if df is None or df.empty:
-            print("[SYSTEM] 无分析数据可预测")
+            print("[SYSTEM] ���分析数据可预测")
             return
 
         if not self.predictor.is_trained:
@@ -190,15 +193,59 @@ class ETHPredictionSystem:
         return prediction
 
     def start_dashboard(self):
-        """启动可视化仪表板"""
+        """启动可视化仪表板（支持 timeframe 切换）"""
         print("\n[SYSTEM] ===== 启动可视化仪表板 =====")
 
-        def data_callback():
-            """仪表板数据回调"""
+        def ensure_timeframe_cached(timeframe: str):
+            """
+            确保某个 timeframe 的 K线/分析/预测已缓存。
+            规则：如果缓存里没有该 timeframe，则拉取 -> 分析 -> 预测 -> 写入缓存。
+            """
+            tf = timeframe or "1h"
+            if tf in self.cache["timeframes"]:
+                return
+
+            print(f"[SYSTEM] [TF] 初始化缓存: timeframe={tf}")
+
+            df = self.collector.fetch_multi_exchange_ohlcv(symbol="ETH/USDT", timeframe=tf, limit=500)
+            if df.empty:
+                print(f"[SYSTEM] [TF] timeframe={tf} 获取K线为空，使用 demo 数据回退")
+                df = self._generate_demo_data()
+
+            analyzed = self.analyzer.analyze(df)
+            analysis = self.analyzer.get_latest_analysis(analyzed)
+
+            prediction = {}
+            try:
+                # 若模型未训练，这里不强制 train（避免 dashboard 首次启动很慢）
+                # 如果你希望自动训练：把 pass 改成 self.train_models()
+                if not self.predictor.is_trained:
+                    pass
+
+                df_features = self.predictor.prepare_features(analyzed)
+                if not df_features.empty:
+                    prediction = self.predictor.predict(df_features)
+            except Exception as e:
+                print(f"[SYSTEM] [TF] timeframe={tf} 预测失败: {e}")
+
+            self.cache["timeframes"][tf] = {
+                "klines_df": analyzed,
+                "analysis": analysis,
+                "prediction": prediction,
+            }
+
+        def data_callback(timeframe="1h"):
+            """仪表板数据回调（Visualization 会传入 timeframe）"""
+            ensure_timeframe_cached(timeframe)
+
+            tf_pack = self.cache["timeframes"].get(timeframe, {})
+
             return {
-                "klines_df": self.cache.get("analyzed_df", self.cache.get("klines_df", pd.DataFrame())),
-                "prediction": self.cache.get("prediction", {}),
-                "analysis": self.cache.get("analysis", {}),
+                # 优先返回该 timeframe 的 analyzed_df
+                "klines_df": tf_pack.get("klines_df", pd.DataFrame()),
+                "prediction": tf_pack.get("prediction", {}),
+                "analysis": tf_pack.get("analysis", {}),
+                # trader 数据仍走全局 cache（由 collect_data/auto_update 维护）
                 "traders_df": self.cache.get("traders_df", pd.DataFrame()),
                 "trades_df": self.cache.get("trades_df", pd.DataFrame()),
                 "price_levels": self.cache.get("price_levels", []),
@@ -262,9 +309,7 @@ class ETHPredictionSystem:
             return
 
         # 过滤ETH交易
-        eth_trades = trades_df[
-            trades_df["symbol"].str.contains("ETH", case=False, na=False)
-        ].copy()
+        eth_trades = trades_df[trades_df["symbol"].str.contains("ETH", case=False, na=False)].copy()
 
         if eth_trades.empty:
             print("[SYSTEM] 无ETH交易数据")
@@ -273,8 +318,7 @@ class ETHPredictionSystem:
         # 按价格区间分组
         if "price" in eth_trades.columns:
             eth_trades["price_range"] = (eth_trades["price"].astype(float) // 50) * 50
-            eth_trades["price_label"] = eth_trades["price_range"].apply(
-                lambda x: f"${x:.0f} - ${x+50:.0f}")
+            eth_trades["price_label"] = eth_trades["price_range"].apply(lambda x: f"${x:.0f} - ${x+50:.0f}")
 
             print("\n" + "=" * 80)
             print("ETH 各价格阶段交易员买卖统计")
@@ -316,13 +360,16 @@ class ETHPredictionSystem:
         returns = np.random.normal(0.0001, 0.02, n)
         prices = base_price * np.exp(np.cumsum(returns))
 
-        df = pd.DataFrame({
-            "open": prices * (1 + np.random.uniform(-0.005, 0.005, n)),
-            "high": prices * (1 + np.random.uniform(0.001, 0.015, n)),
-            "low": prices * (1 - np.random.uniform(0.001, 0.015, n)),
-            "close": prices,
-            "volume": np.random.uniform(1000, 50000, n),
-        }, index=dates)
+        df = pd.DataFrame(
+            {
+                "open": prices * (1 + np.random.uniform(-0.005, 0.005, n)),
+                "high": prices * (1 + np.random.uniform(0.001, 0.015, n)),
+                "low": prices * (1 - np.random.uniform(0.001, 0.015, n)),
+                "close": prices,
+                "volume": np.random.uniform(1000, 50000, n),
+            },
+            index=dates,
+        )
 
         return df
 
@@ -372,7 +419,6 @@ def main():
         system.print_trader_price_analysis()
 
     else:
-        # 完整运行
         system.collect_data()
         system.run_analysis()
         system.train_models()
@@ -380,7 +426,6 @@ def main():
         system.save_charts()
         system.print_trader_price_analysis()
 
-        # 启动自动更新和仪表板
         system.run_auto_update(interval=300)
         system.start_dashboard()
 
