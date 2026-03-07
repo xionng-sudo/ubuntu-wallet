@@ -10,8 +10,12 @@ from datetime import datetime
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.metrics import (accuracy_score, mean_absolute_error,
-                              mean_squared_error, r2_score)
+from sklearn.metrics import (
+    accuracy_score,
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+)
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.preprocessing import MinMaxScaler
 
@@ -80,21 +84,95 @@ class MLPredictor:
             df[f"target_{horizon}h"] = df["close"].pct_change(periods=horizon).shift(-horizon)
             df[f"target_dir_{horizon}h"] = (df[f"target_{horizon}h"] > 0).astype(int)
 
+        # 先补齐 trader_*（即使没有 trader_data，也要保证列存在，避免预测阶段 KeyError）
+        for col in ["trader_buy_ratio", "trader_sell_ratio", "trader_net_flow"]:
+            if col not in df.columns:
+                df[col] = 0.0
+
         # 删除 NaN
         df.dropna(inplace=True)
 
         return df
 
+    def apply_trader_features(self, df: pd.DataFrame, trader_data) -> pd.DataFrame:
+        """
+        预测阶段也融合交易员特征。
+        trader_data 允许：
+        - dict（类似 Go Collector 原始 trades_dict）
+        - DataFrame（你现在的 trades_df：包含 side/amount 等）
+        - None
+        """
+        if df is None or df.empty:
+            return df
+
+        df = df.copy()
+
+        if trader_data is None:
+            # 保证列存在
+            for col in ["trader_buy_ratio", "trader_sell_ratio", "trader_net_flow"]:
+                if col not in df.columns:
+                    df[col] = 0.0
+            return df
+
+        # case 1: trades_df（DataFrame）
+        if isinstance(trader_data, pd.DataFrame):
+            trades_df = trader_data
+            if trades_df.empty or "side" not in trades_df.columns:
+                for col in ["trader_buy_ratio", "trader_sell_ratio", "trader_net_flow"]:
+                    if col not in df.columns:
+                        df[col] = 0.0
+                return df
+
+            buy_count = int((trades_df["side"] == "BUY").sum())
+            sell_count = int((trades_df["side"] == "SELL").sum())
+
+            total_buy_amount = 0.0
+            total_sell_amount = 0.0
+
+            if "amount" in trades_df.columns:
+                total_buy_amount = float(trades_df.loc[trades_df["side"] == "BUY", "amount"].fillna(0).sum())
+                total_sell_amount = float(trades_df.loc[trades_df["side"] == "SELL", "amount"].fillna(0).sum())
+            else:
+                # 没有 amount 就按数量近似
+                if "quantity" in trades_df.columns:
+                    total_buy_amount = float(trades_df.loc[trades_df["side"] == "BUY", "quantity"].fillna(0).sum())
+                    total_sell_amount = float(trades_df.loc[trades_df["side"] == "SELL", "quantity"].fillna(0).sum())
+
+            total = buy_count + sell_count
+            if total > 0:
+                df["trader_buy_ratio"] = buy_count / total
+                df["trader_sell_ratio"] = sell_count / total
+                denom = max(total_buy_amount + total_sell_amount, 1.0)
+                df["trader_net_flow"] = (total_buy_amount - total_sell_amount) / denom
+            else:
+                df["trader_buy_ratio"] = 0.5
+                df["trader_sell_ratio"] = 0.5
+                df["trader_net_flow"] = 0.0
+
+            return df
+
+        # case 2: dict（你 auto_learn 用的那种 trader_data）
+        if isinstance(trader_data, dict):
+            return self._merge_trader_features(df, trader_data)
+
+        # 其它类型：兜底
+        for col in ["trader_buy_ratio", "trader_sell_ratio", "trader_net_flow"]:
+            if col not in df.columns:
+                df[col] = 0.0
+        return df
+
     def get_feature_columns(self, df: pd.DataFrame) -> list:
         """获取特征列名"""
-        exclude = ["open", "high", "low", "close", "volume", "signal", "exchange",
-                    "symbol", "interval"]
+        exclude = ["open", "high", "low", "close", "volume", "signal", "exchange", "symbol", "interval"]
         exclude += [col for col in df.columns if col.startswith("target_")]
         exclude += [col for col in df.columns if col.startswith("signal")]
         exclude += [col for col in df.columns if col.startswith("ichimoku_chikou")]
 
-        features = [col for col in df.columns if col not in exclude
-                     and df[col].dtype in [np.float64, np.int64, np.float32, np.int32]]
+        features = [
+            col
+            for col in df.columns
+            if col not in exclude and df[col].dtype in [np.float64, np.int64, np.float32, np.int32]
+        ]
 
         self.feature_columns = features
         return features
@@ -123,7 +201,6 @@ class MLPredictor:
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
 
-        # 缩放
         scaler = MinMaxScaler()
         X_train = scaler.fit_transform(X_train)
         X_test = scaler.transform(X_test)
@@ -138,22 +215,16 @@ class MLPredictor:
             random_state=42,
         )
 
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_test, y_test)],
-            verbose=False,
-        )
+        model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
 
         y_pred = model.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
-
         print(f"[ML] XGBoost 准确率: {accuracy:.4f}")
 
         self.models["xgboost"] = model
         self.scalers["xgboost"] = scaler
 
         self._save_model("xgboost", model, scaler, accuracy)
-
         return {"model": "xgboost", "accuracy": accuracy}
 
     # ================================================================
@@ -192,21 +263,16 @@ class MLPredictor:
             verbose=-1,
         )
 
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_test, y_test)],
-        )
+        model.fit(X_train, y_train, eval_set=[(X_test, y_test)])
 
         y_pred = model.predict(X_test)
         accuracy = accuracy_score(y_test, y_pred)
-
         print(f"[ML] LightGBM 准确率: {accuracy:.4f}")
 
         self.models["lightgbm"] = model
         self.scalers["lightgbm"] = scaler
 
         self._save_model("lightgbm", model, scaler, accuracy)
-
         return {"model": "lightgbm", "accuracy": accuracy}
 
     # ================================================================
@@ -235,10 +301,9 @@ class MLPredictor:
 
         lookback = ML_CFG["lookback_period"]
 
-        # 构建序列
         X_seq, y_seq = [], []
         for i in range(lookback, len(X_scaled)):
-            X_seq.append(X_scaled[i - lookback:i])
+            X_seq.append(X_scaled[i - lookback : i])
             y_seq.append(y[i])
 
         X_seq = np.array(X_seq)
@@ -250,12 +315,10 @@ class MLPredictor:
         y_train = torch.LongTensor(y_seq[:split])
         y_test = torch.LongTensor(y_seq[split:])
 
-        # 定义 LSTM 模型
         class LSTMModel(nn.Module):
             def __init__(self, input_size, hidden_size, num_layers, num_classes, dropout):
                 super().__init__()
-                self.lstm = nn.LSTM(input_size, hidden_size, num_layers,
-                                   batch_first=True, dropout=dropout)
+                self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
                 self.fc1 = nn.Linear(hidden_size, 64)
                 self.relu = nn.ReLU()
                 self.dropout = nn.Dropout(dropout)
@@ -280,7 +343,6 @@ class MLPredictor:
         criterion = nn.CrossEntropyLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=ML_CFG["learning_rate"])
 
-        # 训练
         train_dataset = TensorDataset(X_train, y_train)
         train_loader = DataLoader(train_dataset, batch_size=ML_CFG["batch_size"], shuffle=False)
 
@@ -299,7 +361,6 @@ class MLPredictor:
                 optimizer.step()
                 total_loss += loss.item()
 
-            # 评估
             if (epoch + 1) % 10 == 0:
                 model.eval()
                 with torch.no_grad():
@@ -313,8 +374,10 @@ class MLPredictor:
                     else:
                         patience_counter += 1
 
-                    print(f"[ML] LSTM Epoch {epoch+1}/{epochs}, "
-                          f"Loss: {total_loss/len(train_loader):.4f}, Acc: {accuracy:.4f}")
+                    print(
+                        f"[ML] LSTM Epoch {epoch+1}/{epochs}, "
+                        f"Loss: {total_loss/len(train_loader):.4f}, Acc: {accuracy:.4f}"
+                    )
 
                 model.train()
 
@@ -322,7 +385,6 @@ class MLPredictor:
                     print(f"[ML] LSTM 早停于 Epoch {epoch+1}")
                     break
 
-        # 最终评估
         model.eval()
         with torch.no_grad():
             test_outputs = model(X_test)
@@ -334,12 +396,10 @@ class MLPredictor:
         self.models["lstm"] = model
         self.scalers["lstm"] = scaler
 
-        # 保存 PyTorch 模型
         model_path = os.path.join(self.model_dir, "lstm_model.pt")
         torch.save(model.state_dict(), model_path)
 
         self._save_model_meta("lstm", final_accuracy)
-
         return {"model": "lstm", "accuracy": final_accuracy}
 
     # ================================================================
@@ -355,6 +415,25 @@ class MLPredictor:
         features = self.get_feature_columns(df) if not self.feature_columns else self.feature_columns
         if not features:
             return {"direction": "HOLD", "confidence": 0, "details": {}}
+
+        print("======== pandas features 调试输出 ========")
+        print("需要的特征名: ", features)
+        print("DataFrame里的列名: ", list(df.columns))
+        missing = set(features) - set(df.columns)
+        if missing:
+            print("【!!! 缺失的特征:】", missing)
+        else:
+            print("所有需要的特征都在 DataFrame 里，没有缺失。")
+        extra = set(df.columns) - set(features)
+        print("DataFrame里多出来的列（可忽略）:", extra)
+        print("=======================================")
+        # === 特征列表调试输出结束 ===
+
+        # 兜底：缺失的特征直接补 0，避免 KeyError
+        if missing:
+            df = df.copy()
+            for c in missing:
+                df[c] = 0.0
 
         latest = df[features].iloc[-1:].values
         predictions = {}
@@ -389,16 +468,17 @@ class MLPredictor:
         if "lstm" in self.models and "lstm" in self.scalers:
             try:
                 import torch
+
                 lookback = ML_CFG["lookback_period"]
                 X_all = df[features].iloc[-lookback:].values
                 X_scaled = self.scalers["lstm"].transform(X_all)
-                X_seq = torch.FloatTensor(X_scaled).unsqueeze(0)  # (1, lookback, features)
+                X_seq = torch.FloatTensor(X_scaled).unsqueeze(0)
 
                 self.models["lstm"].eval()
                 with torch.no_grad():
                     output = self.models["lstm"](X_seq)
                     prob = torch.softmax(output, dim=1).numpy()[0]
-                    pred = np.argmax(prob)
+                    pred = int(np.argmax(prob))
 
                 predictions["lstm"] = {
                     "direction": "UP" if pred == 1 else "DOWN",
@@ -407,7 +487,6 @@ class MLPredictor:
             except Exception as e:
                 print(f"[ML] LSTM 预测失败: {e}")
 
-        # ─── 集成投票 ───
         if not predictions:
             return {"direction": "HOLD", "confidence": 0, "details": {}}
 
@@ -415,7 +494,7 @@ class MLPredictor:
         down_votes = sum(1 for p in predictions.values() if p["direction"] == "DOWN")
         total = len(predictions)
 
-        avg_confidence = np.mean([p["confidence"] for p in predictions.values()])
+        avg_confidence = float(np.mean([p["confidence"] for p in predictions.values()]))
 
         if up_votes > down_votes:
             direction = "UP"
@@ -450,17 +529,14 @@ class MLPredictor:
         """
         print("[ML] ===== 开始自动学习 =====")
 
-        # 准备特征
         df_prepared = self.prepare_features(df)
         if df_prepared.empty:
             print("[ML] 数据准备后为空，跳过学习")
             return
 
-        # 融合交易员数据（如果有）
         if trader_data:
             df_prepared = self._merge_trader_features(df_prepared, trader_data)
 
-        # 训练所有模型
         results = {}
 
         print("[ML] 训练 XGBoost...")
@@ -480,12 +556,13 @@ class MLPredictor:
 
         self.is_trained = bool(results)
 
-        # 记录训练历史
-        self.training_history.append({
-            "timestamp": datetime.now().isoformat(),
-            "data_size": len(df_prepared),
-            "results": results,
-        })
+        self.training_history.append(
+            {
+                "timestamp": datetime.now().isoformat(),
+                "data_size": len(df_prepared),
+                "results": results,
+            }
+        )
 
         self._save_training_history()
 
@@ -493,37 +570,35 @@ class MLPredictor:
         return results
 
     def _merge_trader_features(self, df: pd.DataFrame, trader_data: dict) -> pd.DataFrame:
-        """将交易员信息合并为额外特征"""
-        # 统计每个时间点的买卖比例
+        """将交易员信息合并为额外特征（训练/预测通用）"""
         if not trader_data:
             return df
 
-        # 计算交易员净头寸
         buy_count = 0
         sell_count = 0
-        total_buy_amount = 0
-        total_sell_amount = 0
+        total_buy_amount = 0.0
+        total_sell_amount = 0.0
 
         for trader_id, trades in trader_data.items():
             for trade in trades:
                 if isinstance(trade, dict):
                     if trade.get("side") == "BUY":
                         buy_count += 1
-                        total_buy_amount += trade.get("amount", 0)
+                        total_buy_amount += float(trade.get("amount", 0) or 0)
                     else:
                         sell_count += 1
-                        total_sell_amount += trade.get("amount", 0)
+                        total_sell_amount += float(trade.get("amount", 0) or 0)
 
         total = buy_count + sell_count
         if total > 0:
             df["trader_buy_ratio"] = buy_count / total
             df["trader_sell_ratio"] = sell_count / total
-            df["trader_net_flow"] = (total_buy_amount - total_sell_amount) / max(
-                total_buy_amount + total_sell_amount, 1)
+            denom = max(total_buy_amount + total_sell_amount, 1.0)
+            df["trader_net_flow"] = (total_buy_amount - total_sell_amount) / denom
         else:
             df["trader_buy_ratio"] = 0.5
             df["trader_sell_ratio"] = 0.5
-            df["trader_net_flow"] = 0
+            df["trader_net_flow"] = 0.0
 
         return df
 
@@ -553,7 +628,7 @@ class MLPredictor:
         meta[name] = {
             "accuracy": accuracy,
             "trained_at": datetime.now().isoformat(),
-            "features": self.feature_columns[:10],  # 保存前10个特征名
+            "features": self.feature_columns[:10],
         }
 
         with open(meta_path, "w") as f:
@@ -570,7 +645,6 @@ class MLPredictor:
                 self.scalers[name] = joblib.load(scaler_path)
                 print(f"[ML] 模型 {name} 已加载")
 
-        # 加载特征列表
         meta_path = os.path.join(self.model_dir, "model_meta.json")
         if os.path.exists(meta_path):
             with open(meta_path, "r") as f:
@@ -582,4 +656,4 @@ class MLPredictor:
         """保存训练历史"""
         path = os.path.join(self.model_dir, "training_history.json")
         with open(path, "w") as f:
-            json.dump(self.training_history[-100:], f, indent=2)  # 保留最近100次
+            json.dump(self.training_history[-100:], f, indent=2)
