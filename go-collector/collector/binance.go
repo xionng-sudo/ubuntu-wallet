@@ -1,12 +1,16 @@
 package collector
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -19,6 +23,9 @@ type BinanceCollector struct {
 	apiSecret string
 	client    *http.Client
 	baseURL   string
+
+	mu                     sync.RWMutex
+	leaderboardUnavailable bool
 }
 
 // NewBinanceCollector creates a new Binance collector
@@ -33,7 +40,16 @@ func NewBinanceCollector(apiKey, apiSecret string) *BinanceCollector {
 	}
 }
 
-// binanceLeaderboardResp represents Binance leaderboard API response
+func (b *BinanceCollector) newJSONPost(url string, payload string) (*http.Request, error) {
+	req, err := http.NewRequest("POST", url, bytes.NewBufferString(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "ubuntu-wallet-go-collector/1.0")
+	return req, nil
+}
+
 type binanceLeaderboardResp struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -47,7 +63,6 @@ type binanceLeaderboardResp struct {
 	Success bool `json:"success"`
 }
 
-// binancePositionResp represents Binance position API response
 type binancePositionResp struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
@@ -67,42 +82,88 @@ type binancePositionResp struct {
 	Success bool `json:"success"`
 }
 
+func isMockBinanceTraderID(id string) bool {
+	return strings.HasPrefix(id, "bn_trader_")
+}
+
 // GetTopTraders fetches top traders from Binance Futures Leaderboard
 func (b *BinanceCollector) GetTopTraders(topN int) ([]models.Trader, error) {
+	// If we already know it's unavailable, skip network entirely.
+	b.mu.RLock()
+	unavailable := b.leaderboardUnavailable
+	b.mu.RUnlock()
+	if unavailable {
+		if allowMock() {
+			log.Debug("[Binance] leaderboard marked unavailable; using simulated traders")
+			return b.generateMockTraders(topN), nil
+		}
+		return nil, errors.New("[Binance] leaderboard marked unavailable")
+	}
+
 	log.Info("[Binance] Fetching top traders from leaderboard...")
 
 	url := fmt.Sprintf("%s/bapi/futures/v3/public/future/leaderboard/getLeaderboardRank", b.baseURL)
-
-	payload := fmt.Sprintf(`{
+	payload := `{
 		"isShared": true,
 		"isTrader": false,
 		"periodType": "DAILY",
 		"statisticsType": "ROI",
 		"tradeType": "PERPETUAL"
-	}`)
+	}`
 
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := b.newJSONPost(url, payload)
 	if err != nil {
 		return nil, fmt.Errorf("create request error: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	_ = payload // payload used in POST body
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request error: %w", err)
+		// Don't mark unavailable on transient network errors.
+		if allowMock() {
+			log.Warnf("[Binance] leaderboard request error: %v, using simulated data", err)
+			return b.generateMockTraders(topN), nil
+		}
+		return nil, fmt.Errorf("leaderboard request error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read body error: %w", err)
+		if allowMock() {
+			log.Warnf("[Binance] leaderboard read body error: %v, using simulated data", err)
+			return b.generateMockTraders(topN), nil
+		}
+		return nil, fmt.Errorf("leaderboard read body error: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		msg := fmt.Sprintf("[Binance] leaderboard status=%d body=%s", resp.StatusCode, truncateForLog(body, 1200))
+
+		// If it's 404, endpoint is likely unavailable in this region/routing; cache the state.
+		if resp.StatusCode == http.StatusNotFound {
+			b.mu.Lock()
+			b.leaderboardUnavailable = true
+			b.mu.Unlock()
+
+			log.Warn(msg + " (marking leaderboard unavailable)")
+		} else {
+			log.Warn(msg)
+		}
+
+		if allowMock() {
+			return b.generateMockTraders(topN), nil
+		}
+		return nil, errors.New(msg)
 	}
 
 	var result binanceLeaderboardResp
 	if err := json.Unmarshal(body, &result); err != nil {
-		log.Warn("[Binance] API response parsing failed, using simulated data")
-		return b.generateMockTraders(topN), nil
+		msg := fmt.Sprintf("[Binance] leaderboard JSON parse failed: %v body=%s", err, truncateForLog(body, 1200))
+		if allowMock() {
+			log.Warn(msg)
+			return b.generateMockTraders(topN), nil
+		}
+		return nil, errors.New(msg)
 	}
 
 	var traders []models.Trader
@@ -121,8 +182,13 @@ func (b *BinanceCollector) GetTopTraders(topN int) ([]models.Trader, error) {
 	}
 
 	if len(traders) == 0 {
-		log.Warn("[Binance] No traders from API, using simulated data")
-		return b.generateMockTraders(topN), nil
+		msg := fmt.Sprintf("[Binance] leaderboard returned 0 traders. code=%s success=%v msg=%s body=%s",
+			result.Code, result.Success, result.Message, truncateForLog(body, 1200))
+		if allowMock() {
+			log.Warn(msg)
+			return b.generateMockTraders(topN), nil
+		}
+		return nil, errors.New(msg)
 	}
 
 	log.Infof("[Binance] Fetched %d top traders", len(traders))
@@ -131,49 +197,75 @@ func (b *BinanceCollector) GetTopTraders(topN int) ([]models.Trader, error) {
 
 // GetTraderTrades fetches recent trades for a specific trader
 func (b *BinanceCollector) GetTraderTrades(traderID string, limit int) ([]models.Trade, error) {
+	// If traderID is mock, do NOT call Binance API (avoid 404 spam).
+	if isMockBinanceTraderID(traderID) {
+		if allowMock() {
+			return b.generateMockTrades(traderID, limit), nil
+		}
+		return nil, fmt.Errorf("[Binance] traderID=%s is mock; refusing to call Binance API", traderID)
+	}
+
 	log.Infof("[Binance] Fetching trades for trader %s", traderID)
 
 	url := fmt.Sprintf("%s/bapi/futures/v1/public/future/leaderboard/getOtherPosition", b.baseURL)
-
 	payload := fmt.Sprintf(`{
 		"encryptedUid": "%s",
 		"tradeType": "PERPETUAL"
 	}`, traderID)
 
-	req, err := http.NewRequest("POST", url, nil)
+	req, err := b.newJSONPost(url, payload)
 	if err != nil {
 		return nil, fmt.Errorf("create request error: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	_ = payload
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request error: %w", err)
+		if allowMock() {
+			log.Warnf("[Binance] position request error: %v, using simulated trades", err)
+			return b.generateMockTrades(traderID, limit), nil
+		}
+		return nil, fmt.Errorf("position request error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read body error: %w", err)
+		if allowMock() {
+			log.Warnf("[Binance] position read body error: %v, using simulated trades", err)
+			return b.generateMockTrades(traderID, limit), nil
+		}
+		return nil, fmt.Errorf("position read body error: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		msg := fmt.Sprintf("[Binance] position status=%d trader=%s body=%s", resp.StatusCode, traderID, truncateForLog(body, 1200))
+		if allowMock() {
+			log.Warn(msg)
+			return b.generateMockTrades(traderID, limit), nil
+		}
+		return nil, errors.New(msg)
 	}
 
 	var result binancePositionResp
 	if err := json.Unmarshal(body, &result); err != nil {
-		log.Warn("[Binance] Position API parsing failed, generating simulated trades")
-		return b.generateMockTrades(traderID, limit), nil
+		msg := fmt.Sprintf("[Binance] position JSON parse failed: %v body=%s", err, truncateForLog(body, 1200))
+		if allowMock() {
+			log.Warn(msg)
+			return b.generateMockTrades(traderID, limit), nil
+		}
+		return nil, errors.New(msg)
 	}
 
 	var trades []models.Trade
 	for _, p := range result.Data.OtherPositionRetList {
 		side := "BUY"
 		strategy := "LONG"
-		if p.TradeType == "SHORT" {
+		if strings.EqualFold(p.TradeType, "SHORT") {
 			side = "SELL"
 			strategy = "SHORT"
 		}
 		trades = append(trades, models.Trade{
-			TradeID:    fmt.Sprintf("bn_%s_%d", traderID[:8], p.UpdateTime),
+			TradeID:    fmt.Sprintf("bn_%s_%d", prefix(traderID, 8), p.UpdateTime),
 			TraderID:   traderID,
 			Exchange:   "binance",
 			Symbol:     p.Symbol,
@@ -191,7 +283,13 @@ func (b *BinanceCollector) GetTraderTrades(traderID string, limit int) ([]models
 	}
 
 	if len(trades) == 0 {
-		return b.generateMockTrades(traderID, limit), nil
+		msg := fmt.Sprintf("[Binance] position returned 0 trades. code=%s success=%v msg=%s body=%s",
+			result.Code, result.Success, result.Message, truncateForLog(body, 1200))
+		if allowMock() {
+			log.Warn(msg)
+			return b.generateMockTrades(traderID, limit), nil
+		}
+		return nil, errors.New(msg)
 	}
 
 	log.Infof("[Binance] Fetched %d trades for trader %s", len(trades), traderID)
@@ -292,7 +390,6 @@ func (b *BinanceCollector) GetCurrentPrice(symbol string) (*models.MarketData, e
 	}, nil
 }
 
-// generateMockTraders creates simulated trader data when API is unavailable
 func (b *BinanceCollector) generateMockTraders(n int) []models.Trader {
 	traders := make([]models.Trader, n)
 	for i := 0; i < n; i++ {
@@ -306,13 +403,10 @@ func (b *BinanceCollector) generateMockTraders(n int) []models.Trader {
 			TradeCount: 100 + i*10,
 		}
 	}
-	sort.Slice(traders, func(i, j int) bool {
-		return traders[i].ROI > traders[j].ROI
-	})
+	sort.Slice(traders, func(i, j int) bool { return traders[i].ROI > traders[j].ROI })
 	return traders
 }
 
-// generateMockTrades creates simulated trade data
 func (b *BinanceCollector) generateMockTrades(traderID string, n int) []models.Trade {
 	trades := make([]models.Trade, n)
 	basePrice := 2500.0
@@ -330,7 +424,7 @@ func (b *BinanceCollector) generateMockTrades(traderID string, n int) []models.T
 		}
 		openTime := now.Add(-time.Duration(i) * time.Hour)
 		trades[i] = models.Trade{
-			TradeID:    fmt.Sprintf("bn_%s_trade_%03d", traderID[:10], i+1),
+			TradeID:    fmt.Sprintf("bn_%s_trade_%03d", prefix(traderID, 10), i+1),
 			TraderID:   traderID,
 			Exchange:   "binance",
 			Symbol:     "ETHUSDT",
@@ -347,7 +441,6 @@ func (b *BinanceCollector) generateMockTrades(traderID string, n int) []models.T
 			UpdateTime: now,
 		}
 	}
-	// Mark first few as open (current)
 	for i := 0; i < 3 && i < len(trades); i++ {
 		trades[i].Status = "OPEN"
 		trades[i].CloseTime = time.Time{}
