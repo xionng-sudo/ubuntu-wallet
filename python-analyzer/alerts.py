@@ -17,12 +17,17 @@ class AlertManager:
         self.alerts = []
         self.alert_log_path = os.path.join(config.DATA_DIR, "alerts.json")
         self.cfg = config.ALERT_CONFIG
+
+        # ✅ 新增：冷却/去重，避免 dashboard interval 刷新导致重复写入同类提醒
+        self._last_sent = {}  # dedupe_key -> last_timestamp_epoch
+        self._cooldown_seconds = int(self.cfg.get("cooldown_seconds", 180))
+
         self._load_alerts()
 
     def check_signals(self, analysis: dict, prediction: dict, market_data: dict) -> list:
         """
         检查是否有需要发送的提醒
-        返回新的提醒列表
+        返回新的提醒列表（已去重、已保存的）
         """
         new_alerts = []
 
@@ -131,14 +136,25 @@ class AlertManager:
                 }
                 new_alerts.append(alert)
 
-        # 保存新提醒
+        # 保存新提醒（带去重/冷却）
+        saved_alerts = []
+        now_epoch = time.time()
+
         for alert in new_alerts:
+            dedupe_key = f"{alert.get('type', '')}|{alert.get('signal', '')}"
+            last_ts = float(self._last_sent.get(dedupe_key, 0))
+
+            if now_epoch - last_ts < self._cooldown_seconds:
+                continue
+
+            self._last_sent[dedupe_key] = now_epoch
             self.alerts.append(alert)
+            saved_alerts.append(alert)
             self._print_alert(alert)
 
         self._save_alerts()
 
-        return new_alerts
+        return saved_alerts
 
     def get_action_recommendation(self, analysis: dict, prediction: dict) -> dict:
         """
@@ -229,8 +245,8 @@ class AlertManager:
         color = colors.get(priority, "")
 
         print(f"\n{color}{'='*60}")
-        print(f"[{priority}] {alert['message']}")
-        print(f"时间: {alert['timestamp']}")
+        print(f"[{priority}] {alert.get('message', '')}")
+        print(f"时间: {alert.get('timestamp', '')}")
         print(f"{'='*60}{reset}\n")
 
     def _save_alerts(self):
