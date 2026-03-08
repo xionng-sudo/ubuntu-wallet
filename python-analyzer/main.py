@@ -52,7 +52,7 @@ class ETHPredictionSystem:
             "analysis": {},
             "price_levels": [],
             "market_data": {},
-            # 新增：按 timeframe 缓存不同周期的分析/预测，避免互相覆盖
+            # 新增��按 timeframe 缓存不同周期的分析/预测，避免互相覆盖
             "timeframes": {},
         }
 
@@ -240,16 +240,31 @@ class ETHPredictionSystem:
 
             tf_pack = self.cache["timeframes"].get(timeframe, {})
 
+            analysis = tf_pack.get("analysis", {}) or {}
+            prediction = tf_pack.get("prediction", {}) or {}
+            market_data = self.cache.get("market_data", {}) or {}
+
+            # ✅ 新增：dashboard 刷新时也生成 alerts（方案一：严格 new_alerts）
+            new_alerts = []
+            try:
+                new_alerts = self.alert_mgr.check_signals(analysis, prediction, market_data) or []
+            except Exception as e:
+                print(f"[SYSTEM] [DASH] alerts 检查失败: {e}")
+
             return {
                 # 优先返回该 timeframe 的 analyzed_df
                 "klines_df": tf_pack.get("klines_df", pd.DataFrame()),
-                "prediction": tf_pack.get("prediction", {}),
-                "analysis": tf_pack.get("analysis", {}),
+                "prediction": prediction,
+                "analysis": analysis,
                 # trader 数据仍走全局 cache（由 collect_data/auto_update 维护）
                 "traders_df": self.cache.get("traders_df", pd.DataFrame()),
                 "trades_df": self.cache.get("trades_df", pd.DataFrame()),
                 "price_levels": self.cache.get("price_levels", []),
-                "market_data": self.cache.get("market_data", {}),
+                "market_data": market_data,
+
+                # ✅ 新增：alerts 数据（历史 + 本次新增）
+                "alerts": self.alert_mgr.get_recent_alerts(200),
+                "new_alerts": new_alerts,
             }
 
         self.visualizer.start_dashboard(data_callback)
