@@ -74,6 +74,13 @@ ALERT_CONFIG = {
     "rsi_oversold": 30,
     "confidence_threshold": 0.7,      # 预测置信度>70%才发送信号
     "check_interval_seconds": 60,     # 每60秒检查一次
+
+    # ✅ 新增：提醒冷却时间（秒），避免 dashboard 刷新导致重复提醒
+    "cooldown_seconds": 180,
+
+    # ✅ 新增：按价格档位去重（方案3）
+    # 例如 bucket_size=10 表示：$3052 与 $3058 都会落在 $3050 档位
+    "dedupe_price_bucket_size": 10.0,
 }
 
 # === 可视化配置 ===
