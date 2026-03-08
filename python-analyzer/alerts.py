@@ -19,28 +19,38 @@ class AlertManager:
         self.alert_meta_path = os.path.join(config.DATA_DIR, "alerts_meta.json")
         self.cfg = config.ALERT_CONFIG
 
-        # ✅ 冷却/去重（持久化）
+        # ✅ 去重/冷却（持久化）
         # dedupe_key -> last_timestamp_epoch
         self._last_sent = {}
-        self._cooldown_seconds = int(self.cfg.get("cooldown_seconds", 180))
+        self._cooldown_seconds = int(self.cfg.get("cooldown_seconds", 180) or 180)
 
         # ✅ 方案3：按价格档位去重
-        self._price_bucket_size = float(self.cfg.get("dedupe_price_bucket_size", 10.0) or 10.0)
+        self._price_bucket_size = float(self.cfg.get("dedupe_price_bucket_size", 15.0) or 15.0)
         if self._price_bucket_size <= 0:
-            self._price_bucket_size = 10.0
+            self._price_bucket_size = 15.0
+
+        # ✅ PRICE_SPIKE 的 action 阈值（避免写死 5%）
+        self._price_spike_action_threshold = float(self.cfg.get("price_spike_action_threshold", 5.0) or 5.0)
+
+        # ✅ 节流：限制 check_signals 执行频率
+        self._last_check_ts = 0.0
+        self._check_interval_seconds = int(self.cfg.get("check_interval_seconds", 0) or 0)
 
         self._load_alerts()
         self._load_meta()
-
-    # ================================================================
-    # Public APIs
-    # ================================================================
 
     def check_signals(self, analysis: dict, prediction: dict, market_data: dict) -> list:
         """
         检查是否有需要发送的提醒
         返回新的提醒列表（已去重、已保存的）
         """
+        now_epoch = time.time()
+
+        # ✅ 节流：两次检查太近则直接跳过（返回空表示“本次没新增”）
+        if self._check_interval_seconds > 0 and (now_epoch - self._last_check_ts) < self._check_interval_seconds:
+            return []
+        self._last_check_ts = now_epoch
+
         new_alerts = []
 
         price = analysis.get("price", 0)
@@ -110,8 +120,10 @@ class AlertManager:
                 "signal": "BUY" if pred_direction == "UP" else "SELL",
                 "price": price,
                 "confidence": pred_confidence,
-                "message": (f"🤖 AI预测: {action} @ ${price:,.2f} "
-                           f"(置信度: {pred_confidence:.1%})"),
+                "message": (
+                    f"🤖 AI预测: {action} @ ${price:,.2f} "
+                    f"(置信度: {pred_confidence:.1%})"
+                ),
                 "timestamp": now_str,
                 "priority": "HIGH",
                 "details": prediction.get("details", {}),
@@ -137,9 +149,18 @@ class AlertManager:
             change = market_data.get("change_24h", 0)
             if abs(change) > self.cfg["price_change_threshold"]:
                 direction = "暴涨" if change > 0 else "暴跌"
+
+                # ✅ 不再写死 5%，用配置项
+                if change < -self._price_spike_action_threshold:
+                    sig = "BUY"
+                elif change > self._price_spike_action_threshold:
+                    sig = "SELL"
+                else:
+                    sig = "ALERT"
+
                 alert = {
                     "type": "PRICE_SPIKE",
-                    "signal": "BUY" if change < -5 else "SELL" if change > 5 else "ALERT",
+                    "signal": sig,
                     "price": price,
                     "change": change,
                     "message": f"💥 价格{direction}! 24h变化: {change:+.2f}% @ ${price:,.2f}",
@@ -150,7 +171,6 @@ class AlertManager:
 
         # 保存新提醒（带去重/冷却）
         saved_alerts = []
-        now_epoch = time.time()
 
         for alert in new_alerts:
             dedupe_key = self._make_dedupe_key(alert)
@@ -160,12 +180,10 @@ class AlertManager:
                 continue
 
             self._last_sent[dedupe_key] = now_epoch
-
             self.alerts.append(alert)
             saved_alerts.append(alert)
             self._print_alert(alert)
 
-        # ✅ 分开保存：alerts 内容 + meta(last_sent)
         self._save_alerts()
         self._save_meta()
 
@@ -245,18 +263,9 @@ class AlertManager:
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-    def get_recent_alerts(self, n: int = 20) -> list:
-        """获取最近 n 条提醒"""
-        return self.alerts[-n:]
-
-    # ================================================================
-    # Internals
-    # ================================================================
-
     def _make_dedupe_key(self, alert: dict) -> str:
         """
         方案3：type|signal|price_bucket
-        price_bucket 规则：按 bucket_size 向下取整
         """
         a_type = alert.get("type", "") or ""
         a_signal = alert.get("signal", "") or ""
@@ -272,9 +281,7 @@ class AlertManager:
 
     def _price_to_bucket(self, price: float) -> str:
         try:
-            # 向下取整到档位：例如 3058 -> 3050（bucket=10）
             b = (price // self._price_bucket_size) * self._price_bucket_size
-            # 用整数显示更干净（如果 bucket_size 是 10/50 这种）
             if abs(b - round(b)) < 1e-9:
                 return str(int(round(b)))
             return str(round(b, 6))
@@ -299,7 +306,6 @@ class AlertManager:
         print(f"{'='*60}{reset}\n")
 
     def _atomic_write_json(self, path: str, payload):
-        """原子写入 JSON，减少文件损坏风险"""
         tmp_path = f"{path}.tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -307,7 +313,7 @@ class AlertManager:
 
     def _save_alerts(self):
         """保存提醒到文件"""
-        recent = self.alerts[-500:]  # 只保留最近 500 条
+        recent = self.alerts[-500:]
         self._atomic_write_json(self.alert_log_path, recent)
 
     def _load_alerts(self):
@@ -316,20 +322,20 @@ class AlertManager:
             try:
                 with open(self.alert_log_path, "r", encoding="utf-8") as f:
                     self.alerts = json.load(f) or []
-            except Exception:
+            except Exception as e:
+                print(f"[AlertManager] 读取 alerts.json 失败: {e}")
                 self.alerts = []
 
     def _save_meta(self):
         """保存去重 meta（last_sent）"""
         try:
-            # 只保存最近一部分 key，避免无限增长
-            # 这里简单按时间排序截断
             items = []
             for k, ts in self._last_sent.items():
                 try:
-                    items.append((k, float(ts)))
+                    items.append((str(k), float(ts)))
                 except Exception:
                     continue
+
             items.sort(key=lambda x: x[1], reverse=True)
             limited = dict(items[:2000])
 
@@ -340,9 +346,8 @@ class AlertManager:
                 "last_sent": limited,
             }
             self._atomic_write_json(self.alert_meta_path, payload)
-        except Exception:
-            # meta 写失败不影响主流程
-            pass
+        except Exception as e:
+            print(f"[AlertManager] 保存 alerts_meta.json 失败: {e}")
 
     def _load_meta(self):
         """加载去重 meta（last_sent）"""
@@ -352,7 +357,7 @@ class AlertManager:
             with open(self.alert_meta_path, "r", encoding="utf-8") as f:
                 payload = json.load(f) or {}
             last_sent = payload.get("last_sent", {}) or {}
-            # 强制转换成 float
+
             cleaned = {}
             for k, ts in last_sent.items():
                 try:
@@ -360,5 +365,10 @@ class AlertManager:
                 except Exception:
                     continue
             self._last_sent = cleaned
-        except Exception:
+        except Exception as e:
+            print(f"[AlertManager] 读取 alerts_meta.json 失败: {e}")
             self._last_sent = {}
+
+    def get_recent_alerts(self, n: int = 20) -> list:
+        """获取最近 n 条提醒"""
+        return self.alerts[-n:]
