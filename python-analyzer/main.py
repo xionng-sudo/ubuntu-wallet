@@ -52,7 +52,7 @@ class ETHPredictionSystem:
             "analysis": {},
             "price_levels": [],
             "market_data": {},
-            # 新增��按 timeframe 缓存不同周期的分析/预测，避免互相覆盖
+            # 新增：按 timeframe 缓存不同周期的分析/预测，避免互相覆盖
             "timeframes": {},
         }
 
@@ -151,7 +151,7 @@ class ETHPredictionSystem:
 
         df = self.cache.get("analyzed_df")
         if df is None or df.empty:
-            print("[SYSTEM] ���分析数据可预测")
+            print("[SYSTEM] 无分析数据可预测")
             return
 
         if not self.predictor.is_trained:
@@ -186,9 +186,9 @@ class ETHPredictionSystem:
         print(f"  - 买方权重: {recommendation['buy_score']:.1f}")
         print(f"  - 卖方权重: {recommendation['sell_score']:.1f}")
 
-        # 检查提醒
+        # 检查提醒（✅ 传入 timeframe，用于去重 key）
         market_data = self.cache.get("market_data", {})
-        self.alert_mgr.check_signals(analysis, prediction, market_data)
+        self.alert_mgr.check_signals(analysis, prediction, market_data, timeframe="1h")
 
         return prediction
 
@@ -244,10 +244,12 @@ class ETHPredictionSystem:
             prediction = tf_pack.get("prediction", {}) or {}
             market_data = self.cache.get("market_data", {}) or {}
 
-            # ✅ 新增：dashboard 刷新时也生成 alerts（方案一：严格 new_alerts）
+            # ✅ dashboard 刷新时也生成 alerts（传入 timeframe，用于去重 key）
             new_alerts = []
             try:
-                new_alerts = self.alert_mgr.check_signals(analysis, prediction, market_data) or []
+                new_alerts = self.alert_mgr.check_signals(
+                    analysis, prediction, market_data, timeframe=timeframe
+                ) or []
             except Exception as e:
                 print(f"[SYSTEM] [DASH] alerts 检查失败: {e}")
 
@@ -261,8 +263,6 @@ class ETHPredictionSystem:
                 "trades_df": self.cache.get("trades_df", pd.DataFrame()),
                 "price_levels": self.cache.get("price_levels", []),
                 "market_data": market_data,
-
-                # ✅ 新增：alerts 数据（历史 + 本次新增）
                 "alerts": self.alert_mgr.get_recent_alerts(200),
                 "new_alerts": new_alerts,
             }
@@ -277,6 +277,7 @@ class ETHPredictionSystem:
 
     def run_auto_update(self, interval: int = 300):
         """后台自动更新循环"""
+
         def update_loop():
             while True:
                 try:
