@@ -17,7 +17,6 @@ import (
 )
 
 const (
-	// ✅ 默认值保持不变：仍然是 ../data
 	defaultDataDir = "../data"
 
 	topN       = 50
@@ -77,8 +76,6 @@ func main() {
 		log.Infof("ALLOW_MOCK=%s", v)
 	}
 
-	// ✅ 从环境变量读取数据目录（与 Python 统一）
-	// 仍然兼容旧行为：没配置则用 ../data
 	dataDir := envOrDefault("DATA_DIR", defaultDataDir)
 	log.Infof("DATA_DIR=%s", dataDir)
 
@@ -136,8 +133,6 @@ func collectBinanceData(bn *collector.BinanceCollector) {
 	store.Traders["binance"] = traders
 	store.mu.Unlock()
 
-	// When Binance leaderboard is unavailable, bn returns simulated traders and we skip fetching trades.
-	// (Market data still comes from Binance via the public api.binance.com endpoints.)
 	if len(traders) > 0 && len(traders[0].TraderID) >= 9 && traders[0].TraderID[:9] == "bn_trader" {
 		log.Warn("[Binance] Traders look like simulated data; skipping Binance trade fetch")
 		return
@@ -185,8 +180,6 @@ func collectOKXData(okx *collector.OKXCollector) {
 			store.mu.Lock()
 			store.Trades[j.traderID] = trades
 			store.mu.Unlock()
-
-			// soft rate limiting
 			time.Sleep(okxRateSleep)
 		}
 	}
@@ -395,10 +388,46 @@ func handleTraders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, store.Traders)
 }
 
+// ? NEW: build a traderID set for an exchange
+func traderIDsForExchangeLocked(exchange string) map[string]struct{} {
+	out := make(map[string]struct{})
+	trs := store.Traders[exchange]
+	for _, t := range trs {
+		if t.TraderID == "" {
+			continue
+		}
+		out[t.TraderID] = struct{}{}
+	}
+	return out
+}
+
 func handleTrades(w http.ResponseWriter, r *http.Request) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	writeJSON(w, store.Trades)
+
+	exchange := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("exchange")))
+	if exchange == "" {
+		// Backward compatible: return all trades
+		writeJSON(w, store.Trades)
+		return
+	}
+
+	ids := traderIDsForExchangeLocked(exchange)
+	if len(ids) == 0 {
+		// Unknown exchange or no traders yet -> empty map
+		writeJSON(w, map[string][]models.Trade{})
+		return
+	}
+
+	filtered := make(map[string][]models.Trade)
+	for traderID, trades := range store.Trades {
+		if _, ok := ids[traderID]; !ok {
+			continue
+		}
+		filtered[traderID] = trades
+	}
+
+	writeJSON(w, filtered)
 }
 
 func handlePriceLevels(w http.ResponseWriter, r *http.Request) {
