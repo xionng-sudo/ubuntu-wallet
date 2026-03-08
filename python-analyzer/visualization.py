@@ -625,6 +625,58 @@ class Visualization:
                     ],
                     className="mb-4",
                 ),
+
+                # ✅ 新增：Alerts 面板（独立一行 + 中英文切换 + New/Historical）
+                dbc.Row(
+                    [
+                        dbc.Col(
+                            [
+                                html.H3("🚨 Alerts / 预警提醒", className="text-center"),
+
+                                dbc.Row(
+                                    [
+                                        dbc.Col(
+                                            dbc.ButtonGroup(
+                                                [
+                                                    dbc.Button("中文", id="btn-lang-zh", color="primary", size="sm", n_clicks=0),
+                                                    dbc.Button("English", id="btn-lang-en", color="outline-primary", size="sm", n_clicks=0),
+                                                ],
+                                                className="mb-2",
+                                            ),
+                                            className="text-center",
+                                            width=12,
+                                        )
+                                    ]
+                                ),
+
+                                html.Div(id="alerts-summary"),
+                                html.Hr(),
+
+                                dbc.Row(
+                                    [
+                                        dbc.Col(
+                                            [
+                                                html.H4("New Alerts（本次刷新新增）", className="text-center"),
+                                                html.Div(id="new-alerts-table"),
+                                            ],
+                                            width=6,
+                                        ),
+                                        dbc.Col(
+                                            [
+                                                html.H4("Recent Alerts（历史记录）", className="text-center"),
+                                                html.Div(id="alerts-table"),
+                                            ],
+                                            width=6,
+                                        ),
+                                    ]
+                                ),
+                            ],
+                            width=12,
+                        )
+                    ],
+                    className="mb-4",
+                ),
+
                 dbc.Row(
                     [
                         dbc.Col(
@@ -663,6 +715,9 @@ class Visualization:
                     n_intervals=0,
                 ),
                 dcc.Store(id="selected-timeframe", data="1h"),
+
+                # ✅ 新增：alerts 语言 store
+                dcc.Store(id="alerts-lang", data="zh"),
             ],
             fluid=True,
             className="bg-dark",
@@ -714,7 +769,32 @@ class Visualization:
 
             return (tf, c("1m"), c("5m"), c("15m"), c("1h"), c("4h"), c("1d"))
 
-        # 2) 主仪表板刷新：interval + selected-timeframe + selected-trader-id
+        # ✅ 1.5) Alerts 语言切换：按钮 -> Store + 按钮颜色
+        @self.app.callback(
+            [
+                Output("alerts-lang", "data"),
+                Output("btn-lang-zh", "color"),
+                Output("btn-lang-en", "color"),
+            ],
+            [
+                Input("btn-lang-zh", "n_clicks"),
+                Input("btn-lang-en", "n_clicks"),
+            ],
+            [State("alerts-lang", "data")],
+        )
+        def select_alerts_lang(nzh, nen, current_lang):
+            triggered = callback_context.triggered[0]["prop_id"] if callback_context.triggered else ""
+            lang = current_lang or "zh"
+            if triggered == "btn-lang-zh.n_clicks":
+                lang = "zh"
+            elif triggered == "btn-lang-en.n_clicks":
+                lang = "en"
+
+            zh_color = "primary" if lang == "zh" else "outline-primary"
+            en_color = "primary" if lang == "en" else "outline-primary"
+            return lang, zh_color, en_color
+
+        # 2) 主仪表板刷新：interval + selected-timeframe + selected-trader-id + alerts-lang
         @self.app.callback(
             [
                 Output("current-price", "children"),
@@ -737,17 +817,24 @@ class Visualization:
                 Output("trader-table", "children"),
                 Output("selected-trader-id", "options"),
                 Output("trade-records-table", "children"),
+
+                # ✅ 新增：Alerts 输出（追加在末尾）
+                Output("alerts-summary", "children"),
+                Output("new-alerts-table", "children"),
+                Output("alerts-table", "children"),
             ],
             [
                 Input("interval-component", "n_intervals"),
                 Input("selected-timeframe", "data"),
                 Input("selected-trader-id", "value"),
+                Input("alerts-lang", "data"),
             ],
         )
-        def update_dashboard(n, timeframe, selected_trader_id):
+        def update_dashboard(n, timeframe, selected_trader_id, alerts_lang):
+            lang = alerts_lang or "zh"
+
             data = {}
             if data_callback:
-                # 关键：把 timeframe 传给回调，让后端重新拉对应周期K线
                 data = data_callback(timeframe=timeframe or "1h")
 
             df = data.get("klines_df", pd.DataFrame())
@@ -757,6 +844,10 @@ class Visualization:
             trades_df = data.get("trades_df", pd.DataFrame())
             price_levels = data.get("price_levels", [])
             market = data.get("market_data", {})
+
+            # ✅ Alerts（历史 + 本次新增）
+            alerts = data.get("alerts", []) or []
+            new_alerts = data.get("new_alerts", []) or []
 
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -833,6 +924,11 @@ class Visualization:
                     page_size=20,
                 )
 
+            # ✅ Alerts 视图（带语言切换）
+            alerts_summary = self._create_alerts_summary(new_alerts=new_alerts, alerts=alerts, lang=lang)
+            new_alerts_table = self._create_alerts_table(new_alerts, lang=lang, title_prefix="NEW")
+            alerts_table = self._create_alerts_table(alerts, lang=lang, title_prefix="HISTORY")
+
             return (
                 price_text,
                 html.Span(change_text, className=change_color),
@@ -854,6 +950,11 @@ class Visualization:
                 trader_table,
                 trader_options,
                 trade_records_view,
+
+                # ✅ 追加 Alerts
+                alerts_summary,
+                new_alerts_table,
+                alerts_table,
             )
 
     def _create_signal_table(self, df: pd.DataFrame):
@@ -911,6 +1012,193 @@ class Visualization:
             style_header={"backgroundColor": "#404040", "fontWeight": "bold"},
             sort_action="native",
             page_size=15,
+        )
+
+    # ================================================================
+    # ✅ Alerts helpers
+    # ================================================================
+
+    def _create_alerts_summary(self, new_alerts: list, alerts: list, lang: str = "zh"):
+        """顶部汇总条：突出显示本次新增数量和最高级别（颜色依然按英文 priority）"""
+        if not new_alerts:
+            text = "本次刷新无新增 alerts" if lang == "zh" else "No new alerts in this refresh."
+            return html.Div(
+                text,
+                style={
+                    "padding": "10px",
+                    "backgroundColor": "rgba(38,166,154,0.10)",
+                    "border": "1px solid rgba(38,166,154,0.35)",
+                    "borderRadius": "6px",
+                    "textAlign": "center",
+                },
+            )
+
+        priorities = [a.get("priority", "LOW") for a in new_alerts]
+        order = {"CRITICAL": 3, "HIGH": 2, "MEDIUM": 1, "LOW": 0}
+        top = sorted(priorities, key=lambda p: order.get(p, 0), reverse=True)[0]
+
+        priority_zh = {"CRITICAL": "紧急", "HIGH": "高", "MEDIUM": "中", "LOW": "低"}
+        top_display = priority_zh.get(top, top) if lang == "zh" else top
+
+        color_map = {
+            "CRITICAL": "rgba(255,23,68,0.18)",
+            "HIGH": "rgba(255,193,7,0.16)",
+            "MEDIUM": "rgba(3,169,244,0.14)",
+            "LOW": "rgba(76,175,80,0.12)",
+        }
+        border_map = {
+            "CRITICAL": "rgba(255,23,68,0.55)",
+            "HIGH": "rgba(255,193,7,0.55)",
+            "MEDIUM": "rgba(3,169,244,0.55)",
+            "LOW": "rgba(76,175,80,0.55)",
+        }
+
+        if lang == "zh":
+            text = f"本次新增 {len(new_alerts)} 条 | 最高级别: {top_display} | 历史缓存: {len(alerts)} 条"
+        else:
+            text = f"New: {len(new_alerts)} | Top priority: {top_display} | Cached: {len(alerts)}"
+
+        return html.Div(
+            text,
+            style={
+                "padding": "10px",
+                "backgroundColor": color_map.get(top, "rgba(255,255,255,0.06)"),
+                "border": f"1px solid {border_map.get(top, 'rgba(255,255,255,0.2)')}",
+                "borderRadius": "6px",
+                "textAlign": "center",
+                "fontWeight": "bold",
+            },
+        )
+
+    def _create_alerts_table(self, alerts: list, lang: str = "zh", title_prefix: str = ""):
+        """动态列 Alerts 表格：展示尽量所有字段；额外用 priority_raw 做高亮以适配中英文切换"""
+        if not alerts:
+            return html.P("暂无数据" if lang == "zh" else "No data")
+
+        rows = list(alerts)[::-1]
+
+        keys = set()
+        for a in rows:
+            if isinstance(a, dict):
+                keys.update(a.keys())
+
+        keys.add("priority_raw")
+
+        preferred = ["timestamp", "priority", "type", "signal", "price", "message"]
+        rest = [k for k in sorted(keys) if k not in preferred]
+        columns = preferred + rest
+
+        col_zh = {
+            "timestamp": "时间",
+            "priority": "级别",
+            "type": "类型",
+            "signal": "信号",
+            "price": "价格",
+            "message": "内容",
+            "score": "强度",
+            "rsi": "RSI",
+            "confidence": "置信度",
+            "details": "细节",
+            "volume_ratio": "成交量倍数",
+            "change": "24h涨跌幅(%)",
+            "priority_raw": "priority_raw",
+        }
+        col_en = {k: k for k in columns}
+
+        priority_zh = {"CRITICAL": "紧急", "HIGH": "高", "MEDIUM": "中", "LOW": "低"}
+        signal_zh = {
+            "BUY": "买入",
+            "SELL": "卖出",
+            "HOLD": "观望",
+            "ALERT": "提示",
+            "STRONG_BUY": "强买入",
+            "STRONG_SELL": "强卖出",
+        }
+        type_zh = {
+            "TECHNICAL_SIGNAL": "技术信号",
+            "RSI_OVERBOUGHT": "RSI超买",
+            "RSI_OVERSOLD": "RSI超卖",
+            "ML_PREDICTION": "机器学习预测",
+            "VOLUME_SPIKE": "成交量异常",
+            "PRICE_SPIKE": "价格异动",
+        }
+
+        normalized = []
+        for a in rows:
+            if not isinstance(a, dict):
+                continue
+
+            raw_p = a.get("priority", "")
+
+            r = {}
+            for k in columns:
+                if k == "priority_raw":
+                    v = raw_p
+                else:
+                    v = a.get(k, "")
+
+                if isinstance(v, (dict, list)):
+                    try:
+                        v = json.dumps(v, ensure_ascii=False)
+                    except Exception:
+                        v = str(v)
+
+                if lang == "zh":
+                    if k == "priority" and isinstance(v, str):
+                        v = priority_zh.get(v, v)
+                    elif k == "signal" and isinstance(v, str):
+                        v = signal_zh.get(v, v)
+                    elif k == "type" and isinstance(v, str):
+                        v = type_zh.get(v, v)
+
+                r[k] = v
+
+            normalized.append(r)
+
+        df = pd.DataFrame(normalized)
+
+        if "price" in df.columns:
+            def fmt_price(x):
+                try:
+                    return f"${float(x):,.2f}"
+                except Exception:
+                    return str(x or "")
+            df["price"] = df["price"].apply(fmt_price)
+
+        visible_cols = [c for c in df.columns if c != "priority_raw"]
+
+        if lang == "zh":
+            dash_columns = [{"name": col_zh.get(c, c), "id": c} for c in visible_cols]
+        else:
+            dash_columns = [{"name": col_en.get(c, c), "id": c} for c in visible_cols]
+
+        return dash_table.DataTable(
+            data=df.to_dict("records"),
+            columns=dash_columns,
+            hidden_columns=["priority_raw"],
+            style_table={"overflowX": "auto", "maxHeight": "420px", "overflowY": "auto"},
+            style_cell={
+                "textAlign": "left",
+                "backgroundColor": "#303030",
+                "color": "white",
+                "padding": "6px",
+                "fontSize": "12px",
+                "minWidth": "80px",
+                "maxWidth": "420px",
+                "whiteSpace": "normal",
+                "height": "auto",
+            },
+            style_header={"backgroundColor": "#404040", "fontWeight": "bold"},
+            style_data_conditional=[
+                {"if": {"filter_query": '{priority_raw} = "CRITICAL"'}, "backgroundColor": "rgba(255, 23, 68, 0.22)"},
+                {"if": {"filter_query": '{priority_raw} = "HIGH"'}, "backgroundColor": "rgba(255, 193, 7, 0.18)"},
+                {"if": {"filter_query": '{priority_raw} = "MEDIUM"'}, "backgroundColor": "rgba(3, 169, 244, 0.14)"},
+                {"if": {"filter_query": '{priority_raw} = "LOW"'}, "backgroundColor": "rgba(76, 175, 80, 0.12)"},
+            ],
+            filter_action="native",
+            sort_action="native",
+            page_action="native",
+            page_size=10 if title_prefix == "NEW" else 15,
         )
 
     def save_charts(self, charts: dict, output_dir: str = None):
