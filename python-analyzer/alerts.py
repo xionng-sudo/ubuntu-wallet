@@ -16,13 +16,25 @@ class AlertManager:
     def __init__(self):
         self.alerts = []
         self.alert_log_path = os.path.join(config.DATA_DIR, "alerts.json")
+        self.alert_meta_path = os.path.join(config.DATA_DIR, "alerts_meta.json")
         self.cfg = config.ALERT_CONFIG
 
-        # ✅ 新增：冷却/去重，避免 dashboard interval 刷新导致重复写入同类提醒
-        self._last_sent = {}  # dedupe_key -> last_timestamp_epoch
+        # ✅ 冷却/去重（持久化）
+        # dedupe_key -> last_timestamp_epoch
+        self._last_sent = {}
         self._cooldown_seconds = int(self.cfg.get("cooldown_seconds", 180))
 
+        # ✅ 方案3：按价格档位去重
+        self._price_bucket_size = float(self.cfg.get("dedupe_price_bucket_size", 10.0) or 10.0)
+        if self._price_bucket_size <= 0:
+            self._price_bucket_size = 10.0
+
         self._load_alerts()
+        self._load_meta()
+
+    # ================================================================
+    # Public APIs
+    # ================================================================
 
     def check_signals(self, analysis: dict, prediction: dict, market_data: dict) -> list:
         """
@@ -141,18 +153,21 @@ class AlertManager:
         now_epoch = time.time()
 
         for alert in new_alerts:
-            dedupe_key = f"{alert.get('type', '')}|{alert.get('signal', '')}"
+            dedupe_key = self._make_dedupe_key(alert)
             last_ts = float(self._last_sent.get(dedupe_key, 0))
 
             if now_epoch - last_ts < self._cooldown_seconds:
                 continue
 
             self._last_sent[dedupe_key] = now_epoch
+
             self.alerts.append(alert)
             saved_alerts.append(alert)
             self._print_alert(alert)
 
+        # ✅ 分开保存：alerts 内容 + meta(last_sent)
         self._save_alerts()
+        self._save_meta()
 
         return saved_alerts
 
@@ -167,7 +182,6 @@ class AlertManager:
         pred_confidence = prediction.get("confidence", 0)
         price = analysis.get("price", 0)
 
-        # 综合评分
         buy_score = 0
         sell_score = 0
 
@@ -194,7 +208,6 @@ class AlertManager:
         elif pred_direction == "DOWN":
             sell_score += pred_confidence * 10
 
-        # 决策
         total = buy_score + sell_score
         if total == 0:
             return {
@@ -232,6 +245,42 @@ class AlertManager:
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
 
+    def get_recent_alerts(self, n: int = 20) -> list:
+        """获取最近 n 条提醒"""
+        return self.alerts[-n:]
+
+    # ================================================================
+    # Internals
+    # ================================================================
+
+    def _make_dedupe_key(self, alert: dict) -> str:
+        """
+        方案3：type|signal|price_bucket
+        price_bucket 规则：按 bucket_size 向下取整
+        """
+        a_type = alert.get("type", "") or ""
+        a_signal = alert.get("signal", "") or ""
+
+        price = alert.get("price", 0)
+        try:
+            price = float(price or 0.0)
+        except Exception:
+            price = 0.0
+
+        bucket = self._price_to_bucket(price)
+        return f"{a_type}|{a_signal}|{bucket}"
+
+    def _price_to_bucket(self, price: float) -> str:
+        try:
+            # 向下取整到档位：例如 3058 -> 3050（bucket=10）
+            b = (price // self._price_bucket_size) * self._price_bucket_size
+            # 用整数显示更干净（如果 bucket_size 是 10/50 这种）
+            if abs(b - round(b)) < 1e-9:
+                return str(int(round(b)))
+            return str(round(b, 6))
+        except Exception:
+            return "0"
+
     def _print_alert(self, alert: dict):
         """在终端打印提醒"""
         priority = alert.get("priority", "LOW")
@@ -249,22 +298,67 @@ class AlertManager:
         print(f"时间: {alert.get('timestamp', '')}")
         print(f"{'='*60}{reset}\n")
 
+    def _atomic_write_json(self, path: str, payload):
+        """原子写入 JSON，减少文件损坏风险"""
+        tmp_path = f"{path}.tmp"
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
+
     def _save_alerts(self):
         """保存提醒到文件"""
-        # 只保留最近 500 条
-        recent = self.alerts[-500:]
-        with open(self.alert_log_path, "w") as f:
-            json.dump(recent, f, indent=2, ensure_ascii=False)
+        recent = self.alerts[-500:]  # 只保留最近 500 条
+        self._atomic_write_json(self.alert_log_path, recent)
 
     def _load_alerts(self):
         """从文件加载历史提醒"""
         if os.path.exists(self.alert_log_path):
             try:
-                with open(self.alert_log_path, "r") as f:
-                    self.alerts = json.load(f)
+                with open(self.alert_log_path, "r", encoding="utf-8") as f:
+                    self.alerts = json.load(f) or []
             except Exception:
                 self.alerts = []
 
-    def get_recent_alerts(self, n: int = 20) -> list:
-        """获取最近 n 条提醒"""
-        return self.alerts[-n:]
+    def _save_meta(self):
+        """保存去重 meta（last_sent）"""
+        try:
+            # 只保存最近一部分 key，避免无限增长
+            # 这里简单按时间排序截断
+            items = []
+            for k, ts in self._last_sent.items():
+                try:
+                    items.append((k, float(ts)))
+                except Exception:
+                    continue
+            items.sort(key=lambda x: x[1], reverse=True)
+            limited = dict(items[:2000])
+
+            payload = {
+                "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "cooldown_seconds": self._cooldown_seconds,
+                "dedupe_price_bucket_size": self._price_bucket_size,
+                "last_sent": limited,
+            }
+            self._atomic_write_json(self.alert_meta_path, payload)
+        except Exception:
+            # meta 写失败不影响主流程
+            pass
+
+    def _load_meta(self):
+        """加载去重 meta（last_sent）"""
+        if not os.path.exists(self.alert_meta_path):
+            return
+        try:
+            with open(self.alert_meta_path, "r", encoding="utf-8") as f:
+                payload = json.load(f) or {}
+            last_sent = payload.get("last_sent", {}) or {}
+            # 强制转换成 float
+            cleaned = {}
+            for k, ts in last_sent.items():
+                try:
+                    cleaned[str(k)] = float(ts)
+                except Exception:
+                    continue
+            self._last_sent = cleaned
+        except Exception:
+            self._last_sent = {}
