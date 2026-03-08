@@ -19,37 +19,55 @@ class AlertManager:
         self.alert_meta_path = os.path.join(config.DATA_DIR, "alerts_meta.json")
         self.cfg = config.ALERT_CONFIG
 
-        # ✅ 去重/冷却（持久化）
         # dedupe_key -> last_timestamp_epoch
         self._last_sent = {}
-        self._cooldown_seconds = int(self.cfg.get("cooldown_seconds", 180) or 180)
 
-        # ✅ 方案3：按价格档位去重
+        # 全局冷却（兜底）
+        self._cooldown_seconds_default = int(self.cfg.get("cooldown_seconds", 180) or 180)
+        # 按类型冷却（可选）
+        self._cooldown_by_type = self.cfg.get("cooldown_seconds_by_type", {}) or {}
+
+        # 按价格档位去重
         self._price_bucket_size = float(self.cfg.get("dedupe_price_bucket_size", 15.0) or 15.0)
         if self._price_bucket_size <= 0:
             self._price_bucket_size = 15.0
 
-        # ✅ PRICE_SPIKE 的 action 阈值（避免写死 5%）
+        # PRICE_SPIKE 的 action 阈值
         self._price_spike_action_threshold = float(self.cfg.get("price_spike_action_threshold", 5.0) or 5.0)
 
-        # ✅ 节流：限制 check_signals 执行频率
+        # 节流：限制 check_signals 执行频率
         self._last_check_ts = 0.0
         self._check_interval_seconds = int(self.cfg.get("check_interval_seconds", 0) or 0)
 
         self._load_alerts()
         self._load_meta()
 
-    def check_signals(self, analysis: dict, prediction: dict, market_data: dict) -> list:
+    def _cooldown_for_alert(self, alert: dict) -> int:
+        a_type = str(alert.get("type", "") or "")
+        v = self._cooldown_by_type.get(a_type, None)
+        try:
+            if v is None:
+                return self._cooldown_seconds_default
+            v = int(v)
+            if v <= 0:
+                return 0
+            return v
+        except Exception:
+            return self._cooldown_seconds_default
+
+    def check_signals(self, analysis: dict, prediction: dict, market_data: dict, timeframe: str = "1h") -> list:
         """
         检查是否有需要发送的提醒
         返回新的提醒列表（已去重、已保存的）
         """
         now_epoch = time.time()
 
-        # ✅ 节流：两次检查太近则直接跳过（返回空表示“本次没新增”）
+        # 节流
         if self._check_interval_seconds > 0 and (now_epoch - self._last_check_ts) < self._check_interval_seconds:
             return []
         self._last_check_ts = now_epoch
+
+        tf = (timeframe or "1h").strip() or "1h"
 
         new_alerts = []
 
@@ -60,97 +78,102 @@ class AlertManager:
         pred_direction = prediction.get("direction", "HOLD")
         pred_confidence = prediction.get("confidence", 0)
 
-        now = datetime.now()
-        now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # ─── 1. 技术分析信号 ───
+        # 1) 技术分析信号
         if signal in ["STRONG_BUY", "STRONG_SELL"]:
-            alert = {
-                "type": "TECHNICAL_SIGNAL",
-                "signal": signal,
-                "price": price,
-                "score": signal_score,
-                "message": f"⚡ 强信号! {signal} @ ${price:,.2f} (强度: {signal_score:.1f})",
-                "timestamp": now_str,
-                "priority": "HIGH",
-            }
-            new_alerts.append(alert)
-
+            new_alerts.append(
+                {
+                    "type": "TECHNICAL_SIGNAL",
+                    "signal": signal,
+                    "price": price,
+                    "score": signal_score,
+                    "timeframe": tf,
+                    "message": f"⚡ 强信号! {signal} [{tf}] @ ${price:,.2f} (强度: {signal_score:.1f})",
+                    "timestamp": now_str,
+                    "priority": "HIGH",
+                }
+            )
         elif signal in ["BUY", "SELL"]:
-            alert = {
-                "type": "TECHNICAL_SIGNAL",
-                "signal": signal,
-                "price": price,
-                "score": signal_score,
-                "message": f"📊 信号: {signal} @ ${price:,.2f} (强度: {signal_score:.1f})",
-                "timestamp": now_str,
-                "priority": "MEDIUM",
-            }
-            new_alerts.append(alert)
+            new_alerts.append(
+                {
+                    "type": "TECHNICAL_SIGNAL",
+                    "signal": signal,
+                    "price": price,
+                    "score": signal_score,
+                    "timeframe": tf,
+                    "message": f"📊 信号: {signal} [{tf}] @ ${price:,.2f} (强度: {signal_score:.1f})",
+                    "timestamp": now_str,
+                    "priority": "MEDIUM",
+                }
+            )
 
-        # ─── 2. RSI 超买超卖 ───
+        # 2) RSI 超买超卖
         if rsi and rsi > self.cfg["rsi_overbought"]:
-            alert = {
-                "type": "RSI_OVERBOUGHT",
-                "signal": "SELL",
-                "price": price,
-                "rsi": rsi,
-                "message": f"🔴 RSI 超买! RSI={rsi:.1f} @ ${price:,.2f} - 考虑卖出",
-                "timestamp": now_str,
-                "priority": "HIGH",
-            }
-            new_alerts.append(alert)
+            new_alerts.append(
+                {
+                    "type": "RSI_OVERBOUGHT",
+                    "signal": "SELL",
+                    "price": price,
+                    "rsi": rsi,
+                    "timeframe": tf,
+                    "message": f"🔴 RSI 超买! RSI={rsi:.1f} [{tf}] @ ${price:,.2f} - 考虑卖出",
+                    "timestamp": now_str,
+                    "priority": "HIGH",
+                }
+            )
         elif rsi and rsi < self.cfg["rsi_oversold"]:
-            alert = {
-                "type": "RSI_OVERSOLD",
-                "signal": "BUY",
-                "price": price,
-                "rsi": rsi,
-                "message": f"🟢 RSI 超卖! RSI={rsi:.1f} @ ${price:,.2f} - 考虑买入",
-                "timestamp": now_str,
-                "priority": "HIGH",
-            }
-            new_alerts.append(alert)
+            new_alerts.append(
+                {
+                    "type": "RSI_OVERSOLD",
+                    "signal": "BUY",
+                    "price": price,
+                    "rsi": rsi,
+                    "timeframe": tf,
+                    "message": f"🟢 RSI 超卖! RSI={rsi:.1f} [{tf}] @ ${price:,.2f} - 考虑买入",
+                    "timestamp": now_str,
+                    "priority": "HIGH",
+                }
+            )
 
-        # ─── 3. ML 预测信号 ───
+        # 3) ML 预测信号
         if pred_confidence >= self.cfg["confidence_threshold"]:
             action = "🟢 买入" if pred_direction == "UP" else "🔴 卖出"
-            alert = {
-                "type": "ML_PREDICTION",
-                "signal": "BUY" if pred_direction == "UP" else "SELL",
-                "price": price,
-                "confidence": pred_confidence,
-                "message": (
-                    f"🤖 AI预测: {action} @ ${price:,.2f} "
-                    f"(置信度: {pred_confidence:.1%})"
-                ),
-                "timestamp": now_str,
-                "priority": "HIGH",
-                "details": prediction.get("details", {}),
-            }
-            new_alerts.append(alert)
+            new_alerts.append(
+                {
+                    "type": "ML_PREDICTION",
+                    "signal": "BUY" if pred_direction == "UP" else "SELL",
+                    "price": price,
+                    "confidence": pred_confidence,
+                    "timeframe": tf,
+                    "message": f"🤖 AI预测: {action} [{tf}] @ ${price:,.2f} (置信度: {pred_confidence:.1%})",
+                    "timestamp": now_str,
+                    "priority": "HIGH",
+                    "details": prediction.get("details", {}),
+                }
+            )
 
-        # ─── 4. 成交量异常 ───
+        # 4) 成交量异常
         vol_ratio = analysis.get("volume_ratio", 1.0)
         if vol_ratio and vol_ratio > self.cfg["volume_spike_threshold"]:
-            alert = {
-                "type": "VOLUME_SPIKE",
-                "signal": "ALERT",
-                "price": price,
-                "volume_ratio": vol_ratio,
-                "message": f"📈 成交量异常! 当前为均值的 {vol_ratio:.1f}x @ ${price:,.2f}",
-                "timestamp": now_str,
-                "priority": "MEDIUM",
-            }
-            new_alerts.append(alert)
+            new_alerts.append(
+                {
+                    "type": "VOLUME_SPIKE",
+                    "signal": "ALERT",
+                    "price": price,
+                    "volume_ratio": vol_ratio,
+                    "timeframe": tf,
+                    "message": f"📈 成交量异常! [{tf}] 当前为均值的 {vol_ratio:.1f}x @ ${price:,.2f}",
+                    "timestamp": now_str,
+                    "priority": "MEDIUM",
+                }
+            )
 
-        # ─── 5. 价格大幅变化 ───
+        # 5) 价格大幅变化（24h）
         if market_data:
             change = market_data.get("change_24h", 0)
             if abs(change) > self.cfg["price_change_threshold"]:
                 direction = "暴涨" if change > 0 else "暴跌"
-
-                # ✅ 不再写死 5%，用配置项
                 if change < -self._price_spike_action_threshold:
                     sig = "BUY"
                 elif change > self._price_spike_action_threshold:
@@ -158,25 +181,26 @@ class AlertManager:
                 else:
                     sig = "ALERT"
 
-                alert = {
-                    "type": "PRICE_SPIKE",
-                    "signal": sig,
-                    "price": price,
-                    "change": change,
-                    "message": f"💥 价格{direction}! 24h变化: {change:+.2f}% @ ${price:,.2f}",
-                    "timestamp": now_str,
-                    "priority": "CRITICAL",
-                }
-                new_alerts.append(alert)
+                new_alerts.append(
+                    {
+                        "type": "PRICE_SPIKE",
+                        "signal": sig,
+                        "price": price,
+                        "change": change,
+                        "timeframe": tf,
+                        "message": f"💥 价格{direction}! [{tf}] 24h变化: {change:+.2f}% @ ${price:,.2f}",
+                        "timestamp": now_str,
+                        "priority": "CRITICAL",
+                    }
+                )
 
-        # 保存新提醒（带去重/冷却）
         saved_alerts = []
-
         for alert in new_alerts:
             dedupe_key = self._make_dedupe_key(alert)
             last_ts = float(self._last_sent.get(dedupe_key, 0))
 
-            if now_epoch - last_ts < self._cooldown_seconds:
+            cooldown = self._cooldown_for_alert(alert)
+            if cooldown > 0 and (now_epoch - last_ts) < cooldown:
                 continue
 
             self._last_sent[dedupe_key] = now_epoch
@@ -190,9 +214,6 @@ class AlertManager:
         return saved_alerts
 
     def get_action_recommendation(self, analysis: dict, prediction: dict) -> dict:
-        """
-        综合技术分析和ML预测，给出行动建议
-        """
         signal = analysis.get("signal", "HOLD")
         signal_score = analysis.get("signal_score", 0)
         rsi = analysis.get("rsi", 50)
@@ -203,13 +224,11 @@ class AlertManager:
         buy_score = 0
         sell_score = 0
 
-        # 技术分析贡献
         if signal in ["BUY", "STRONG_BUY"]:
             buy_score += abs(signal_score) * 2
         elif signal in ["SELL", "STRONG_SELL"]:
             sell_score += abs(signal_score) * 2
 
-        # RSI 贡献
         if rsi:
             if rsi < 30:
                 buy_score += 3
@@ -220,7 +239,6 @@ class AlertManager:
             elif rsi > 60:
                 sell_score += 1
 
-        # ML 预测贡献
         if pred_direction == "UP":
             buy_score += pred_confidence * 10
         elif pred_direction == "DOWN":
@@ -264,11 +282,9 @@ class AlertManager:
         }
 
     def _make_dedupe_key(self, alert: dict) -> str:
-        """
-        方案3：type|signal|price_bucket
-        """
         a_type = alert.get("type", "") or ""
         a_signal = alert.get("signal", "") or ""
+        tf = alert.get("timeframe", "") or "1h"
 
         price = alert.get("price", 0)
         try:
@@ -277,7 +293,7 @@ class AlertManager:
             price = 0.0
 
         bucket = self._price_to_bucket(price)
-        return f"{a_type}|{a_signal}|{bucket}"
+        return f"{a_type}|{a_signal}|{tf}|{bucket}"
 
     def _price_to_bucket(self, price: float) -> str:
         try:
@@ -289,17 +305,15 @@ class AlertManager:
             return "0"
 
     def _print_alert(self, alert: dict):
-        """在终端打印提醒"""
         priority = alert.get("priority", "LOW")
         colors = {
-            "CRITICAL": "\033[91m",  # 红色
-            "HIGH": "\033[93m",      # 黄色
-            "MEDIUM": "\033[96m",    # 青色
-            "LOW": "\033[92m",       # 绿色
+            "CRITICAL": "\033[91m",
+            "HIGH": "\033[93m",
+            "MEDIUM": "\033[96m",
+            "LOW": "\033[92m",
         }
         reset = "\033[0m"
         color = colors.get(priority, "")
-
         print(f"\n{color}{'='*60}")
         print(f"[{priority}] {alert.get('message', '')}")
         print(f"时间: {alert.get('timestamp', '')}")
@@ -312,12 +326,10 @@ class AlertManager:
         os.replace(tmp_path, path)
 
     def _save_alerts(self):
-        """保存提醒到文件"""
         recent = self.alerts[-500:]
         self._atomic_write_json(self.alert_log_path, recent)
 
     def _load_alerts(self):
-        """从文件加载历史提醒"""
         if os.path.exists(self.alert_log_path):
             try:
                 with open(self.alert_log_path, "r", encoding="utf-8") as f:
@@ -327,7 +339,6 @@ class AlertManager:
                 self.alerts = []
 
     def _save_meta(self):
-        """保存去重 meta（last_sent）"""
         try:
             items = []
             for k, ts in self._last_sent.items():
@@ -341,7 +352,8 @@ class AlertManager:
 
             payload = {
                 "saved_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "cooldown_seconds": self._cooldown_seconds,
+                "cooldown_seconds_default": self._cooldown_seconds_default,
+                "cooldown_seconds_by_type": self._cooldown_by_type,
                 "dedupe_price_bucket_size": self._price_bucket_size,
                 "last_sent": limited,
             }
@@ -350,7 +362,6 @@ class AlertManager:
             print(f"[AlertManager] 保存 alerts_meta.json 失败: {e}")
 
     def _load_meta(self):
-        """加载去重 meta（last_sent）"""
         if not os.path.exists(self.alert_meta_path):
             return
         try:
@@ -370,5 +381,4 @@ class AlertManager:
             self._last_sent = {}
 
     def get_recent_alerts(self, n: int = 20) -> list:
-        """获取最近 n 条提醒"""
         return self.alerts[-n:]
