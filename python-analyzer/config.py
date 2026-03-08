@@ -73,14 +73,16 @@ ALERT_CONFIG = {
     "rsi_overbought": 70,
     "rsi_oversold": 30,
     "confidence_threshold": 0.7,      # 预测置信度>70%才发送信号
-    "check_interval_seconds": 60,     # 每60秒检查一次
 
-    # ✅ 新增：提醒冷却时间（秒），避免 dashboard 刷新导致重复提醒
-    "cooldown_seconds": 180,
+    # ✅ 稳健节流：限制 check_signals 最频繁 15 秒执行一次（进程内）
+    "check_interval_seconds": 15,
 
-    # ✅ 新增：按价格档位去重（方案3）
-    # 例如 bucket_size=10 表示：$3052 与 $3058 都会落在 $3050 档位
-    "dedupe_price_bucket_size": 10.0,
+    # ✅ 去重/冷却（你指定的参数）
+    "dedupe_price_bucket_size": 15.0,  # $15 一档：例如 3029 和 3039 都算 3030 档
+    "cooldown_seconds": 100,           # 100 秒冷却：同一档位同一类信号不会重复提醒
+
+    # ✅ PRICE_SPIKE 给 BUY/SELL 的阈值（避免写死 5%）
+    "price_spike_action_threshold": 5.0,
 }
 
 # === 可视化配置 ===
