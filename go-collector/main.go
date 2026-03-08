@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,7 +17,9 @@ import (
 )
 
 const (
-	dataDir    = "../data"
+	// ✅ 默认值保持不变：仍然是 ../data
+	defaultDataDir = "../data"
+
 	topN       = 50
 	tradeLimit = 100
 
@@ -39,6 +43,26 @@ var store = &DataStore{
 	Klines:  make(map[string][]models.OHLCV),
 }
 
+func envOrDefault(key, def string) string {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+func envIntOrDefault(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return i
+}
+
 func main() {
 	log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
 	log.SetLevel(log.InfoLevel)
@@ -53,6 +77,11 @@ func main() {
 		log.Infof("ALLOW_MOCK=%s", v)
 	}
 
+	// ✅ 从环境变量读取数据目录（与 Python 统一）
+	// 仍然兼容旧行为：没配置则用 ../data
+	dataDir := envOrDefault("DATA_DIR", defaultDataDir)
+	log.Infof("DATA_DIR=%s", dataDir)
+
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		log.Fatalf("Failed to create data directory: %v", err)
 	}
@@ -62,21 +91,21 @@ func main() {
 	coinbase := collector.NewCoinbaseCollector(os.Getenv("COINBASE_API_KEY"), os.Getenv("COINBASE_API_SECRET"))
 
 	log.Info("Starting initial data collection...")
-	collectAllData(binance, okx, coinbase)
+	collectAllData(dataDir, binance, okx, coinbase)
 
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
 		for range ticker.C {
 			log.Info("Running periodic data collection...")
-			collectAllData(binance, okx, coinbase)
+			collectAllData(dataDir, binance, okx, coinbase)
 		}
 	}()
 
 	startAPIServer()
 }
 
-func collectAllData(binance *collector.BinanceCollector, okx *collector.OKXCollector, coinbase *collector.CoinbaseCollector) {
+func collectAllData(dataDir string, binance *collector.BinanceCollector, okx *collector.OKXCollector, coinbase *collector.CoinbaseCollector) {
 	var wg sync.WaitGroup
 
 	wg.Add(3)
@@ -87,7 +116,7 @@ func collectAllData(binance *collector.BinanceCollector, okx *collector.OKXColle
 
 	collectMarketData(binance)
 	analyzePriceLevels()
-	saveDataToFiles()
+	saveDataToFiles(dataDir)
 
 	store.mu.Lock()
 	store.LastUpdate = time.Now()
@@ -287,7 +316,7 @@ func analyzePriceLevels() {
 	store.PriceLevels = levels
 }
 
-func saveDataToFiles() {
+func saveDataToFiles(dataDir string) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 
