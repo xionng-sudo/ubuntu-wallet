@@ -4,7 +4,11 @@ ETH Crypto Prediction System - Configuration
 import os
 from dotenv import load_dotenv
 
-load_dotenv()
+# ✅ 始终加载“仓库根目录”的 .env，避免工作目录不同导致读不到
+# python-analyzer/config.py -> repo root is one level up
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_ENV_PATH = os.path.join(_REPO_ROOT, ".env")
+load_dotenv(dotenv_path=_ENV_PATH)
 
 # === 交易所 API 配置 ===
 BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
@@ -19,8 +23,10 @@ COINBASE_API_SECRET = os.getenv("COINBASE_API_SECRET", "")
 COLLECTOR_API_URL = os.getenv("COLLECTOR_API_URL", "http://localhost:8080")
 
 # === 数据配置 ===
-DATA_DIR = os.getenv("DATA_DIR", "../data")
-MODEL_DIR = os.getenv("MODEL_DIR", "../models")
+# ✅ A 方案：统一用仓库根目录 data/models（通过 .env 控制）
+DATA_DIR = os.getenv("DATA_DIR", os.path.join(_REPO_ROOT, "data"))
+MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(_REPO_ROOT, "models"))
+
 SYMBOL = "ETHUSDT"
 TOP_TRADERS = 50
 TRADE_HISTORY = 100
