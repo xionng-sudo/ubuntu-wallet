@@ -2,11 +2,13 @@ package collector
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -41,52 +43,109 @@ type okxResponse struct {
 	Data json.RawMessage `json:"data"`
 }
 
-// GetTopTraders fetches top traders from OKX copy trading leaderboard
-func (o *OKXCollector) GetTopTraders(topN int) ([]models.Trader, error) {
-	log.Info("[OKX] Fetching top traders from copy trading...")
-
-	url := fmt.Sprintf("%s/api/v5/copytrading/public-lead-traders?limit=%d", o.baseURL, topN)
-
-	resp, err := o.client.Get(url)
+func (o *OKXCollector) newGET(url string) (*http.Request, error) {
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("request error: %w", err)
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "ubuntu-wallet-go-collector/1.0")
+	return req, nil
+}
+
+func isMockOKXUniqueCode(s string) bool {
+	return strings.HasPrefix(s, "okx_trader_")
+}
+
+func pickFirstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		v = strings.TrimSpace(v)
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (o *OKXCollector) fetchTopTradersOnce(limit int) ([]models.Trader, []byte, error) {
+	url := fmt.Sprintf("%s/api/v5/copytrading/public-lead-traders?limit=%d", o.baseURL, limit)
+
+	req, err := o.newGET(url)
+	if err != nil {
+		return nil, nil, fmt.Errorf("create request error: %w", err)
+	}
+
+	resp, err := o.client.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("request error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("read body error: %w", err)
+		return nil, body, fmt.Errorf("read body error: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, body, fmt.Errorf("non-200 status=%d body=%s", resp.StatusCode, truncateForLog(body, 1200))
 	}
 
 	var result okxResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		log.Warn("[OKX] API response parsing failed, using simulated data")
-		return o.generateMockTraders(topN), nil
+		return nil, body, fmt.Errorf("response parse failed: %w body=%s", err, truncateForLog(body, 1200))
+	}
+	if result.Code != "" && result.Code != "0" {
+		return nil, body, fmt.Errorf("api error code=%s msg=%s body=%s", result.Code, result.Msg, truncateForLog(body, 1200))
 	}
 
-	var traderData []struct {
-		PortfolioID   string `json:"uniqueCode"`
-		NickName      string `json:"nickName"`
-		WinRatio      string `json:"winRatio"`
-		PnlRatio      string `json:"pnlRatio"`
-		Pnl           string `json:"pnl"`
-		CopyTraderNum string `json:"copyTraderNum"`
+	// Real schema (based on your log):
+	// data: [ { dataVer: "...", ranks: [ {...}, {...} ] } ]
+	type okxLeadTradersDataItem struct {
+		DataVer string `json:"dataVer"`
+		Ranks   []struct {
+			// ID fields (OKX might use any of these; we accept all)
+			UniqueCode  string `json:"uniqueCode"`
+			PortfolioID string `json:"portfolioId"`
+			LeadCode    string `json:"leadCode"`
+			UniqueID    string `json:"uniqueId"`
+			UID         string `json:"uid"`
+
+			NickName string `json:"nickName"`
+			WinRatio string `json:"winRatio"`
+			PnlRatio string `json:"pnlRatio"`
+			Pnl      string `json:"pnl"`
+
+			CopyTraderNum    string `json:"copyTraderNum"`
+			AccCopyTraderNum string `json:"accCopyTraderNum"`
+			Aum              string `json:"aum"`
+			Ccy              string `json:"ccy"`
+			LeadDays         string `json:"leadDays"`
+			MaxCopyTraderNum string `json:"maxCopyTraderNum"`
+			CopyState        string `json:"copyState"`
+		} `json:"ranks"`
 	}
 
-	if err := json.Unmarshal(result.Data, &traderData); err != nil {
-		log.Warn("[OKX] Data parsing failed, using simulated data")
-		return o.generateMockTraders(topN), nil
+	var dataArr []okxLeadTradersDataItem
+	if err := json.Unmarshal(result.Data, &dataArr); err != nil {
+		return nil, body, fmt.Errorf("lead-traders data parse failed: %w data=%s", err, truncateForLog([]byte(result.Data), 1200))
+	}
+	if len(dataArr) == 0 || len(dataArr[0].Ranks) == 0 {
+		return nil, body, errors.New("lead-traders returned empty ranks")
 	}
 
 	var traders []models.Trader
-	for _, t := range traderData {
-		pnl, _ := strconv.ParseFloat(t.Pnl, 64)
-		roi, _ := strconv.ParseFloat(t.PnlRatio, 64)
-		winRate, _ := strconv.ParseFloat(t.WinRatio, 64)
+	for _, r := range dataArr[0].Ranks {
+		id := pickFirstNonEmpty(r.UniqueCode, r.PortfolioID, r.LeadCode, r.UniqueID, r.UID)
+		if id == "" {
+			continue
+		}
+
+		pnl, _ := strconv.ParseFloat(r.Pnl, 64)
+		roi, _ := strconv.ParseFloat(r.PnlRatio, 64)
+		winRate, _ := strconv.ParseFloat(r.WinRatio, 64)
 
 		traders = append(traders, models.Trader{
-			TraderID: t.PortfolioID,
-			Nickname: t.NickName,
+			TraderID: id,
+			Nickname: r.NickName,
 			Exchange: "okx",
 			PNL:      pnl,
 			ROI:      roi * 100,
@@ -95,36 +154,126 @@ func (o *OKXCollector) GetTopTraders(topN int) ([]models.Trader, error) {
 	}
 
 	if len(traders) == 0 {
-		log.Warn("[OKX] No traders found, using simulated data")
-		return o.generateMockTraders(topN), nil
+		return nil, body, errors.New("lead-traders returned 0 usable traders (missing ids)")
 	}
 
-	log.Infof("[OKX] Fetched %d top traders", len(traders))
-	return traders, nil
+	return traders, body, nil
+}
+
+// GetTopTraders fetches top traders from OKX copy trading leaderboard
+func (o *OKXCollector) GetTopTraders(topN int) ([]models.Trader, error) {
+	log.Info("[OKX] Fetching top traders from copy trading...")
+
+	// OKX lead-traders endpoint has strict limit constraints.
+	// We auto-downgrade until OKX accepts the parameter.
+	tryLimits := []int{20, 10, 5, 1}
+
+	var lastErr error
+	var lastBody []byte
+
+	for _, lim := range tryLimits {
+		traders, body, err := o.fetchTopTradersOnce(lim)
+		if err != nil {
+			lastErr = err
+			lastBody = body
+			log.Warnf("[OKX] lead-traders failed (limit=%d): %v", lim, err)
+			continue
+		}
+
+		if topN > 0 && len(traders) > topN {
+			traders = traders[:topN]
+		}
+
+		log.Infof("[OKX] lead-traders success with limit=%d, returned=%d", lim, len(traders))
+		return traders, nil
+	}
+
+	msg := fmt.Sprintf("[OKX] lead-traders failed for all limits. lastErr=%v lastBody=%s",
+		lastErr, truncateForLog(lastBody, 1200))
+
+	if allowMock() {
+		log.Warn(msg + " (using simulated data)")
+		return o.generateMockTraders(topN), nil
+	}
+	return nil, errors.New(msg)
 }
 
 // GetTraderTrades fetches positions for a specific trader
 func (o *OKXCollector) GetTraderTrades(traderID string, limit int) ([]models.Trade, error) {
+	// If trader is mock, don't hammer OKX.
+	if isMockOKXUniqueCode(traderID) {
+		if allowMock() {
+			log.Warnf("[OKX] traderID=%s looks like mock uniqueCode; generating simulated trades", traderID)
+			return o.generateMockTrades(traderID, limit), nil
+		}
+		return nil, fmt.Errorf("[OKX] traderID=%s looks like mock uniqueCode; refusing to call OKX API", traderID)
+	}
+
+	traderID = strings.TrimSpace(traderID)
+	if traderID == "" {
+		if allowMock() {
+			log.Warn("[OKX] traderID is empty; generating simulated trades")
+			return o.generateMockTrades(traderID, limit), nil
+		}
+		return nil, errors.New("[OKX] traderID is empty")
+	}
+
 	log.Infof("[OKX] Fetching trades for trader %s", traderID)
 
 	url := fmt.Sprintf("%s/api/v5/copytrading/public-current-subpositions?uniqueCode=%s&limit=%d",
 		o.baseURL, traderID, limit)
 
-	resp, err := o.client.Get(url)
+	req, err := o.newGET(url)
 	if err != nil {
+		return nil, fmt.Errorf("create request error: %w", err)
+	}
+
+	resp, err := o.client.Do(req)
+	if err != nil {
+		if allowMock() {
+			log.Warnf("[OKX] request error: %v, generating simulated trades", err)
+			return o.generateMockTrades(traderID, limit), nil
+		}
 		return nil, fmt.Errorf("request error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if allowMock() {
+			log.Warnf("[OKX] read body error: %v, generating simulated trades", err)
+			return o.generateMockTrades(traderID, limit), nil
+		}
 		return nil, fmt.Errorf("read body error: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		msg := fmt.Sprintf("[OKX] subpositions status=%d trader=%s body=%s",
+			resp.StatusCode, traderID, truncateForLog(body, 1200))
+		if allowMock() {
+			log.Warn(msg)
+			return o.generateMockTrades(traderID, limit), nil
+		}
+		return nil, errors.New(msg)
 	}
 
 	var result okxResponse
 	if err := json.Unmarshal(body, &result); err != nil {
-		log.Warn("[OKX] Position parsing failed, generating simulated trades")
-		return o.generateMockTrades(traderID, limit), nil
+		msg := fmt.Sprintf("[OKX] subpositions response parse failed: %v body=%s", err, truncateForLog(body, 1200))
+		if allowMock() {
+			log.Warn(msg)
+			return o.generateMockTrades(traderID, limit), nil
+		}
+		return nil, errors.New(msg)
+	}
+
+	if result.Code != "" && result.Code != "0" {
+		msg := fmt.Sprintf("[OKX] subpositions api error code=%s msg=%s body=%s", result.Code, result.Msg, truncateForLog(body, 1200))
+		if allowMock() {
+			log.Warn(msg)
+			return o.generateMockTrades(traderID, limit), nil
+		}
+		return nil, errors.New(msg)
 	}
 
 	var positions []struct {
@@ -140,7 +289,12 @@ func (o *OKXCollector) GetTraderTrades(traderID string, limit int) ([]models.Tra
 	}
 
 	if err := json.Unmarshal(result.Data, &positions); err != nil {
-		return o.generateMockTrades(traderID, limit), nil
+		msg := fmt.Sprintf("[OKX] subpositions data parse failed: %v data=%s", err, truncateForLog([]byte(result.Data), 1200))
+		if allowMock() {
+			log.Warn(msg)
+			return o.generateMockTrades(traderID, limit), nil
+		}
+		return nil, errors.New(msg)
 	}
 
 	var trades []models.Trade
@@ -154,13 +308,13 @@ func (o *OKXCollector) GetTraderTrades(traderID string, limit int) ([]models.Tra
 
 		side := "BUY"
 		strategy := "LONG"
-		if p.PosSide == "short" {
+		if strings.EqualFold(p.PosSide, "short") {
 			side = "SELL"
 			strategy = "SHORT"
 		}
 
 		trades = append(trades, models.Trade{
-			TradeID:    fmt.Sprintf("okx_%s_%s", traderID[:8], p.SubPosID),
+			TradeID:    fmt.Sprintf("okx_%s_%s", prefix(traderID, 8), p.SubPosID),
 			TraderID:   traderID,
 			Exchange:   "okx",
 			Symbol:     p.InstID,
@@ -177,8 +331,10 @@ func (o *OKXCollector) GetTraderTrades(traderID string, limit int) ([]models.Tra
 		})
 	}
 
+	// CHANGE: 0 trades is not an error; treat as normal.
 	if len(trades) == 0 {
-		return o.generateMockTrades(traderID, limit), nil
+		log.Infof("[OKX] subpositions returned 0 trades (trader=%s) body=%s", traderID, truncateForLog(body, 1200))
+		return []models.Trade{}, nil
 	}
 
 	log.Infof("[OKX] Fetched %d trades for trader %s", len(trades), traderID)
@@ -199,7 +355,12 @@ func (o *OKXCollector) GetKlines(symbol, interval string, limit int) ([]models.O
 	url := fmt.Sprintf("https://www.okx.com/api/v5/market/candles?instId=%s&bar=%s&limit=%d",
 		symbol, bar, limit)
 
-	resp, err := o.client.Get(url)
+	req, err := o.newGET(url)
+	if err != nil {
+		return nil, fmt.Errorf("create request error: %w", err)
+	}
+
+	resp, err := o.client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("klines request error: %w", err)
 	}
@@ -210,9 +371,17 @@ func (o *OKXCollector) GetKlines(symbol, interval string, limit int) ([]models.O
 		return nil, fmt.Errorf("read body error: %w", err)
 	}
 
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("klines non-200 status=%d body=%s", resp.StatusCode, truncateForLog(body, 1200))
+	}
+
 	var result okxResponse
 	if err := json.Unmarshal(body, &result); err != nil {
 		return nil, fmt.Errorf("parse response error: %w", err)
+	}
+
+	if result.Code != "" && result.Code != "0" {
+		return nil, fmt.Errorf("okx klines api error code=%s msg=%s", result.Code, result.Msg)
 	}
 
 	var raw [][]string
@@ -286,7 +455,7 @@ func (o *OKXCollector) generateMockTrades(traderID string, n int) []models.Trade
 		}
 		openTime := now.Add(-time.Duration(i*45) * time.Minute)
 		trades[i] = models.Trade{
-			TradeID:    fmt.Sprintf("okx_%s_trade_%03d", traderID[:10], i+1),
+			TradeID:    fmt.Sprintf("okx_%s_trade_%03d", prefix(traderID, 10), i+1),
 			TraderID:   traderID,
 			Exchange:   "okx",
 			Symbol:     "ETH-USDT-SWAP",
