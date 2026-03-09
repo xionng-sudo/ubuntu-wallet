@@ -386,6 +386,8 @@ chmod +x scripts/run.sh
 # 启动完整系统 (Go采集器 + Python分析 + 可视化仪表板)
 bash scripts/run.sh full
 ```
+###关闭
+./scripts/run.sh stop
 
 ### 方式二: 分步启动
 
