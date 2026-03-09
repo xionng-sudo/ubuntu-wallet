@@ -35,7 +35,6 @@ class DataCollector:
         })
 
         # OKX
-      
         if not all([config.OKX_API_KEY, config.OKX_API_SECRET, config.OKX_PASSPHRASE]):
             print("⚠️警告：OKX账号配置不完整，请检查 config.py 配置！")
 
@@ -112,7 +111,7 @@ class DataCollector:
             ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
 
             df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
             df.set_index("timestamp", inplace=True)
             df["exchange"] = exchange_name
             df["symbol"] = symbol
@@ -160,7 +159,7 @@ class DataCollector:
             return []
 
     def fetch_multi_exchange_ohlcv(self, symbol: str = "ETH/USDT",
-                                    timeframe: str = "1h", limit: int = 500) -> pd.DataFrame:
+                                   timeframe: str = "1h", limit: int = 500) -> pd.DataFrame:
         """从多个交易所获取K线并合并（以Binance为主）"""
         all_data = []
         for name in ["binance", "okx", "coinbase"]:
@@ -182,30 +181,35 @@ class DataCollector:
     def trades_to_dataframe(self, trades_dict: dict) -> pd.DataFrame:
         """将交易字典转换为 DataFrame"""
         all_trades = []
-        for trader_id, trades in trades_dict.items():
-            for trade in trades:
-                trade["trader_id"] = trader_id
-                all_trades.append(trade)
+        for trader_id, trades in (trades_dict or {}).items():
+            for trade in trades or []:
+                if isinstance(trade, dict):
+                    trade["trader_id"] = trader_id
+                    all_trades.append(trade)
 
         if not all_trades:
             return pd.DataFrame()
 
         df = pd.DataFrame(all_trades)
 
-        # 解析时间
+        # 解析时间：统一解析成 tz-aware UTC，避免混合时区/空字符串导致 NaT 泛滥
         for col in ["open_time", "close_time", "update_time"]:
             if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors="coerce")
+                s = df[col]
+                # 标准化空字符串/None
+                s = s.replace("", pd.NA)
+                df[col] = pd.to_datetime(s, errors="coerce", utc=True)
 
         return df
 
     def traders_to_dataframe(self, traders_dict: dict) -> pd.DataFrame:
         """将交易员字典转换为 DataFrame"""
         all_traders = []
-        for exchange, traders in traders_dict.items():
-            for trader in traders:
-                trader["exchange"] = exchange
-                all_traders.append(trader)
+        for exchange, traders in (traders_dict or {}).items():
+            for trader in traders or []:
+                if isinstance(trader, dict):
+                    trader["exchange"] = exchange
+                    all_traders.append(trader)
 
         if not all_traders:
             return pd.DataFrame()
@@ -230,7 +234,7 @@ class DataCollector:
                 data = json.load(f)
             df = pd.DataFrame(data)
             if "timestamp" in df.columns:
-                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
                 df.set_index("timestamp", inplace=True)
             return df
         return pd.DataFrame()
