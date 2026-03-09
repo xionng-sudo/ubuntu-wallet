@@ -43,35 +43,35 @@ case "$MODE" in
 
     "analyze")
         info "仅运行 Python 分析..."
-        source venv/bin/activate
+        source venv310/bin/activate
         cd python-analyzer
         python main.py --analyze 2>&1 | tee "${PY_LOG}"
         ;;
 
     "train")
         info "训练 ML 模型..."
-        source venv/bin/activate
+        source venv310/bin/activate
         cd python-analyzer
         python main.py --train 2>&1 | tee "${PY_LOG}"
         ;;
 
     "predict")
         info "运行预测..."
-        source venv/bin/activate
+        source venv310/bin/activate
         cd python-analyzer
         python main.py --predict 2>&1 | tee "${PY_LOG}"
         ;;
 
     "dashboard")
         info "启动仪表板..."
-        source venv/bin/activate
+        source venv310/bin/activate
         cd python-analyzer
         python main.py --dashboard 2>&1 | tee "${PY_LOG}"
         ;;
 
     "charts")
         info "生成图表..."
-        source venv/bin/activate
+        source venv310/bin/activate
         cd python-analyzer
         python main.py --save-charts 2>&1 | tee "${PY_LOG}"
         ;;
@@ -86,19 +86,26 @@ case "$MODE" in
         echo $GO_PID > "${LOG_DIR}/go-collector.pid"
         info "Go Collector PID: ${GO_PID}"
 
-        # 等待采集器启动
-        sleep 3
+        # ✅ 等待采集器 API 就绪（最多 30 秒）
+        info "等待 Go Collector API 就绪..."
+        READY=0
+        for i in {1..30}; do
+            if curl -s "http://localhost:${COLLECTOR_PORT:-8080}/api/status" > /dev/null 2>&1; then
+                READY=1
+                break
+            fi
+            sleep 1
+        done
 
-        # 检查采集器是否正常
-        if curl -s http://localhost:${COLLECTOR_PORT:-8080}/api/status > /dev/null 2>&1; then
+        if [ "$READY" -eq 1 ]; then
             info "Go Collector 启动成功 ✓"
         else
-            warn "Go Collector 可能未完全启动，继续..."
+            warn "Go Collector API 30 秒仍不可用，将继续启动 Python（可能导致首次采集失败）"
         fi
 
         # 2. 启动 Python 分析 + 仪表板
         info "启动 Python 分析系统..."
-        source venv/bin/activate
+        source venv310/bin/activate
         cd python-analyzer
         python main.py 2>&1 | tee "${PY_LOG}"
         ;;
@@ -113,8 +120,44 @@ case "$MODE" in
             fi
             rm -f "${LOG_DIR}/go-collector.pid"
         fi
-        # 停止 Python 进程
+
+        # ✅ 兜底：按端口关闭仍在监听的 Go Collector（避免 pid 文件不准导致 8080 被占用）
+        COLLECTOR_PORT="${COLLECTOR_PORT:-8080}"
+        if command -v lsof >/dev/null 2>&1; then
+            PIDS="$(sudo lsof -t -i :${COLLECTOR_PORT} 2>/dev/null || true)"
+            if [ -n "${PIDS}" ]; then
+                warn "发现端口 ${COLLECTOR_PORT} 仍被占用，尝试关闭 PID: ${PIDS}"
+                sudo kill ${PIDS} 2>/dev/null || true
+                sleep 1
+                STILL="$(sudo lsof -t -i :${COLLECTOR_PORT} 2>/dev/null || true)"
+                if [ -n "${STILL}" ]; then
+                    warn "PID 仍占用端口 ${COLLECTOR_PORT}，强制 kill -9: ${STILL}"
+                    sudo kill -9 ${STILL} 2>/dev/null || true
+                fi
+            fi
+        else
+            warn "未安装 lsof，无法按端口兜底停止（建议: sudo apt-get install -y lsof）"
+        fi
+
+        # 停止 Python 进程（Dash 也会一并停掉）
         pkill -f "python main.py" 2>/dev/null || true
+
+        # ✅ 兜底：按端口关闭 Dashboard（避免 pkill 匹配不到导致 8050 被占用）
+        DASH_PORT="${DASH_PORT:-8050}"
+        if command -v lsof >/dev/null 2>&1; then
+            DPIDS="$(sudo lsof -t -i :${DASH_PORT} 2>/dev/null || true)"
+            if [ -n "${DPIDS}" ]; then
+                warn "发现端口 ${DASH_PORT} 仍被占用，尝试关闭 PID: ${DPIDS}"
+                sudo kill ${DPIDS} 2>/dev/null || true
+                sleep 1
+                DSTILL="$(sudo lsof -t -i :${DASH_PORT} 2>/dev/null || true)"
+                if [ -n "${DSTILL}" ]; then
+                    warn "PID 仍占用端口 ${DASH_PORT}，强制 kill -9: ${DSTILL}"
+                    sudo kill -9 ${DSTILL} 2>/dev/null || true
+                fi
+            fi
+        fi
+
         info "所有服务已停止"
         ;;
 
