@@ -388,7 +388,8 @@ func handleTraders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, store.Traders)
 }
 
-// ? NEW: build a traderID set for an exchange
+// ✅ NEW: build a traderID set for an exchange
+
 func traderIDsForExchangeLocked(exchange string) map[string]struct{} {
 	out := make(map[string]struct{})
 	trs := store.Traders[exchange]

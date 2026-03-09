@@ -35,6 +35,10 @@ class DataCollector:
         })
 
         # OKX
+      
+        if not all([config.OKX_API_KEY, config.OKX_API_SECRET, config.OKX_PASSPHRASE]):
+            print("⚠️警告：OKX账号配置不完整，请检查 config.py 配置！")
+
         self.exchanges["okx"] = ccxt.okx({
             "apiKey": config.OKX_API_KEY,
             "secret": config.OKX_API_SECRET,

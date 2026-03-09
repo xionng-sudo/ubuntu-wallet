@@ -28,3 +28,9 @@ Thumbs.db
 # Temp
 *.tmp
 *.swp
+# Python virtual environments
+.venv/
+venv310/
+venv/
+__pycache__/
+*.pyc
