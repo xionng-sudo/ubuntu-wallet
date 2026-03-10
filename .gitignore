@@ -10,6 +10,8 @@ __pycache__/
 # 数据
 data/
 models/
+!go-collector/models/
+!go-collector/models/**/*.go
 logs/
 bin/
 
