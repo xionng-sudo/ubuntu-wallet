@@ -411,6 +411,7 @@ func (b *BinanceCollector) generateMockTrades(traderID string, n int) []models.T
 trades := make([]models.Trade, n)
 basePrice := 2500.0
 now := time.Now().UTC()
+
 for i := 0; i < n; i++ {
 side := "BUY"
 strategy := "LONG"
@@ -418,13 +419,17 @@ if i%3 == 0 {
 side = "SELL"
 strategy = "SHORT"
 }
+
 priceOffset := float64(i%20) * 15.0
 if i%2 == 0 {
 priceOffset = -priceOffset
 }
+
 openTime := now.Add(-time.Duration(i) * time.Hour)
+openMs := openTime.UnixMilli()
+
 trades[i] = models.Trade{
-TradeID:    fmt.Sprintf("bn_%s_trade_%03d", prefix(traderID, 10), i+1),
+TradeID:    fmt.Sprintf("bn_%s_%d_%03d", traderID, openMs, i+1),
 TraderID:   traderID,
 Exchange:   "binance",
 Symbol:     "ETHUSDT",
@@ -441,6 +446,7 @@ CloseTime:  openTime.Add(time.Duration(30+i%120) * time.Minute),
 UpdateTime: now,
 }
 }
+
 for i := 0; i < 3 && i < len(trades); i++ {
 trades[i].Status = "OPEN"
 trades[i].CloseTime = time.Time{}
