@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -13,7 +15,9 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/ubuntu-wallet/go-collector/collector"
+	"github.com/ubuntu-wallet/go-collector/features"
 	"github.com/ubuntu-wallet/go-collector/models"
+	"github.com/ubuntu-wallet/go-collector/signal"
 )
 
 const (
@@ -36,6 +40,11 @@ type DataStore struct {
 	LastUpdate  time.Time                  `json:"last_update"`
 
 	StartedAt time.Time `json:"-"`
+
+	// New: computed artifacts (in-memory latest)
+	LatestFeatures1H  *features.FeatureSnapshot `json:"-"`
+	LatestSignalRules *signal.SignalResult      `json:"-"`
+	LatestSignalML    *signal.SignalResult      `json:"-"`
 }
 
 var store = &DataStore{
@@ -44,6 +53,13 @@ var store = &DataStore{
 	Klines:    make(map[string][]models.OHLCV),
 	StartedAt: time.Now().UTC(),
 }
+
+// runtime config (for health/status observability)
+var (
+	runtimeDataDir   string
+	runtimeFastEvery time.Duration
+	runtimeSlowEvery time.Duration
+)
 
 func envOrDefault(key, def string) string {
 	v := strings.TrimSpace(os.Getenv(key))
@@ -65,6 +81,80 @@ func envIntOrDefault(key string, def int) int {
 	return i
 }
 
+func envDurationOrDefault(key string, def time.Duration) time.Duration {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		log.Warnf("Invalid %s=%q, fallback to %s", key, raw, def)
+		return def
+	}
+	return d
+}
+
+func envBoolOrDefault(key string, def bool) bool {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return def
+	}
+	switch strings.ToLower(raw) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
+}
+
+func fileStatJSON(path string) map[string]interface{} {
+	st, err := os.Stat(path)
+	if err != nil {
+		return map[string]interface{}{
+			"path":  path,
+			"ok":    false,
+			"error": err.Error(),
+		}
+	}
+	return map[string]interface{}{
+		"path":  path,
+		"ok":    true,
+		"mtime": st.ModTime().UTC().Format(time.RFC3339Nano),
+		"size":  st.Size(),
+	}
+}
+
+// fileFreshOK returns whether:
+// - file exists (ok=true), and
+// - now - mtime <= maxAge
+// It also returns a JSON-ish map for embedding in /api/healthz response.
+func fileFreshOK(path string, now time.Time, maxAge time.Duration) (bool, map[string]interface{}) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return false, map[string]interface{}{
+			"path":  path,
+			"ok":    false,
+			"error": err.Error(),
+		}
+	}
+
+	age := now.Sub(st.ModTime())
+	fresh := age <= maxAge
+
+	return fresh, map[string]interface{}{
+		"path":          path,
+		"ok":            true,
+		"mtime":         st.ModTime().UTC().Format(time.RFC3339Nano),
+		"size":          st.Size(),
+		"age_sec":       int64(age.Seconds()),
+		"fresh":         fresh,
+		"max_age_sec":   int64(maxAge.Seconds()),
+		"max_age_human": maxAge.String(),
+	}
+}
+
 func main() {
 	log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
 	log.SetLevel(log.InfoLevel)
@@ -80,6 +170,7 @@ func main() {
 	}
 
 	dataDir := envOrDefault("DATA_DIR", defaultDataDir)
+	runtimeDataDir = dataDir
 	log.Infof("DATA_DIR=%s", dataDir)
 
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
@@ -90,22 +181,69 @@ func main() {
 	okx := collector.NewOKXCollector(os.Getenv("OKX_API_KEY"), os.Getenv("OKX_API_SECRET"), os.Getenv("OKX_PASSPHRASE"))
 	coinbase := collector.NewCoinbaseCollector(os.Getenv("COINBASE_API_KEY"), os.Getenv("COINBASE_API_SECRET"))
 
-	log.Info("Starting initial data collection...")
-	collectAllData(dataDir, binance, okx, coinbase)
+	// Backward compatible: if COLLECT_FAST_INTERVAL not set, fall back to COLLECT_INTERVAL; otherwise default 60s.
+	fastRaw := strings.TrimSpace(os.Getenv("COLLECT_FAST_INTERVAL"))
+	if fastRaw == "" {
+		fastRaw = strings.TrimSpace(os.Getenv("COLLECT_INTERVAL"))
+	}
+	if fastRaw == "" {
+		fastRaw = "60s"
+	}
+	os.Setenv("COLLECT_FAST_INTERVAL", fastRaw)
+
+	fastEvery := envDurationOrDefault("COLLECT_FAST_INTERVAL", 60*time.Second)
+	slowEvery := envDurationOrDefault("COLLECT_SLOW_INTERVAL", 5*time.Minute)
+	runtimeFastEvery = fastEvery
+	runtimeSlowEvery = slowEvery
+
+	log.Infof("Fast collection every %s (market+klines+features+signal)", fastEvery)
+	log.Infof("Slow collection every %s (traders+trades+price-levels)", slowEvery)
+
+	// Initial: do slow first (so you have traders/trades), then fast (so you have features/signal quickly).
+	log.Info("Starting initial slow data collection...")
+	collectSlowAll(dataDir, binance, okx, coinbase)
+
+	log.Info("Starting initial fast data collection...")
+	collectFastAll(dataDir, binance)
 
 	go func() {
-		ticker := time.NewTicker(5 * time.Minute)
+		ticker := time.NewTicker(fastEvery)
 		defer ticker.Stop()
 		for range ticker.C {
-			log.Info("Running periodic data collection...")
-			collectAllData(dataDir, binance, okx, coinbase)
+			log.Info("Running periodic FAST data collection...")
+			collectFastAll(dataDir, binance)
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(slowEvery)
+		defer ticker.Stop()
+		for range ticker.C {
+			log.Info("Running periodic SLOW data collection...")
+			collectSlowAll(dataDir, binance, okx, coinbase)
 		}
 	}()
 
 	startAPIServer()
 }
 
-func collectAllData(dataDir string, binance *collector.BinanceCollector, okx *collector.OKXCollector, coinbase *collector.CoinbaseCollector) {
+// FAST: only what ML really needs (stable + low rate-limit risk)
+func collectFastAll(dataDir string, binance *collector.BinanceCollector) {
+	collectMarketData(binance)
+	saveFastDataToFiles(dataDir)
+
+	// === compute features + signals (1h primary + 4h filter) ===
+	computeAndPersistFeaturesAndSignals(dataDir)
+
+	store.mu.Lock()
+	store.LastUpdate = time.Now().UTC()
+	store.mu.Unlock()
+
+	log.Info("FAST data collection completed successfully!")
+}
+
+// SLOW: heavy endpoints, do less frequently
+func collectSlowAll(dataDir string, binance *collector.BinanceCollector, okx *collector.OKXCollector, coinbase *collector.CoinbaseCollector) {
 	var wg sync.WaitGroup
 
 	wg.Add(3)
@@ -114,15 +252,75 @@ func collectAllData(dataDir string, binance *collector.BinanceCollector, okx *co
 	go func() { defer wg.Done(); collectCoinbaseData(coinbase) }()
 	wg.Wait()
 
-	collectMarketData(binance)
 	analyzePriceLevels()
-	saveDataToFiles(dataDir)
+	saveSlowDataToFiles(dataDir)
 
+	log.Info("SLOW data collection completed successfully!")
+}
+
+func computeAndPersistFeaturesAndSignals(dataDir string) {
+	// copy needed data under lock, compute outside lock
+	store.mu.RLock()
+	kl1h := append([]models.OHLCV(nil), store.Klines["1h"]...)
+	kl4h := append([]models.OHLCV(nil), store.Klines["4h"]...)
+	store.mu.RUnlock()
+
+	if len(kl1h) < 2 {
+		log.Warn("Not enough 1h klines to compute features")
+		return
+	}
+
+	now := time.Now().UTC()
+	snap, err := features.ComputeSnapshot("ETHUSDT", "1h", kl1h, kl4h, now)
+	if err != nil {
+		log.Warnf("ComputeSnapshot failed: %v", err)
+		return
+	}
+
+	if _, err := features.WriteLatest(dataDir, snap); err != nil {
+		log.Warnf("features.WriteLatest failed: %v", err)
+	}
+	if _, err := features.AppendHistory(dataDir, snap); err != nil {
+		log.Warnf("features.AppendHistory failed: %v", err)
+	}
+
+	// === RULES ===
+	rulesRes := signal.RulesEngine(snap)
+
+	// New: split latest
+	if _, err := signal.WriteLatestRules(dataDir, &rulesRes); err != nil {
+		log.Warnf("signal.WriteLatestRules failed: %v", err)
+	}
+
+	// history (rules)
+	if _, err := signal.AppendHistory(dataDir, &rulesRes); err != nil {
+		log.Warnf("signal.AppendHistory(rules) failed: %v", err)
+	}
+
+	// === ML (or fallback) ===
+	mlRes := signal.MLOrFallback(context.Background(), snap)
+
+	// New: split latest
+	if _, err := signal.WriteLatestML(dataDir, &mlRes); err != nil {
+		log.Warnf("signal.WriteLatestML failed: %v", err)
+	}
+
+	// Backward compatible latest: point it to "final" signal (ML or fallback)
+	if _, err := signal.WriteLatest(dataDir, &mlRes); err != nil {
+		log.Warnf("signal.WriteLatest(ml->compat latest) failed: %v", err)
+	}
+
+	// history (ml)
+	if _, err := signal.AppendHistory(dataDir, &mlRes); err != nil {
+		log.Warnf("signal.AppendHistory(ml) failed: %v", err)
+	}
+
+	// update in-memory latest
 	store.mu.Lock()
-	store.LastUpdate = time.Now().UTC()
+	store.LatestFeatures1H = snap
+	store.LatestSignalRules = &rulesRes
+	store.LatestSignalML = &mlRes
 	store.mu.Unlock()
-
-	log.Info("Data collection completed successfully!")
 }
 
 func collectBinanceData(bn *collector.BinanceCollector) {
@@ -316,14 +514,11 @@ func analyzePriceLevels() {
 	store.PriceLevels = levels
 }
 
-func saveDataToFiles(dataDir string) {
+func saveFastDataToFiles(dataDir string) {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 
-	saveJSON(filepath.Join(dataDir, "traders.json"), store.Traders)
-	saveJSON(filepath.Join(dataDir, "trades.json"), store.Trades)
-	saveJSON(filepath.Join(dataDir, "price_levels.json"), store.PriceLevels)
-
+	// Only fast-changing things needed by ML pipeline
 	if store.MarketData != nil {
 		saveJSON(filepath.Join(dataDir, "market_data.json"), store.MarketData)
 	}
@@ -333,21 +528,49 @@ func saveDataToFiles(dataDir string) {
 		saveJSON(filepath.Join(dataDir, filename), klines)
 	}
 
-	log.Info("Data saved to files successfully")
+	log.Info("FAST data saved to files successfully")
+}
+
+func saveSlowDataToFiles(dataDir string) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	saveJSON(filepath.Join(dataDir, "traders.json"), store.Traders)
+	saveJSON(filepath.Join(dataDir, "trades.json"), store.Trades)
+	saveJSON(filepath.Join(dataDir, "price_levels.json"), store.PriceLevels)
+
+	log.Info("SLOW data saved to files successfully")
 }
 
 func saveJSON(filename string, data interface{}) {
-	file, err := os.Create(filename)
+	_ = os.MkdirAll(filepath.Dir(filename), 0o775)
+
+	tmp := filename + ".tmp"
+	file, err := os.Create(tmp)
 	if err != nil {
-		log.Errorf("Failed to create file %s: %v", filename, err)
+		log.Errorf("Failed to create tmp file %s: %v", tmp, err)
 		return
 	}
-	defer file.Close()
 
 	encoder := json.NewEncoder(file)
 	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(data); err != nil {
-		log.Errorf("Failed to encode JSON to %s: %v", filename, err)
+		_ = file.Close()
+		_ = os.Remove(tmp)
+		log.Errorf("Failed to encode JSON to %s: %v", tmp, filename)
+		return
+	}
+
+	if err := file.Close(); err != nil {
+		_ = os.Remove(tmp)
+		log.Errorf("Failed to close tmp file %s: %v", tmp, err)
+		return
+	}
+
+	if err := os.Rename(tmp, filename); err != nil {
+		_ = os.Remove(tmp)
+		log.Errorf("Failed to rename tmp file %s -> %s: %v", tmp, filename, err)
+		return
 	}
 }
 
@@ -360,9 +583,12 @@ func startAPIServer() {
 	mux.HandleFunc("/api/klines", handleKlines)
 	mux.HandleFunc("/api/status", handleStatus)
 	mux.HandleFunc("/api/all-data", handleAllData)
-
-	// New: health endpoint
 	mux.HandleFunc("/api/healthz", handleHealthz)
+
+	// New: features & signal APIs
+	mux.HandleFunc("/api/features/latest", handleFeaturesLatest)
+	mux.HandleFunc("/api/features/history", handleFeaturesHistory)
+	mux.HandleFunc("/api/signal", handleSignal)
 
 	handler := corsMiddleware(mux)
 
@@ -372,7 +598,7 @@ func startAPIServer() {
 	}
 
 	log.Infof("API server starting on port %s", port)
-	log.Infof("Endpoints: /api/traders, /api/trades, /api/price-levels, /api/market, /api/klines, /api/status, /api/healthz")
+	log.Infof("Endpoints: /api/traders, /api/trades, /api/price-levels, /api/market, /api/klines, /api/status, /api/healthz, /api/features/*, /api/signal")
 
 	if err := http.ListenAndServe(":"+port, handler); err != nil {
 		log.Fatalf("API server failed: %v", err)
@@ -525,6 +751,11 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		priceLevelsCount = len(store.PriceLevels)
 	}
 
+	klinesCounts := make(map[string]int, len(store.Klines))
+	for k, v := range store.Klines {
+		klinesCounts[k] = len(v)
+	}
+
 	status := map[string]interface{}{
 		"status": "running",
 
@@ -538,6 +769,12 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		"trade_counts":  tradeCounts,
 
 		"price_levels_count": priceLevelsCount,
+
+		"klines_counts": klinesCounts,
+
+		"has_features_1h":  store.LatestFeatures1H != nil,
+		"has_signal_rules": store.LatestSignalRules != nil,
+		"has_signal_ml":    store.LatestSignalML != nil,
 	}
 	writeJSON(w, status)
 }
@@ -557,23 +794,195 @@ func handleAllData(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, allData)
 }
 
+// Configurable STRICT health:
+// - ok=false if staleness exceeds HEALTH_STALENESS_MAX (default 180s)
+// - ok=false if required files are missing
+// - ok=false if required files are older than HEALTH_STALENESS_MAX
+// - ok=false if signals_1h_latest.json missing AND HEALTH_REQUIRE_SIGNALS=true (default true)
+// - ok=false if split signals missing AND HEALTH_REQUIRE_SIGNALS_SPLIT=true (default false)
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	store.mu.RLock()
-	defer store.mu.RUnlock()
+	last := store.LastUpdate
+	started := store.StartedAt
+	store.mu.RUnlock()
 
-	// Health is OK if server is running; optionally consider "stale" data
-	ok := true
 	stalenessSec := int64(0)
-	if !store.LastUpdate.IsZero() {
-		stalenessSec = int64(time.Since(store.LastUpdate).Seconds())
+	if !last.IsZero() {
+		stalenessSec = int64(time.Since(last).Seconds())
+	}
+
+	dataDir := runtimeDataDir
+	if dataDir == "" {
+		dataDir = envOrDefault("DATA_DIR", defaultDataDir)
+	}
+
+	now := time.Now().UTC()
+	staleMax := envDurationOrDefault("HEALTH_STALENESS_MAX", 180*time.Second)
+	requireSignals := envBoolOrDefault("HEALTH_REQUIRE_SIGNALS", true)
+	requireSignalsSplit := envBoolOrDefault("HEALTH_REQUIRE_SIGNALS_SPLIT", false)
+
+	kl1hFresh, kl1h := fileFreshOK(filepath.Join(dataDir, "klines_1h.json"), now, staleMax)
+	featFresh, featLatest := fileFreshOK(filepath.Join(dataDir, "features", "features_1h_latest.json"), now, staleMax)
+
+	// Backward compatible
+	sigLatestFresh, sigLatest := fileFreshOK(filepath.Join(dataDir, "signals", "signals_1h_latest.json"), now, staleMax)
+
+	// New split files
+	sigLatestRulesFresh, sigLatestRules := fileFreshOK(filepath.Join(dataDir, "signals", "signals_1h_latest_rules.json"), now, staleMax)
+	sigLatestMLFresh, sigLatestML := fileFreshOK(filepath.Join(dataDir, "signals", "signals_1h_latest_ml.json"), now, staleMax)
+
+	ok := true
+
+	// in-memory staleness
+	if time.Duration(stalenessSec)*time.Second > staleMax {
+		ok = false
+	}
+
+	// file freshness
+	if !kl1hFresh {
+		ok = false
+	}
+	if !featFresh {
+		ok = false
+	}
+	if requireSignals && !sigLatestFresh {
+		ok = false
+	}
+	if requireSignalsSplit {
+		if !sigLatestRulesFresh {
+			ok = false
+		}
+		if !sigLatestMLFresh {
+			ok = false
+		}
+	}
+
+	files := map[string]interface{}{
+		"klines_1h":            kl1h,
+		"features_latest":      featLatest,
+		"signals_latest":       sigLatest,
+		"signals_latest_rules": sigLatestRules,
+		"signals_latest_ml":    sigLatestML,
 	}
 
 	resp := map[string]interface{}{
 		"ok":            ok,
-		"last_update":   store.LastUpdate,
+		"last_update":   last,
+		"started_at":    started,
 		"staleness_sec": stalenessSec,
+
+		"data_dir": dataDir,
+
+		"fast_interval": func() string {
+			if runtimeFastEvery > 0 {
+				return runtimeFastEvery.String()
+			}
+			return ""
+		}(),
+		"slow_interval": func() string {
+			if runtimeSlowEvery > 0 {
+				return runtimeSlowEvery.String()
+			}
+			return ""
+		}(),
+
+		"health_now":                  now.Format(time.RFC3339Nano),
+		"health_staleness_max":        staleMax.String(),
+		"health_require_signals":      requireSignals,
+		"health_require_signals_split": requireSignalsSplit,
+
+		"files": files,
 	}
 	writeJSON(w, resp)
+}
+
+func handleFeaturesLatest(w http.ResponseWriter, r *http.Request) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	if store.LatestFeatures1H == nil {
+		http.Error(w, "no features computed yet", http.StatusNotFound)
+		return
+	}
+	writeJSON(w, store.LatestFeatures1H)
+}
+
+// Lightweight history API: reads JSONL and returns last N rows.
+func handleFeaturesHistory(w http.ResponseWriter, r *http.Request) {
+	dataDir := envOrDefault("DATA_DIR", defaultDataDir)
+	limit := envIntOrDefault("FEATURES_HISTORY_LIMIT_DEFAULT", 500)
+	if v := strings.TrimSpace(r.URL.Query().Get("limit")); v != "" {
+		if i, err := strconv.Atoi(v); err == nil && i > 0 && i <= 5000 {
+			limit = i
+		}
+	}
+
+	p := filepath.Join(dataDir, "features", "features_1h_history.jsonl")
+	f, err := os.Open(p)
+	if err != nil {
+		http.Error(w, "history file not found", http.StatusNotFound)
+		return
+	}
+	defer f.Close()
+
+	all := make([]features.FeatureSnapshot, 0, limit)
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var snap features.FeatureSnapshot
+		if err := json.Unmarshal(sc.Bytes(), &snap); err != nil {
+			continue
+		}
+		all = append(all, snap)
+	}
+	if err := sc.Err(); err != nil {
+		http.Error(w, "failed to read history file", http.StatusInternalServerError)
+		return
+	}
+
+	if len(all) > limit {
+		all = all[len(all)-limit:]
+	}
+	writeJSON(w, all)
+}
+
+func handleSignal(w http.ResponseWriter, r *http.Request) {
+	engine := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("engine")))
+	if engine == "" {
+		engine = "rules"
+	}
+
+	store.mu.RLock()
+	snap := store.LatestFeatures1H
+	rules := store.LatestSignalRules
+	ml := store.LatestSignalML
+	store.mu.RUnlock()
+
+	if snap == nil {
+		http.Error(w, "no features computed yet", http.StatusNotFound)
+		return
+	}
+
+	switch engine {
+	case "rules":
+		if rules != nil {
+			writeJSON(w, rules)
+			return
+		}
+		res := signal.RulesEngine(snap)
+		writeJSON(w, res)
+		return
+	case "ml":
+		if ml != nil {
+			writeJSON(w, ml)
+			return
+		}
+		res := signal.MLOrFallback(context.Background(), snap)
+		writeJSON(w, res)
+		return
+	default:
+		http.Error(w, "invalid engine (use rules|ml)", http.StatusBadRequest)
+		return
+	}
 }
 
 func writeJSON(w http.ResponseWriter, data interface{}) {
