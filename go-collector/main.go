@@ -133,10 +133,6 @@ store.mu.Lock()
 store.Traders["binance"] = traders
 store.mu.Unlock()
 
-if len(traders) > 0 && len(traders[0].TraderID) >= 9 && traders[0].TraderID[:9] == "bn_trader" {
-log.Warn("[Binance] Traders look like simulated data; skipping Binance trade fetch")
-return
-}
 
 for _, trader := range traders {
 trades, err := bn.GetTraderTrades(trader.TraderID, tradeLimit)
