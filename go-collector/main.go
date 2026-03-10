@@ -1,481 +1,586 @@
 package main
 
 import (
-"encoding/json"
-"fmt"
-"net/http"
-"os"
-"path/filepath"
-"strconv"
-"strings"
-"sync"
-"time"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
 
-log "github.com/sirupsen/logrus"
-"github.com/ubuntu-wallet/go-collector/collector"
-"github.com/ubuntu-wallet/go-collector/models"
+	log "github.com/sirupsen/logrus"
+	"github.com/ubuntu-wallet/go-collector/collector"
+	"github.com/ubuntu-wallet/go-collector/models"
 )
 
 const (
-defaultDataDir = "../data"
+	defaultDataDir = "../data"
 
-topN       = 50
-tradeLimit = 100
+	topN       = 50
+	tradeLimit = 100
 
-okxMaxWorkers = 6
-okxRateSleep  = 80 * time.Millisecond
+	okxMaxWorkers = 6
+	okxRateSleep  = 80 * time.Millisecond
 )
 
 type DataStore struct {
-mu          sync.RWMutex
-Traders     map[string][]models.Trader `json:"traders"`
-Trades      map[string][]models.Trade  `json:"trades"`
-PriceLevels []models.PriceLevel        `json:"price_levels"`
-MarketData  *models.MarketData         `json:"market_data"`
-Klines      map[string][]models.OHLCV  `json:"klines"`
-LastUpdate  time.Time                  `json:"last_update"`
+	mu          sync.RWMutex
+	Traders     map[string][]models.Trader `json:"traders"`
+	Trades      map[string][]models.Trade  `json:"trades"`
+	PriceLevels []models.PriceLevel        `json:"price_levels"`
+	MarketData  *models.MarketData         `json:"market_data"`
+	Klines      map[string][]models.OHLCV  `json:"klines"`
+	LastUpdate  time.Time                  `json:"last_update"`
+
+	StartedAt time.Time `json:"-"`
 }
 
 var store = &DataStore{
-Traders: make(map[string][]models.Trader),
-Trades:  make(map[string][]models.Trade),
-Klines:  make(map[string][]models.OHLCV),
+	Traders:   make(map[string][]models.Trader),
+	Trades:    make(map[string][]models.Trade),
+	Klines:    make(map[string][]models.OHLCV),
+	StartedAt: time.Now().UTC(),
 }
 
 func envOrDefault(key, def string) string {
-v := strings.TrimSpace(os.Getenv(key))
-if v == "" {
-return def
-}
-return v
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	return v
 }
 
 func envIntOrDefault(key string, def int) int {
-v := strings.TrimSpace(os.Getenv(key))
-if v == "" {
-return def
-}
-i, err := strconv.Atoi(v)
-if err != nil {
-return def
-}
-return i
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return def
+	}
+	return i
 }
 
 func main() {
-log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
-log.SetLevel(log.InfoLevel)
+	log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
+	log.SetLevel(log.InfoLevel)
 
-log.Info("========================================")
-log.Info("  ETH Crypto Trader Data Collector")
-log.Info("========================================")
-log.Infof("PID: %d", os.Getpid())
-if v := os.Getenv("ALLOW_MOCK"); v == "" {
-log.Info("ALLOW_MOCK is not set (default: true)")
-} else {
-log.Infof("ALLOW_MOCK=%s", v)
-}
+	log.Info("========================================")
+	log.Info("  ETH Crypto Trader Data Collector")
+	log.Info("========================================")
+	log.Infof("PID: %d", os.Getpid())
+	if v := os.Getenv("ALLOW_MOCK"); v == "" {
+		log.Info("ALLOW_MOCK is not set (default: true)")
+	} else {
+		log.Infof("ALLOW_MOCK=%s", v)
+	}
 
-dataDir := envOrDefault("DATA_DIR", defaultDataDir)
-log.Infof("DATA_DIR=%s", dataDir)
+	dataDir := envOrDefault("DATA_DIR", defaultDataDir)
+	log.Infof("DATA_DIR=%s", dataDir)
 
-if err := os.MkdirAll(dataDir, 0755); err != nil {
-log.Fatalf("Failed to create data directory: %v", err)
-}
+	if err := os.MkdirAll(dataDir, 0755); err != nil {
+		log.Fatalf("Failed to create data directory: %v", err)
+	}
 
-binance := collector.NewBinanceCollector(os.Getenv("BINANCE_API_KEY"), os.Getenv("BINANCE_API_SECRET"))
-okx := collector.NewOKXCollector(os.Getenv("OKX_API_KEY"), os.Getenv("OKX_API_SECRET"), os.Getenv("OKX_PASSPHRASE"))
-coinbase := collector.NewCoinbaseCollector(os.Getenv("COINBASE_API_KEY"), os.Getenv("COINBASE_API_SECRET"))
+	binance := collector.NewBinanceCollector(os.Getenv("BINANCE_API_KEY"), os.Getenv("BINANCE_API_SECRET"))
+	okx := collector.NewOKXCollector(os.Getenv("OKX_API_KEY"), os.Getenv("OKX_API_SECRET"), os.Getenv("OKX_PASSPHRASE"))
+	coinbase := collector.NewCoinbaseCollector(os.Getenv("COINBASE_API_KEY"), os.Getenv("COINBASE_API_SECRET"))
 
-log.Info("Starting initial data collection...")
-collectAllData(dataDir, binance, okx, coinbase)
+	log.Info("Starting initial data collection...")
+	collectAllData(dataDir, binance, okx, coinbase)
 
-go func() {
-ticker := time.NewTicker(5 * time.Minute)
-defer ticker.Stop()
-for range ticker.C {
-log.Info("Running periodic data collection...")
-collectAllData(dataDir, binance, okx, coinbase)
-}
-}()
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			log.Info("Running periodic data collection...")
+			collectAllData(dataDir, binance, okx, coinbase)
+		}
+	}()
 
-startAPIServer()
+	startAPIServer()
 }
 
 func collectAllData(dataDir string, binance *collector.BinanceCollector, okx *collector.OKXCollector, coinbase *collector.CoinbaseCollector) {
-var wg sync.WaitGroup
+	var wg sync.WaitGroup
 
-wg.Add(3)
-go func() { defer wg.Done(); collectBinanceData(binance) }()
-go func() { defer wg.Done(); collectOKXData(okx) }()
-go func() { defer wg.Done(); collectCoinbaseData(coinbase) }()
-wg.Wait()
+	wg.Add(3)
+	go func() { defer wg.Done(); collectBinanceData(binance) }()
+	go func() { defer wg.Done(); collectOKXData(okx) }()
+	go func() { defer wg.Done(); collectCoinbaseData(coinbase) }()
+	wg.Wait()
 
-collectMarketData(binance)
-analyzePriceLevels()
-saveDataToFiles(dataDir)
+	collectMarketData(binance)
+	analyzePriceLevels()
+	saveDataToFiles(dataDir)
 
-store.mu.Lock()
-store.LastUpdate = time.Now().UTC()
-store.mu.Unlock()
+	store.mu.Lock()
+	store.LastUpdate = time.Now().UTC()
+	store.mu.Unlock()
 
-log.Info("Data collection completed successfully!")
+	log.Info("Data collection completed successfully!")
 }
 
 func collectBinanceData(bn *collector.BinanceCollector) {
-traders, err := bn.GetTopTraders(topN)
-if err != nil {
-log.Errorf("[Binance] Failed to get top traders: %v", err)
-return
-}
+	traders, err := bn.GetTopTraders(topN)
+	if err != nil {
+		log.Errorf("[Binance] Failed to get top traders: %v", err)
+		return
+	}
 
-store.mu.Lock()
-store.Traders["binance"] = traders
-store.mu.Unlock()
+	store.mu.Lock()
+	store.Traders["binance"] = traders
+	store.mu.Unlock()
 
-
-for _, trader := range traders {
-trades, err := bn.GetTraderTrades(trader.TraderID, tradeLimit)
-if err != nil {
-log.Warnf("[Binance] Failed to get trades for %s: %v", trader.TraderID, err)
-continue
-}
-store.mu.Lock()
-store.Trades[trader.TraderID] = trades
-store.mu.Unlock()
-time.Sleep(200 * time.Millisecond)
-}
+	// Do NOT skip trade fetch when using simulated traders.
+	// bn.GetTraderTrades() will generate mock trades for mock traderIDs (bn_trader_###).
+	for _, trader := range traders {
+		trades, err := bn.GetTraderTrades(trader.TraderID, tradeLimit)
+		if err != nil {
+			log.Warnf("[Binance] Failed to get trades for %s: %v", trader.TraderID, err)
+			continue
+		}
+		store.mu.Lock()
+		store.Trades[trader.TraderID] = trades
+		store.mu.Unlock()
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func collectOKXData(okx *collector.OKXCollector) {
-traders, err := okx.GetTopTraders(topN)
-if err != nil {
-log.Errorf("[OKX] Failed to get top traders: %v", err)
-return
-}
+	traders, err := okx.GetTopTraders(topN)
+	if err != nil {
+		log.Errorf("[OKX] Failed to get top traders: %v", err)
+		return
+	}
 
-store.mu.Lock()
-store.Traders["okx"] = traders
-store.mu.Unlock()
+	store.mu.Lock()
+	store.Traders["okx"] = traders
+	store.mu.Unlock()
 
-type job struct {
-traderID string
-}
+	type job struct {
+		traderID string
+	}
 
-jobs := make(chan job)
-var wg sync.WaitGroup
+	jobs := make(chan job)
+	var wg sync.WaitGroup
 
-worker := func() {
-defer wg.Done()
-for j := range jobs {
-trades, err := okx.GetTraderTrades(j.traderID, tradeLimit)
-if err != nil {
-log.Warnf("[OKX] Failed to get trades for %s: %v", j.traderID, err)
-continue
-}
-store.mu.Lock()
-store.Trades[j.traderID] = trades
-store.mu.Unlock()
-time.Sleep(okxRateSleep)
-}
-}
+	worker := func() {
+		defer wg.Done()
+		for j := range jobs {
+			trades, err := okx.GetTraderTrades(j.traderID, tradeLimit)
+			if err != nil {
+				log.Warnf("[OKX] Failed to get trades for %s: %v", j.traderID, err)
+				continue
+			}
+			store.mu.Lock()
+			store.Trades[j.traderID] = trades
+			store.mu.Unlock()
+			time.Sleep(okxRateSleep)
+		}
+	}
 
-workers := okxMaxWorkers
-if workers < 1 {
-workers = 1
-}
-if workers > len(traders) {
-workers = len(traders)
-}
-wg.Add(workers)
-for i := 0; i < workers; i++ {
-go worker()
-}
+	workers := okxMaxWorkers
+	if workers < 1 {
+		workers = 1
+	}
+	if workers > len(traders) {
+		workers = len(traders)
+	}
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go worker()
+	}
 
-for _, t := range traders {
-jobs <- job{traderID: t.TraderID}
-}
-close(jobs)
+	for _, t := range traders {
+		jobs <- job{traderID: t.TraderID}
+	}
+	close(jobs)
 
-wg.Wait()
+	wg.Wait()
 }
 
 func collectCoinbaseData(cb *collector.CoinbaseCollector) {
-traders, err := cb.GetTopTraders(topN)
-if err != nil {
-log.Errorf("[Coinbase] Failed to get top traders: %v", err)
-return
-}
+	traders, err := cb.GetTopTraders(topN)
+	if err != nil {
+		log.Errorf("[Coinbase] Failed to get top traders: %v", err)
+		return
+	}
 
-store.mu.Lock()
-store.Traders["coinbase"] = traders
-store.mu.Unlock()
+	store.mu.Lock()
+	store.Traders["coinbase"] = traders
+	store.mu.Unlock()
 
-for _, trader := range traders {
-trades, err := cb.GetTraderTrades(trader.TraderID, tradeLimit)
-if err != nil {
-log.Warnf("[Coinbase] Failed to get trades for %s: %v", trader.TraderID, err)
-continue
-}
-store.mu.Lock()
-store.Trades[trader.TraderID] = trades
-store.mu.Unlock()
+	for _, trader := range traders {
+		trades, err := cb.GetTraderTrades(trader.TraderID, tradeLimit)
+		if err != nil {
+			log.Warnf("[Coinbase] Failed to get trades for %s: %v", trader.TraderID, err)
+			continue
+		}
+		store.mu.Lock()
+		store.Trades[trader.TraderID] = trades
+		store.mu.Unlock()
 
-time.Sleep(100 * time.Millisecond)
-}
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func collectMarketData(bn *collector.BinanceCollector) {
-market, err := bn.GetCurrentPrice("ETHUSDT")
-if err != nil {
-log.Warnf("Failed to get current price: %v", err)
-} else {
-store.mu.Lock()
-store.MarketData = market
-store.mu.Unlock()
-}
+	market, err := bn.GetCurrentPrice("ETHUSDT")
+	if err != nil {
+		log.Warnf("Failed to get current price: %v", err)
+	} else {
+		store.mu.Lock()
+		store.MarketData = market
+		store.mu.Unlock()
+	}
 
-intervals := []string{"1m", "5m", "15m", "1h", "4h", "1d"}
-for _, interval := range intervals {
-klines, err := bn.GetKlines("ETHUSDT", interval, 500)
-if err != nil {
-log.Warnf("Failed to get %s klines: %v", interval, err)
-continue
-}
-store.mu.Lock()
-store.Klines[interval] = klines
-store.mu.Unlock()
-time.Sleep(100 * time.Millisecond)
-}
+	intervals := []string{"1m", "5m", "15m", "1h", "4h", "1d"}
+	for _, interval := range intervals {
+		klines, err := bn.GetKlines("ETHUSDT", interval, 500)
+		if err != nil {
+			log.Warnf("Failed to get %s klines: %v", interval, err)
+			continue
+		}
+		store.mu.Lock()
+		store.Klines[interval] = klines
+		store.mu.Unlock()
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 func analyzePriceLevels() {
-store.mu.Lock()
-defer store.mu.Unlock()
+	store.mu.Lock()
+	defer store.mu.Unlock()
 
-if store.MarketData == nil {
-return
-}
+	if store.MarketData == nil {
+		// Ensure JSON encodes as [] rather than null
+		store.PriceLevels = make([]models.PriceLevel, 0)
+		return
+	}
 
-currentPrice := store.MarketData.Price
-if currentPrice == 0 {
-currentPrice = 2500.0
-}
-priceStep := 50.0
-minPrice := currentPrice - 500.0
-maxPrice := currentPrice + 500.0
-levelMap := make(map[float64]*models.PriceLevel)
+	currentPrice := store.MarketData.Price
+	if currentPrice == 0 {
+		currentPrice = 2500.0
+	}
+	priceStep := 50.0
+	minPrice := currentPrice - 500.0
+	maxPrice := currentPrice + 500.0
+	levelMap := make(map[float64]*models.PriceLevel)
 
-now := time.Now().UTC()
+	now := time.Now().UTC()
+	for price := minPrice; price <= maxPrice; price += priceStep {
+		levelMap[price] = &models.PriceLevel{
+			PriceMin:  price,
+			PriceMax:  price + priceStep,
+			Buyers:    []string{},
+			Sellers:   []string{},
+			Timestamp: now,
+		}
+	}
 
-for price := minPrice; price <= maxPrice; price += priceStep {
-levelMap[price] = &models.PriceLevel{
-PriceMin:  price,
-PriceMax:  price + priceStep,
-Buyers:    []string{},
-Sellers:   []string{},
-Timestamp: now,
-}
-}
+	for _, trades := range store.Trades {
+		for _, trade := range trades {
+			if trade.Symbol != "ETHUSDT" && trade.Symbol != "ETH-USDT-SWAP" && trade.Symbol != "ETH-USD" {
+				continue
+			}
+			if trade.Price <= 0 || trade.Amount == 0 {
+				continue
+			}
+			levelKey := float64(int(trade.Price/priceStep)) * priceStep
+			level, exists := levelMap[levelKey]
+			if !exists {
+				continue
+			}
+			if trade.Side == "BUY" {
+				level.Buyers = append(level.Buyers, trade.TraderID)
+				level.BuyVolume += trade.Amount
+			} else {
+				level.Sellers = append(level.Sellers, trade.TraderID)
+				level.SellVolume += trade.Amount
+			}
+		}
+	}
 
-for _, trades := range store.Trades {
-for _, trade := range trades {
-if trade.Symbol != "ETHUSDT" && trade.Symbol != "ETH-USDT-SWAP" && trade.Symbol != "ETH-USD" {
-continue
-}
-levelKey := float64(int(trade.Price/priceStep)) * priceStep
-level, exists := levelMap[levelKey]
-if !exists {
-continue
-}
-if trade.Side == "BUY" {
-level.Buyers = append(level.Buyers, trade.TraderID)
-level.BuyVolume += trade.Amount
-} else {
-level.Sellers = append(level.Sellers, trade.TraderID)
-level.SellVolume += trade.Amount
-}
-}
-}
-
-var levels []models.PriceLevel
-for _, level := range levelMap {
-if len(level.Buyers) > 0 || len(level.Sellers) > 0 {
-levels = append(levels, *level)
-}
-}
-store.PriceLevels = levels
+	// IMPORTANT: initialize as empty slice so JSON encodes to [] not null
+	levels := make([]models.PriceLevel, 0)
+	for _, level := range levelMap {
+		if len(level.Buyers) > 0 || len(level.Sellers) > 0 {
+			levels = append(levels, *level)
+		}
+	}
+	store.PriceLevels = levels
 }
 
 func saveDataToFiles(dataDir string) {
-store.mu.RLock()
-defer store.mu.RUnlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 
-saveJSON(filepath.Join(dataDir, "traders.json"), store.Traders)
-saveJSON(filepath.Join(dataDir, "trades.json"), store.Trades)
-saveJSON(filepath.Join(dataDir, "price_levels.json"), store.PriceLevels)
+	saveJSON(filepath.Join(dataDir, "traders.json"), store.Traders)
+	saveJSON(filepath.Join(dataDir, "trades.json"), store.Trades)
+	saveJSON(filepath.Join(dataDir, "price_levels.json"), store.PriceLevels)
 
-if store.MarketData != nil {
-saveJSON(filepath.Join(dataDir, "market_data.json"), store.MarketData)
-}
+	if store.MarketData != nil {
+		saveJSON(filepath.Join(dataDir, "market_data.json"), store.MarketData)
+	}
 
-for interval, klines := range store.Klines {
-filename := fmt.Sprintf("klines_%s.json", interval)
-saveJSON(filepath.Join(dataDir, filename), klines)
-}
+	for interval, klines := range store.Klines {
+		filename := fmt.Sprintf("klines_%s.json", interval)
+		saveJSON(filepath.Join(dataDir, filename), klines)
+	}
 
-log.Info("Data saved to files successfully")
+	log.Info("Data saved to files successfully")
 }
 
 func saveJSON(filename string, data interface{}) {
-file, err := os.Create(filename)
-if err != nil {
-log.Errorf("Failed to create file %s: %v", filename, err)
-return
-}
-defer file.Close()
+	file, err := os.Create(filename)
+	if err != nil {
+		log.Errorf("Failed to create file %s: %v", filename, err)
+		return
+	}
+	defer file.Close()
 
-encoder := json.NewEncoder(file)
-encoder.SetIndent("", "  ")
-if err := encoder.Encode(data); err != nil {
-log.Errorf("Failed to encode JSON to %s: %v", filename, err)
-}
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(data); err != nil {
+		log.Errorf("Failed to encode JSON to %s: %v", filename, err)
+	}
 }
 
 func startAPIServer() {
-mux := http.NewServeMux()
-mux.HandleFunc("/api/traders", handleTraders)
-mux.HandleFunc("/api/trades", handleTrades)
-mux.HandleFunc("/api/price-levels", handlePriceLevels)
-mux.HandleFunc("/api/market", handleMarket)
-mux.HandleFunc("/api/klines", handleKlines)
-mux.HandleFunc("/api/status", handleStatus)
-mux.HandleFunc("/api/all-data", handleAllData)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/traders", handleTraders)
+	mux.HandleFunc("/api/trades", handleTrades)
+	mux.HandleFunc("/api/price-levels", handlePriceLevels)
+	mux.HandleFunc("/api/market", handleMarket)
+	mux.HandleFunc("/api/klines", handleKlines)
+	mux.HandleFunc("/api/status", handleStatus)
+	mux.HandleFunc("/api/all-data", handleAllData)
 
-handler := corsMiddleware(mux)
+	// New: health endpoint
+	mux.HandleFunc("/api/healthz", handleHealthz)
 
-port := os.Getenv("COLLECTOR_PORT")
-if port == "" {
-port = "8080"
-}
+	handler := corsMiddleware(mux)
 
-log.Infof("API server starting on port %s", port)
-log.Infof("Endpoints: /api/traders, /api/trades, /api/price-levels, /api/market, /api/klines, /api/status")
+	port := os.Getenv("COLLECTOR_PORT")
+	if port == "" {
+		port = "8080"
+	}
 
-if err := http.ListenAndServe(":"+port, handler); err != nil {
-log.Fatalf("API server failed: %v", err)
-}
+	log.Infof("API server starting on port %s", port)
+	log.Infof("Endpoints: /api/traders, /api/trades, /api/price-levels, /api/market, /api/klines, /api/status, /api/healthz")
+
+	if err := http.ListenAndServe(":"+port, handler); err != nil {
+		log.Fatalf("API server failed: %v", err)
+	}
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
-return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-w.Header().Set("Access-Control-Allow-Origin", "*")
-w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-if r.Method == "OPTIONS" {
-w.WriteHeader(http.StatusOK)
-return
-}
-next.ServeHTTP(w, r)
-})
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func handleTraders(w http.ResponseWriter, r *http.Request) {
-store.mu.RLock()
-defer store.mu.RUnlock()
-writeJSON(w, store.Traders)
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	writeJSON(w, store.Traders)
 }
 
+// build a traderID set for an exchange (requires store.mu already RLocked)
 func traderIDsForExchangeLocked(exchange string) map[string]struct{} {
-out := make(map[string]struct{})
-trs := store.Traders[exchange]
-for _, t := range trs {
-if t.TraderID == "" {
-continue
-}
-out[t.TraderID] = struct{}{}
-}
-return out
+	out := make(map[string]struct{})
+	trs := store.Traders[exchange]
+	for _, t := range trs {
+		if t.TraderID == "" {
+			continue
+		}
+		out[t.TraderID] = struct{}{}
+	}
+	return out
 }
 
 func handleTrades(w http.ResponseWriter, r *http.Request) {
-store.mu.RLock()
-defer store.mu.RUnlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 
-exchange := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("exchange")))
-if exchange == "" {
-// Backward compatible: return all trades
-writeJSON(w, store.Trades)
-return
-}
+	exchange := strings.TrimSpace(strings.ToLower(r.URL.Query().Get("exchange")))
+	symbol := strings.TrimSpace(r.URL.Query().Get("symbol"))
 
-ids := traderIDsForExchangeLocked(exchange)
-if len(ids) == 0 {
-// Unknown exchange or no traders yet -> empty map
-writeJSON(w, map[string][]models.Trade{})
-return
-}
+	if exchange == "" {
+		// Backward compatible: return all trades
+		if symbol == "" {
+			writeJSON(w, store.Trades)
+			return
+		}
+		// If symbol provided without exchange, filter all
+		filtered := make(map[string][]models.Trade)
+		for traderID, trades := range store.Trades {
+			out := make([]models.Trade, 0, len(trades))
+			for _, t := range trades {
+				if symbol == "" || t.Symbol == symbol {
+					out = append(out, t)
+				}
+			}
+			if len(out) > 0 {
+				filtered[traderID] = out
+			}
+		}
+		writeJSON(w, filtered)
+		return
+	}
 
-filtered := make(map[string][]models.Trade)
-for traderID, trades := range store.Trades {
-if _, ok := ids[traderID]; !ok {
-continue
-}
-filtered[traderID] = trades
-}
+	ids := traderIDsForExchangeLocked(exchange)
+	if len(ids) == 0 {
+		// Unknown exchange or no traders yet -> empty map
+		writeJSON(w, map[string][]models.Trade{})
+		return
+	}
 
-writeJSON(w, filtered)
+	filtered := make(map[string][]models.Trade)
+	for traderID, trades := range store.Trades {
+		if _, ok := ids[traderID]; !ok {
+			continue
+		}
+		if symbol == "" {
+			filtered[traderID] = trades
+			continue
+		}
+		out := make([]models.Trade, 0, len(trades))
+		for _, t := range trades {
+			if t.Symbol == symbol {
+				out = append(out, t)
+			}
+		}
+		if len(out) > 0 {
+			filtered[traderID] = out
+		}
+	}
+
+	writeJSON(w, filtered)
 }
 
 func handlePriceLevels(w http.ResponseWriter, r *http.Request) {
-store.mu.RLock()
-defer store.mu.RUnlock()
-writeJSON(w, store.PriceLevels)
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	if store.PriceLevels == nil {
+		// defensive: always return [] not null
+		writeJSON(w, make([]models.PriceLevel, 0))
+		return
+	}
+	writeJSON(w, store.PriceLevels)
 }
 
 func handleMarket(w http.ResponseWriter, r *http.Request) {
-store.mu.RLock()
-defer store.mu.RUnlock()
-writeJSON(w, store.MarketData)
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	writeJSON(w, store.MarketData)
 }
 
 func handleKlines(w http.ResponseWriter, r *http.Request) {
-store.mu.RLock()
-defer store.mu.RUnlock()
-writeJSON(w, store.Klines)
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+	writeJSON(w, store.Klines)
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {
-store.mu.RLock()
-defer store.mu.RUnlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 
-status := map[string]interface{}{
-"status":      "running",
-"last_update": store.LastUpdate,
-}
-writeJSON(w, status)
+	traderCounts := map[string]int{
+		"binance":  len(store.Traders["binance"]),
+		"okx":      len(store.Traders["okx"]),
+		"coinbase": len(store.Traders["coinbase"]),
+	}
+
+	// Trade counts by exchange
+	tradeCounts := map[string]int{
+		"binance":  0,
+		"okx":      0,
+		"coinbase": 0,
+	}
+	for _, t := range store.Traders["binance"] {
+		tradeCounts["binance"] += len(store.Trades[t.TraderID])
+	}
+	for _, t := range store.Traders["okx"] {
+		tradeCounts["okx"] += len(store.Trades[t.TraderID])
+	}
+	for _, t := range store.Traders["coinbase"] {
+		tradeCounts["coinbase"] += len(store.Trades[t.TraderID])
+	}
+
+	priceLevelsCount := 0
+	if store.PriceLevels != nil {
+		priceLevelsCount = len(store.PriceLevels)
+	}
+
+	status := map[string]interface{}{
+		"status": "running",
+
+		"last_update": store.LastUpdate,
+		"started_at":  store.StartedAt,
+		"uptime_sec":  int64(time.Since(store.StartedAt).Seconds()),
+
+		"has_market_data": store.MarketData != nil,
+
+		"trader_counts": traderCounts,
+		"trade_counts":  tradeCounts,
+
+		"price_levels_count": priceLevelsCount,
+	}
+	writeJSON(w, status)
 }
 
 func handleAllData(w http.ResponseWriter, r *http.Request) {
-store.mu.RLock()
-defer store.mu.RUnlock()
+	store.mu.RLock()
+	defer store.mu.RUnlock()
 
-allData := map[string]interface{}{
-"traders":      store.Traders,
-"trades":       store.Trades,
-"price_levels": store.PriceLevels,
-"market_data":  store.MarketData,
-"klines":       store.Klines,
-"last_update":  store.LastUpdate,
+	allData := map[string]interface{}{
+		"traders":      store.Traders,
+		"trades":       store.Trades,
+		"price_levels": store.PriceLevels,
+		"market_data":  store.MarketData,
+		"klines":       store.Klines,
+		"last_update":  store.LastUpdate,
+	}
+	writeJSON(w, allData)
 }
-writeJSON(w, allData)
+
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
+	store.mu.RLock()
+	defer store.mu.RUnlock()
+
+	// Health is OK if server is running; optionally consider "stale" data
+	ok := true
+	stalenessSec := int64(0)
+	if !store.LastUpdate.IsZero() {
+		stalenessSec = int64(time.Since(store.LastUpdate).Seconds())
+	}
+
+	resp := map[string]interface{}{
+		"ok":            ok,
+		"last_update":   store.LastUpdate,
+		"staleness_sec": stalenessSec,
+	}
+	writeJSON(w, resp)
 }
 
 func writeJSON(w http.ResponseWriter, data interface{}) {
-w.Header().Set("Content-Type", "application/json")
-encoder := json.NewEncoder(w)
-encoder.SetIndent("", "  ")
-if err := encoder.Encode(data); err != nil {
-http.Error(w, err.Error(), http.StatusInternalServerError)
-}
+	w.Header().Set("Content-Type", "application/json")
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(data); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
 }
