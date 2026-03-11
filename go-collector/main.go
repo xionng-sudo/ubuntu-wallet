@@ -189,7 +189,7 @@ func main() {
 	if fastRaw == "" {
 		fastRaw = "60s"
 	}
-	os.Setenv("COLLECT_FAST_INTERVAL", fastRaw)
+	_ = os.Setenv("COLLECT_FAST_INTERVAL", fastRaw)
 
 	fastEvery := envDurationOrDefault("COLLECT_FAST_INTERVAL", 60*time.Second)
 	slowEvery := envDurationOrDefault("COLLECT_SLOW_INTERVAL", 5*time.Minute)
@@ -437,9 +437,50 @@ func collectMarketData(bn *collector.BinanceCollector) {
 		store.mu.Unlock()
 	}
 
+	// Lookback defaults (can be overridden by env). If <=0 => fallback to latest-window only.
+	look15m := envIntOrDefault("KLINES_15M_LOOKBACK_DAYS", 180)
+	look1h := envIntOrDefault("KLINES_1H_LOOKBACK_DAYS", 365)
+	look4h := envIntOrDefault("KLINES_4H_LOOKBACK_DAYS", 730)
+	look1d := envIntOrDefault("KLINES_1D_LOOKBACK_DAYS", 1460)
+
 	intervals := []string{"1m", "5m", "15m", "1h", "4h", "1d"}
+
 	for _, interval := range intervals {
-		klines, err := bn.GetKlines("ETHUSDT", interval, 500)
+		var (
+			klines []models.OHLCV
+			err    error
+		)
+
+		switch interval {
+		case "15m":
+			if look15m > 0 {
+				klines, err = bn.GetKlinesLookback("ETHUSDT", "15m", look15m)
+			} else {
+				klines, err = bn.GetKlines("ETHUSDT", "15m", 500)
+			}
+		case "1h":
+			if look1h > 0 {
+				klines, err = bn.GetKlinesLookback("ETHUSDT", "1h", look1h)
+			} else {
+				klines, err = bn.GetKlines("ETHUSDT", "1h", 500)
+			}
+		case "4h":
+			if look4h > 0 {
+				klines, err = bn.GetKlinesLookback("ETHUSDT", "4h", look4h)
+			} else {
+				klines, err = bn.GetKlines("ETHUSDT", "4h", 500)
+			}
+		case "1d":
+			if look1d > 0 {
+				klines, err = bn.GetKlinesLookback("ETHUSDT", "1d", look1d)
+			} else {
+				klines, err = bn.GetKlines("ETHUSDT", "1d", 500)
+			}
+		default:
+			// 1m/5m: keep light
+			klines, err = bn.GetKlines("ETHUSDT", interval, 500)
+		}
+
 		if err != nil {
 			log.Warnf("Failed to get %s klines: %v", interval, err)
 			continue
@@ -447,7 +488,9 @@ func collectMarketData(bn *collector.BinanceCollector) {
 		store.mu.Lock()
 		store.Klines[interval] = klines
 		store.mu.Unlock()
-		time.Sleep(100 * time.Millisecond)
+
+		// Spread requests a bit
+		time.Sleep(120 * time.Millisecond)
 	}
 }
 
@@ -557,7 +600,7 @@ func saveJSON(filename string, data interface{}) {
 	if err := encoder.Encode(data); err != nil {
 		_ = file.Close()
 		_ = os.Remove(tmp)
-		log.Errorf("Failed to encode JSON to %s: %v", tmp, filename)
+		log.Errorf("Failed to encode JSON to %s (target=%s): %v", tmp, filename, err)
 		return
 	}
 
@@ -886,9 +929,9 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 			return ""
 		}(),
 
-		"health_now":                  now.Format(time.RFC3339Nano),
-		"health_staleness_max":        staleMax.String(),
-		"health_require_signals":      requireSignals,
+		"health_now":                   now.Format(time.RFC3339Nano),
+		"health_staleness_max":         staleMax.String(),
+		"health_require_signals":       requireSignals,
 		"health_require_signals_split": requireSignalsSplit,
 
 		"files": files,
