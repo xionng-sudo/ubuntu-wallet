@@ -19,16 +19,19 @@ _loaded: Optional[LoadedModel] = None
 
 
 class PredictRequest(BaseModel):
-    # accept whatever Go sends; we only use interval for now
+    # accept whatever Go sends
     model_config = {"extra": "allow"}
     symbol: Optional[str] = None
     interval: Optional[str] = "1h"
+
+    # NEW: for historical backtests
+    as_of_ts: Optional[str] = Field(default=None, description="ISO8601 cutoff, e.g. 2026-03-05T12:00:00Z")
+
     feature_ts: Optional[str] = None
     features: Optional[Dict[str, Any]] = None
 
 
 class PredictResponse(BaseModel):
-    # silence pydantic protected namespace warning for model_version
     model_config = {"protected_namespaces": ()}
 
     signal: str = Field(..., description="LONG|SHORT|FLAT")
@@ -37,7 +40,7 @@ class PredictResponse(BaseModel):
     reasons: List[str] = []
 
 
-app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v1")
+app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v2-asof")
 
 
 @app.on_event("startup")
@@ -65,12 +68,14 @@ def predict(req: PredictRequest):
         raise HTTPException(status_code=503, detail="model not loaded")
 
     interval = req.interval or "1h"
+    as_of_ts = req.as_of_ts
 
     try:
         built = build_latest_feature_row_from_klines(
             data_dir=DATA_DIR,
             interval=interval,
             expected_n_features=_loaded.expected_n_features,
+            as_of_ts=as_of_ts,
         )
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"feature_build_failed: {e}")
@@ -90,7 +95,11 @@ def predict(req: PredictRequest):
             signal="LONG",
             confidence=round(proba_up, 4),
             model_version=_loaded.model_version,
-            reasons=[f"proba_up={proba_up:.4f}>= {PROBA_LONG}", f"feature_ts={built.feature_ts}"],
+            reasons=[
+                f"proba_up={proba_up:.4f}>= {PROBA_LONG}",
+                f"feature_ts={built.feature_ts}",
+                f"as_of_ts={as_of_ts}" if as_of_ts else "as_of_ts=latest",
+            ],
         )
 
     if proba_up <= PROBA_SHORT:
@@ -98,12 +107,20 @@ def predict(req: PredictRequest):
             signal="SHORT",
             confidence=round(1.0 - proba_up, 4),
             model_version=_loaded.model_version,
-            reasons=[f"proba_up={proba_up:.4f}<= {PROBA_SHORT}", f"feature_ts={built.feature_ts}"],
+            reasons=[
+                f"proba_up={proba_up:.4f}<= {PROBA_SHORT}",
+                f"feature_ts={built.feature_ts}",
+                f"as_of_ts={as_of_ts}" if as_of_ts else "as_of_ts=latest",
+            ],
         )
 
     return PredictResponse(
         signal="FLAT",
         confidence=round(max(proba_up, 1.0 - proba_up), 4),
         model_version=_loaded.model_version,
-        reasons=[f"dead_zone: {PROBA_SHORT} < {proba_up:.4f} < {PROBA_LONG}", f"feature_ts={built.feature_ts}"],
+        reasons=[
+            f"dead_zone: {PROBA_SHORT} < {proba_up:.4f} < {PROBA_LONG}",
+            f"feature_ts={built.feature_ts}",
+            f"as_of_ts={as_of_ts}" if as_of_ts else "as_of_ts=latest",
+        ],
     )

@@ -160,36 +160,41 @@ def prepare_features_like_trainer(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = 0.0
 
-    # IMPORTANT:
-    # Do NOT dropna() on the whole analyzed dataframe, because TechnicalAnalyzer adds many
-    # indicator columns (rolling/shifted) that can keep NaNs far into the recent tail,
-    # especially on 4h/1d. That would make feature_ts stale.
+    # Only drop rows where required engineered columns are NaN (avoid stale tail)
     required = [
-        # base OHLCV (should be present)
-        "open", "high", "low", "close", "volume",
-        # engineered
-        "returns", "log_returns", "price_range", "body_size", "upper_shadow", "lower_shadow",
-        "volatility_5", "volatility_20", "volatility_ratio",
-        "hour", "day_of_week", "is_weekend",
-        # trader placeholders
-        "trader_buy_ratio", "trader_sell_ratio", "trader_net_flow",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "returns",
+        "log_returns",
+        "price_range",
+        "body_size",
+        "upper_shadow",
+        "lower_shadow",
+        "volatility_5",
+        "volatility_20",
+        "volatility_ratio",
+        "hour",
+        "day_of_week",
+        "is_weekend",
+        "trader_buy_ratio",
+        "trader_sell_ratio",
+        "trader_net_flow",
     ]
-
-    # add lags
     for lag in [1, 2, 3, 5, 10, 20]:
         required.append(f"return_lag_{lag}")
         required.append(f"volume_lag_{lag}")
-
-    # add rolling
     for window in [5, 10, 20, 50]:
         required.append(f"rolling_mean_{window}")
         required.append(f"rolling_std_{window}")
         required.append(f"rolling_vol_mean_{window}")
         required.append(f"price_to_ma_{window}")
 
-    # only drop rows where our required feature columns are NaN
     required = [c for c in required if c in df.columns]
     df.dropna(subset=required, inplace=True)
+
     return df
 
 
@@ -211,6 +216,7 @@ def build_latest_feature_row_from_klines(
     data_dir: str,
     interval: str = "1h",
     expected_n_features: Optional[int] = None,
+    as_of_ts: Optional[str] = None,  # ISO8601 like 2026-03-05T12:00:00Z
 ) -> FeatureBuildResult:
     interval = (interval or "1h").strip()
 
@@ -226,14 +232,18 @@ def build_latest_feature_row_from_klines(
     if df.empty:
         raise ValueError("klines empty")
 
+    # Filter history up to as_of_ts (inclusive)
+    if as_of_ts:
+        cutoff = _to_utc_dt(as_of_ts)
+        df = df[df.index <= cutoff]
+        if df.empty:
+            raise ValueError(f"no klines <= as_of_ts={as_of_ts}")
+
     # Need enough history for TA indicators + rolling(50) + lag(20).
     if len(df) < 120:
         raise ValueError(f"not enough klines rows: {len(df)} (need >= 120)")
 
-    # 1) add TA indicators (same as training pipeline)
     df_analyzed = add_technical_indicators_like_system(df)
-
-    # 2) add ML feature engineering (same as trainer)
     df_feat = prepare_features_like_trainer(df_analyzed)
     if df_feat.empty:
         raise ValueError("feature df empty after dropna")

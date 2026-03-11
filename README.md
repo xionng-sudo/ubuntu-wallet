@@ -413,6 +413,43 @@ MODEL_DIR=./models
 
 > **⚠️ 重要**: 即使不填 API Key，系统也能运行（使用模拟数据）。但要获取真实交易员数据，需要填入有效的 API Key。
 
+## Klines 历史回溯（Lookback）
+
+默认情况下，go-collector 拉取 K 线会取最近窗口（`GetKlines(..., limit=500)`）。为了支持回测/特征���程，需要拉取更长历史时，可以对 15m/1h/4h/1d 启用 lookback 分页拉取（1m/5m 仍保持轻量）。
+
+### 环境变量（go-collector）
+
+- `KLINES_LOOKBACK_ENABLED`：是否启用 lookback（默认：true）
+  - `false` 时，所有 interval 都回退到最近 500 根 K 线（`GetKlines(..., 500)`）
+- `KLINES_15M_LOOKBACK_DAYS`：15m 回溯天数（默认：90）
+- `KLINES_1H_LOOKBACK_DAYS`：1h 回溯天数（默认：180）
+- `KLINES_4H_LOOKBACK_DAYS`：4h 回溯天数（默认：365）
+- `KLINES_1D_LOOKBACK_DAYS`：1d 回溯天数（默认：730）
+- `KLINES_LOOKBACK_MAX_PAGES`：lookback 分页最大页数（默认：2000），用于防止极端情况下死循环/无限请求
+
+> 将某个 `KLINES_*_LOOKBACK_DAYS` 设为 `0` 会让该 interval 回退到最近 500 根。
+
+### systemd 示例（/etc/ubuntu-wallet/collector.env）
+```env
+KLINES_LOOKBACK_ENABLED=true
+KLINES_15M_LOOKBACK_DAYS=90
+KLINES_1H_LOOKBACK_DAYS=180
+KLINES_4H_LOOKBACK_DAYS=365
+KLINES_1D_LOOKBACK_DAYS=730
+KLINES_LOOKBACK_MAX_PAGES=2000
+```
+
+### docker 示例
+```bash
+docker run --rm \
+  -e KLINES_LOOKBACK_ENABLED=true \
+  -e KLINES_15M_LOOKBACK_DAYS=90 \
+  -e KLINES_1H_LOOKBACK_DAYS=180 \
+  -e KLINES_4H_LOOKBACK_DAYS=365 \
+  -e KLINES_1D_LOOKBACK_DAYS=730 \
+  -e KLINES_LOOKBACK_MAX_PAGES=2000 \
+  your-image:latest
+```
 ---
 
 ## 编译和构建
