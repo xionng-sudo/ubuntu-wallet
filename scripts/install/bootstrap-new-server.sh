@@ -91,6 +91,14 @@ main() {
   ensure_file_exists "${REPO_DIR}/systemd/env/collector.env.example"
   ensure_file_exists "${REPO_DIR}/systemd/env/telegram.env.example"
 
+  # Ensure ubuntu user/group exists (systemd units run as ubuntu)
+  if ! id ubuntu >/dev/null 2>&1; then
+    die "User 'ubuntu' does not exist. This repo assumes username 'ubuntu'. Create it or adjust units/scripts."
+  fi
+  if ! getent group ubuntu >/dev/null 2>&1; then
+    die "Group 'ubuntu' does not exist. Create it or adjust units/scripts."
+  fi
+
   log "Creating ${ETC_DIR}"
   mkdir -p "${ETC_DIR}"
   chmod 755 "${ETC_DIR}"
@@ -110,8 +118,11 @@ main() {
     log "Exists: ${ETC_DIR}/telegram.env (skip)"
   fi
 
-  chmod 600 "${ETC_DIR}"/*.env || true
-  chown root:root "${ETC_DIR}"/*.env || true
+  # IMPORTANT:
+  # systemd services run as User=ubuntu and use EnvironmentFile=/etc/ubuntu-wallet/*.env
+  # Therefore ubuntu must be able to read these files.
+  chown root:ubuntu "${ETC_DIR}"/*.env || true
+  chmod 640 "${ETC_DIR}"/*.env || true
 
   log "Installing systemd units"
   cp "${REPO_DIR}/systemd/go-collector.service" "${SYSTEMD_DIR}/go-collector.service"
