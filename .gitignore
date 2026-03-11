@@ -42,8 +42,8 @@ check-go-collector.log.*
 *.gz
 
 # --- local ops scripts & backups (machine specific; may include secrets) ---
-check-go-collector.sh
-notify-telegram.sh
+/check-go-collector.sh
+/notify-telegram.sh
 check-go-collector.sh.bak.*
 
 # --- ensure nested venvs are ignored (important for ml-service/.venv) ---
