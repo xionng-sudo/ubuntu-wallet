@@ -10,7 +10,6 @@ from typing import Any, List, Optional
 import numpy as np
 import pandas as pd
 
-
 # Allow importing python-analyzer modules without packaging
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PY_ANALYZER_DIR = os.path.join(REPO_ROOT, "python-analyzer")
@@ -25,6 +24,9 @@ except Exception as e:
     _TA_IMPORT_ERROR = e
 else:
     _TA_IMPORT_ERROR = None
+
+
+SUPPORTED_INTERVALS = {"1h", "4h", "1d"}
 
 
 @dataclass
@@ -49,7 +51,14 @@ def _to_utc_dt(ts: Any) -> datetime:
     return datetime.fromisoformat(s).astimezone(timezone.utc)
 
 
-def load_klines_1h_json(path: str) -> pd.DataFrame:
+def load_klines_json(path: str) -> pd.DataFrame:
+    """
+    Load klines json from data/klines_{interval}.json.
+
+    Supported formats:
+      - list[dict]: with keys timestamp/open/high/low/close/(volume)
+      - list[list]: [ts, open, high, low, close, volume]
+    """
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
 
@@ -89,7 +98,7 @@ def load_klines_1h_json(path: str) -> pd.DataFrame:
             )
         return pd.DataFrame(rows).set_index("ts").sort_index()
 
-    raise ValueError("Unsupported klines_1h.json format")
+    raise ValueError("Unsupported klines json format")
 
 
 def add_technical_indicators_like_system(df: pd.DataFrame) -> pd.DataFrame:
@@ -174,14 +183,17 @@ def build_latest_feature_row_from_klines(
     interval: str = "1h",
     expected_n_features: Optional[int] = None,
 ) -> FeatureBuildResult:
-    if interval != "1h":
-        raise ValueError("Only 1h supported")
+    interval = (interval or "1h").strip()
 
-    klines_path = os.path.join(data_dir, "klines_1h.json")
+    if interval not in SUPPORTED_INTERVALS:
+        supported = ", ".join(sorted(SUPPORTED_INTERVALS))
+        raise ValueError(f"unsupported interval={interval}, supported=[{supported}]")
+
+    klines_path = os.path.join(data_dir, f"klines_{interval}.json")
     if not os.path.exists(klines_path):
         raise FileNotFoundError(klines_path)
 
-    df = load_klines_1h_json(klines_path)
+    df = load_klines_json(klines_path)
     if df.empty:
         raise ValueError("klines empty")
 
