@@ -160,7 +160,36 @@ def prepare_features_like_trainer(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = 0.0
 
-    df.dropna(inplace=True)
+    # IMPORTANT:
+    # Do NOT dropna() on the whole analyzed dataframe, because TechnicalAnalyzer adds many
+    # indicator columns (rolling/shifted) that can keep NaNs far into the recent tail,
+    # especially on 4h/1d. That would make feature_ts stale.
+    required = [
+        # base OHLCV (should be present)
+        "open", "high", "low", "close", "volume",
+        # engineered
+        "returns", "log_returns", "price_range", "body_size", "upper_shadow", "lower_shadow",
+        "volatility_5", "volatility_20", "volatility_ratio",
+        "hour", "day_of_week", "is_weekend",
+        # trader placeholders
+        "trader_buy_ratio", "trader_sell_ratio", "trader_net_flow",
+    ]
+
+    # add lags
+    for lag in [1, 2, 3, 5, 10, 20]:
+        required.append(f"return_lag_{lag}")
+        required.append(f"volume_lag_{lag}")
+
+    # add rolling
+    for window in [5, 10, 20, 50]:
+        required.append(f"rolling_mean_{window}")
+        required.append(f"rolling_std_{window}")
+        required.append(f"rolling_vol_mean_{window}")
+        required.append(f"price_to_ma_{window}")
+
+    # only drop rows where our required feature columns are NaN
+    required = [c for c in required if c in df.columns]
+    df.dropna(subset=required, inplace=True)
     return df
 
 
