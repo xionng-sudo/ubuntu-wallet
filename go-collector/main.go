@@ -438,10 +438,10 @@ func collectMarketData(bn *collector.BinanceCollector) {
 	}
 
 	// Lookback defaults (can be overridden by env). If <=0 => fallback to latest-window only.
-	look15m := envIntOrDefault("KLINES_15M_LOOKBACK_DAYS", 180)
-	look1h := envIntOrDefault("KLINES_1H_LOOKBACK_DAYS", 365)
-	look4h := envIntOrDefault("KLINES_4H_LOOKBACK_DAYS", 730)
-	look1d := envIntOrDefault("KLINES_1D_LOOKBACK_DAYS", 1460)
+	look15m := envIntOrDefault("KLINES_15M_LOOKBACK_DAYS", 90)
+	look1h := envIntOrDefault("KLINES_1H_LOOKBACK_DAYS", 180)
+	look4h := envIntOrDefault("KLINES_4H_LOOKBACK_DAYS", 365)
+	look1d := envIntOrDefault("KLINES_1D_LOOKBACK_DAYS", 730)
 
 	intervals := []string{"1m", "5m", "15m", "1h", "4h", "1d"}
 
