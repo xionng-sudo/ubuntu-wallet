@@ -1,0 +1,20 @@
+[Unit]
+Description=ubuntu-wallet go-collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ubuntu-wallet
+ExecStart=/home/ubuntu/ubuntu-wallet/bin/go-collector
+Restart=always
+RestartSec=3
+
+# 交易所 key / collector 配置（不进 git）
+EnvironmentFile=/etc/ubuntu-wallet/collector.env
+
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
