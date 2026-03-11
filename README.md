@@ -138,20 +138,77 @@ sudo whoami
 
 ## 详细安装步骤
 
-### 方法一: 一键安装 (推荐)
+### 方法一：生产部署（systemd + ml-service + go-collector，自愈，推荐）
+
+适用场景：云服务器长期运行 / 自动重启 / 监控自愈。
+
+部署后会启动：
+- `ml-service`（FastAPI，仅监听 `127.0.0.1:9000`）
+- `go-collector`（HTTP API 默认 `8080`，以你的程序/环境变量为准）
+- `check-go-collector.timer`（每分钟健康检查，异常自动重启并 Telegram 通知）
+
+#### 1）克隆项目
+```bash
+cd ~
+git clone https://github.com/xionghan889-tech/ubuntu-wallet.git
+cd ubuntu-wallet
+```
+
+#### 2）一键部署（需要 root）
+```bash
+sudo bash scripts/install/bootstrap-new-server.sh
+```
+
+脚本会自动：
+- 从 `systemd/env/*.example` 生成 `/etc/ubuntu-wallet/*.env`（如已存在不会覆盖）
+- 安装 systemd unit 到 `/etc/systemd/system/`
+- 安装 sudoers（允许自愈脚本无密码重启 go-collector）
+- 尝试构建 go-collector、创建 ml-service 的 `.venv`
+- 检查 env 必填项；若缺失会提示你补录，并不会强行启动服务
+
+#### 3）填写敏感配置（不进 Git）
+```bash
+sudo nano /etc/ubuntu-wallet/collector.env
+sudo nano /etc/ubuntu-wallet/telegram.env
+```
+
+如脚本未自动启动服务，手动启动：
+```bash
+sudo systemctl enable --now ml-service.service
+sudo systemctl enable --now go-collector.service
+sudo systemctl enable --now check-go-collector.timer
+```
+
+#### 4）验收
+```bash
+curl -fsS http://127.0.0.1:9000/docs | head
+curl -fsS --max-time 3 http://127.0.0.1:8080/api/healthz | jq .
+systemctl list-timers --all | grep check-go-collector || true
+journalctl -u check-go-collector.service -n 80 --no-pager
+```
+
+详细说明见：
+- `systemd/DEPLOY-NEW-SERVER.md`
+
+---
+
+### 方法二：本地研究/开发（scripts/install.sh + scripts/run.sh）
+
+适用场景：本地跑完整研究流程（`python-analyzer` + Dash 8050）。
+
+> 注意：该方式与生产 systemd 部署是两条路线，生产机器建议优先用“方法一”。
 
 ```bash
 # 1. 克隆项目
 git clone https://github.com/xionghan889-tech/ubuntu-wallet.git
 cd ubuntu-wallet
 
-# 2. 给安装脚本添加执行权限
+# 2. 给脚本添加执行权限
 chmod +x scripts/install.sh scripts/run.sh
 
 # 3. 运行安装脚本
 bash scripts/install.sh
 ```
-
 ### 方法二: 手动逐步安装
 
 #### 步骤 1: 更新系统
