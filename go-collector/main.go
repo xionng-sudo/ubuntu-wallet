@@ -30,6 +30,20 @@ const (
 	okxRateSleep  = 80 * time.Millisecond
 )
 
+// Klines lookback mode controls whether we call Binance GetKlinesLookback for
+// 15m/1h/4h/1d intervals.
+// - on_startup (default): run lookback once during initial startup collection only
+// - always: run lookback on every FAST tick (can be heavy/noisy)
+// - off: never run lookback (always use latest-window-only)
+const (
+	klinesLookbackModeOnStartup = "on_startup"
+	klinesLookbackModeAlways    = "always"
+	klinesLookbackModeOff       = "off"
+)
+
+// ensures on_startup lookback happens at most once per process lifetime
+var lookbackOnce sync.Once
+
 type DataStore struct {
 	mu          sync.RWMutex
 	Traders     map[string][]models.Trader `json:"traders"`
@@ -159,6 +173,12 @@ func main() {
 	log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
 	log.SetLevel(log.InfoLevel)
 
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("KLINES_LOOKBACK_MODE")))
+	if mode == "" {
+		mode = klinesLookbackModeOnStartup
+	}
+	log.Infof("KLINES_LOOKBACK_MODE=%s", mode)
+
 	log.Info("========================================")
 	log.Info("  ETH Crypto Trader Data Collector")
 	log.Info("========================================")
@@ -204,14 +224,14 @@ func main() {
 	collectSlowAll(dataDir, binance, okx, coinbase)
 
 	log.Info("Starting initial fast data collection...")
-	collectFastAll(dataDir, binance)
+	collectFastAll(dataDir, binance, true)
 
 	go func() {
 		ticker := time.NewTicker(fastEvery)
 		defer ticker.Stop()
 		for range ticker.C {
 			log.Info("Running periodic FAST data collection...")
-			collectFastAll(dataDir, binance)
+			collectFastAll(dataDir, binance, false)
 		}
 	}()
 
@@ -228,8 +248,8 @@ func main() {
 }
 
 // FAST: only what ML really needs (stable + low rate-limit risk)
-func collectFastAll(dataDir string, binance *collector.BinanceCollector) {
-	collectMarketData(binance)
+func collectFastAll(dataDir string, binance *collector.BinanceCollector, isStartup bool) {
+	collectMarketData(binance, isStartup)
 	saveFastDataToFiles(dataDir)
 
 	// === compute features + signals (1h primary + 4h filter) ===
@@ -427,7 +447,38 @@ func collectCoinbaseData(cb *collector.CoinbaseCollector) {
 	}
 }
 
-func collectMarketData(bn *collector.BinanceCollector) {
+func shouldUseLookbackThisRun(isStartup bool) bool {
+	mode := strings.TrimSpace(strings.ToLower(os.Getenv("KLINES_LOOKBACK_MODE")))
+	if mode == "" {
+		mode = klinesLookbackModeOnStartup
+	}
+
+	switch mode {
+	case klinesLookbackModeAlways:
+		return true
+	case klinesLookbackModeOff:
+		return false
+	case klinesLookbackModeOnStartup:
+		if !isStartup {
+			return false
+		}
+		allowed := false
+		lookbackOnce.Do(func() {
+			allowed = true
+		})
+		return allowed
+	default:
+		// safe fallback: behave like on_startup
+		if !isStartup {
+			return false
+		}
+		allowed := false
+		lookbackOnce.Do(func() { allowed = true })
+		return allowed
+	}
+}
+
+func collectMarketData(bn *collector.BinanceCollector, isStartup bool) {
 	market, err := bn.GetCurrentPrice("ETHUSDT")
 	if err != nil {
 		log.Warnf("Failed to get current price: %v", err)
@@ -436,6 +487,9 @@ func collectMarketData(bn *collector.BinanceCollector) {
 		store.MarketData = market
 		store.mu.Unlock()
 	}
+
+	useLookback := shouldUseLookbackThisRun(isStartup)
+	log.Infof("Klines lookback enabled for this run: %v (isStartup=%v)", useLookback, isStartup)
 
 	// Lookback defaults (can be overridden by env). If <=0 => fallback to latest-window only.
 	look15m := envIntOrDefault("KLINES_15M_LOOKBACK_DAYS", 90)
@@ -453,25 +507,25 @@ func collectMarketData(bn *collector.BinanceCollector) {
 
 		switch interval {
 		case "15m":
-			if look15m > 0 {
+			if useLookback && look15m > 0 {
 				klines, err = bn.GetKlinesLookback("ETHUSDT", "15m", look15m)
 			} else {
 				klines, err = bn.GetKlines("ETHUSDT", "15m", 500)
 			}
 		case "1h":
-			if look1h > 0 {
+			if useLookback && look1h > 0 {
 				klines, err = bn.GetKlinesLookback("ETHUSDT", "1h", look1h)
 			} else {
 				klines, err = bn.GetKlines("ETHUSDT", "1h", 500)
 			}
 		case "4h":
-			if look4h > 0 {
+			if useLookback && look4h > 0 {
 				klines, err = bn.GetKlinesLookback("ETHUSDT", "4h", look4h)
 			} else {
 				klines, err = bn.GetKlines("ETHUSDT", "4h", 500)
 			}
 		case "1d":
-			if look1d > 0 {
+			if useLookback && look1d > 0 {
 				klines, err = bn.GetKlinesLookback("ETHUSDT", "1d", look1d)
 			} else {
 				klines, err = bn.GetKlines("ETHUSDT", "1d", 500)
