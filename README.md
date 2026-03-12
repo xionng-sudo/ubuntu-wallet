@@ -426,6 +426,9 @@ MODEL_DIR=./models
 - `KLINES_4H_LOOKBACK_DAYS`：4h 回溯天数（默认：365）
 - `KLINES_1D_LOOKBACK_DAYS`：1d 回溯天数（默认：730）
 - `KLINES_LOOKBACK_MAX_PAGES`：lookback 分页最大页数（默认：2000），用于防止极端情况下死循环/无限请求
+KLINES_LOOKBACK_MODE=on_startup（默认，推荐生产）
+KLINES_LOOKBACK_MODE=always（每次 FAST tick 都回溯，可能限频/日志刷屏）
+KLINES_LOOKBACK_MODE=off（不回溯，只拉最近窗口）
 
 > 将某个 `KLINES_*_LOOKBACK_DAYS` 设为 `0` 会让该 interval 回退到最近 500 根。
 
