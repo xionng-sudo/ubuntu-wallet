@@ -6,14 +6,21 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from feature_builder import build_latest_feature_row_from_klines
+from feature_builder import build_event_v3_feature_row, build_latest_feature_row_from_klines
 from model_loader import LoadedModel, load_model, predict_proba
 
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models")))
 DATA_DIR = os.getenv("DATA_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")))
 
+# Thresholds for legacy binary models
 PROBA_LONG = float(os.getenv("ML_PROBA_LONG", "0.55"))
 PROBA_SHORT = float(os.getenv("ML_PROBA_SHORT", "0.45"))
+
+# Thresholds for event_v3 3-class stacking model
+# EVENT_V3_P_ENTER: minimum per-class probability to enter a position
+# EVENT_V3_DELTA:   minimum margin (p_long - p_short) or (p_short - p_long) required
+EVENT_V3_P_ENTER = float(os.getenv("EVENT_V3_P_ENTER", "0.65"))
+EVENT_V3_DELTA = float(os.getenv("EVENT_V3_DELTA", "0.0"))
 
 _loaded: Optional[LoadedModel] = None
 
@@ -40,7 +47,7 @@ class PredictResponse(BaseModel):
     reasons: List[str] = []
 
 
-app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v2-asof")
+app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v3-event")
 
 
 @app.on_event("startup")
@@ -70,13 +77,21 @@ def predict(req: PredictRequest):
     interval = req.interval or "1h"
     as_of_ts = req.as_of_ts
 
+    # Use the appropriate feature builder based on the active model type
     try:
-        built = build_latest_feature_row_from_klines(
-            data_dir=DATA_DIR,
-            interval=interval,
-            expected_n_features=_loaded.expected_n_features,
-            as_of_ts=as_of_ts,
-        )
+        if _loaded.active_model == "event_v3":
+            built = build_event_v3_feature_row(
+                data_dir=DATA_DIR,
+                expected_n_features=_loaded.expected_n_features,
+                as_of_ts=as_of_ts,
+            )
+        else:
+            built = build_latest_feature_row_from_klines(
+                data_dir=DATA_DIR,
+                interval=interval,
+                expected_n_features=_loaded.expected_n_features,
+                as_of_ts=as_of_ts,
+            )
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"feature_build_failed: {e}")
 
@@ -85,6 +100,55 @@ def predict(req: PredictRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"predict_failed: {e}")
 
+    # --- event_v3: 3-class multiclass output ---
+    # Classes: 0=SHORT, 1=FLAT, 2=LONG
+    if mode == "proba_multiclass" and _loaded.active_model == "event_v3":
+        ev3 = _loaded.event_v3 or {}
+        p_enter = float(os.getenv("EVENT_V3_P_ENTER", str(ev3.get("p_enter", EVENT_V3_P_ENTER))))
+        delta = float(os.getenv("EVENT_V3_DELTA", str(ev3.get("delta", EVENT_V3_DELTA))))
+
+        p_short = float(p[0, 0])
+        p_flat = float(p[0, 1])
+        p_long = float(p[0, 2])
+
+        as_of_str = f"as_of_ts={as_of_ts}" if as_of_ts else "as_of_ts=latest"
+
+        if p_long >= p_enter and (p_long - p_short) >= delta:
+            return PredictResponse(
+                signal="LONG",
+                confidence=round(p_long, 4),
+                model_version=_loaded.model_version,
+                reasons=[
+                    f"p_long={p_long:.4f}>={p_enter} delta={p_long - p_short:.4f}>={delta}",
+                    f"feature_ts={built.feature_ts}",
+                    as_of_str,
+                ],
+            )
+
+        if p_short >= p_enter and (p_short - p_long) >= delta:
+            return PredictResponse(
+                signal="SHORT",
+                confidence=round(p_short, 4),
+                model_version=_loaded.model_version,
+                reasons=[
+                    f"p_short={p_short:.4f}>={p_enter} delta={p_short - p_long:.4f}>={delta}",
+                    f"feature_ts={built.feature_ts}",
+                    as_of_str,
+                ],
+            )
+
+        return PredictResponse(
+            signal="FLAT",
+            confidence=round(max(p_long, p_short, p_flat), 4),
+            model_version=_loaded.model_version,
+            reasons=[
+                f"no_signal: p_long={p_long:.4f} p_short={p_short:.4f} p_flat={p_flat:.4f} threshold={p_enter}",
+                f"feature_ts={built.feature_ts}",
+                as_of_str,
+            ],
+        )
+
+    # --- legacy binary output ---
     if mode != "proba_binary":
         raise HTTPException(status_code=500, detail=f"unsupported_predict_mode: {mode}")
 
