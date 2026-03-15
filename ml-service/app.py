@@ -3,12 +3,13 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from feature_builder import build_event_v3_feature_row, build_latest_feature_row_from_klines
 from model_loader import LoadedModel, load_model, predict_proba
-from prediction_logger import log_prediction  # 新增这一行
+from prediction_logger import log_prediction
 
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models")))
 DATA_DIR = os.getenv("DATA_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")))
@@ -32,7 +33,7 @@ class PredictRequest(BaseModel):
     symbol: Optional[str] = None
     interval: Optional[str] = "1h"
 
-    # NEW: for historical backtests
+    # for historical backtests
     as_of_ts: Optional[str] = Field(default=None, description="ISO8601 cutoff, e.g. 2026-03-05T12:00:00Z")
 
     feature_ts: Optional[str] = None
@@ -43,9 +44,36 @@ class PredictResponse(BaseModel):
     model_config = {"protected_namespaces": ()}
 
     signal: str = Field(..., description="LONG|SHORT|FLAT")
-    confidence: float = Field(..., ge=0.0, le=1.0)
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Raw model confidence")
+    calibrated_confidence: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Calibrated confidence (if calibration artifact available)"
+    )
+    calibration_method: Optional[str] = Field(
+        default=None, description="Calibration method used: isotonic | sigmoid | None"
+    )
     model_version: str
     reasons: List[str] = []
+
+
+def _apply_calibration(
+    loaded: LoadedModel,
+    p: np.ndarray,
+) -> tuple[Optional[np.ndarray], Optional[str]]:
+    """
+    Apply calibration if a calibration artifact is present on the model.
+
+    Returns:
+        (calibrated_proba, method_name) or (None, None) if not available.
+    """
+    if loaded.calibration is None:
+        return None, None
+    try:
+        from calibration import calibrate_proba
+        cal_p = calibrate_proba(p, loaded.calibration)
+        return cal_p, loaded.calibration.method
+    except Exception:
+        return None, None
 
 
 app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v3-event")
@@ -67,6 +95,8 @@ def healthz():
         "data_dir": DATA_DIR,
         "model_version": _loaded.model_version,
         "model_expected_n_features": _loaded.expected_n_features,
+        "calibration_available": _loaded.calibration is not None,
+        "calibration_method": _loaded.calibration.method if _loaded.calibration is not None else None,
     }
 
 
@@ -102,22 +132,22 @@ def predict(req: PredictRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"predict_failed: {e}")
 
-    # 为日志准备公共字段：feature_ts 转 datetime
+    # Parse feature timestamp for logging
     from datetime import datetime
-    feat_ts_raw = built.feature_ts  # 这个通常是 ISO 字符串
+    feat_ts_raw = built.feature_ts
     try:
         if feat_ts_raw:
-            # 允许 "....Z" 或带 offset 的格式
             feat_ts = datetime.fromisoformat(str(feat_ts_raw).replace("Z", "+00:00"))
         else:
-            # 如果没有 feature_ts，就用 as_of_ts 或当前时间
             if as_of_ts:
                 feat_ts = datetime.fromisoformat(as_of_ts.replace("Z", "+00:00"))
             else:
                 feat_ts = datetime.utcnow()
     except Exception:
-        from datetime import datetime as dt
-        feat_ts = dt.utcnow()
+        feat_ts = datetime.utcnow()
+
+    # Apply calibration if available
+    cal_p, cal_method = _apply_calibration(_loaded, p)
 
     # --- event_v3: 3-class multiclass output ---
     # Classes: 0=SHORT, 1=FLAT, 2=LONG
@@ -130,68 +160,33 @@ def predict(req: PredictRequest):
         p_flat = float(p[0, 1])
         p_long = float(p[0, 2])
 
+        # Calibrated probabilities (use for thresholding if available)
+        if cal_p is not None:
+            cp_short = float(cal_p[0, 0])
+            cp_flat = float(cal_p[0, 1])
+            cp_long = float(cal_p[0, 2])
+        else:
+            cp_short = cp_flat = cp_long = None
+
+        # Use calibrated probabilities for thresholding when available
+        eff_long = cp_long if cp_long is not None else p_long
+        eff_short = cp_short if cp_short is not None else p_short
+
         as_of_str = f"as_of_ts={as_of_ts}" if as_of_ts else "as_of_ts=latest"
 
-        # 预设默认 signal / confidence 用于日志
         signal = "FLAT"
         confidence = max(p_long, p_short, p_flat)
+        cal_conf = max(cp_long, cp_short, cp_flat) if cp_long is not None else None
 
-        if p_long >= p_enter and (p_long - p_short) >= delta:
+        if eff_long >= p_enter and (eff_long - eff_short) >= delta:
             signal = "LONG"
             confidence = p_long
-            # 先记录日志
-            log_prediction(
-                ts=feat_ts,
-                symbol=symbol,
-                interval=interval,
-                proba_long=p_long,
-                proba_short=p_short,
-                proba_flat=p_flat,
-                signal=signal,
-                confidence=round(confidence, 4),
-                model_version=_loaded.model_version,
-                active_model=_loaded.active_model,
-                extra={"as_of_ts": as_of_ts},
-            )
-            return PredictResponse(
-                signal="LONG",
-                confidence=round(p_long, 4),
-                model_version=_loaded.model_version,
-                reasons=[
-                    f"p_long={p_long:.4f}>={p_enter} delta={p_long - p_short:.4f}>={delta}",
-                    f"feature_ts={built.feature_ts}",
-                    as_of_str,
-                ],
-            )
-
-        if p_short >= p_enter and (p_short - p_long) >= delta:
+            cal_conf = cp_long
+        elif eff_short >= p_enter and (eff_short - eff_long) >= delta:
             signal = "SHORT"
             confidence = p_short
-            log_prediction(
-                ts=feat_ts,
-                symbol=symbol,
-                interval=interval,
-                proba_long=p_long,
-                proba_short=p_short,
-                proba_flat=p_flat,
-                signal=signal,
-                confidence=round(confidence, 4),
-                model_version=_loaded.model_version,
-                active_model=_loaded.active_model,
-                extra={"as_of_ts": as_of_ts},
-            )
-            return PredictResponse(
-                signal="SHORT",
-                confidence=round(p_short, 4),
-                model_version=_loaded.model_version,
-                reasons=[
-                    f"p_short={p_short:.4f}>={p_enter} delta={p_short - p_long:.4f}>={delta}",
-                    f"feature_ts={built.feature_ts}",
-                    as_of_str,
-                ],
-            )
+            cal_conf = cp_short
 
-        # FLAT 情况也要记录
         log_prediction(
             ts=feat_ts,
             symbol=symbol,
@@ -199,21 +194,50 @@ def predict(req: PredictRequest):
             proba_long=p_long,
             proba_short=p_short,
             proba_flat=p_flat,
-            signal="FLAT",
-            confidence=round(confidence, 4),
+            signal=signal,
+            confidence=round(confidence, 6),
             model_version=_loaded.model_version,
             active_model=_loaded.active_model,
+            cal_proba_long=cp_long,
+            cal_proba_short=cp_short,
+            cal_proba_flat=cp_flat,
+            calibrated_confidence=round(cal_conf, 6) if cal_conf is not None else None,
+            calibration_method=cal_method,
+            threshold_long=p_enter,
+            threshold_short=p_enter,
             extra={"as_of_ts": as_of_ts},
         )
-        return PredictResponse(
-            signal="FLAT",
-            confidence=round(confidence, 4),
-            model_version=_loaded.model_version,
-            reasons=[
+
+        if signal == "LONG":
+            reasons = [
+                f"p_long={p_long:.4f}>={p_enter} delta={p_long - p_short:.4f}>={delta}",
+                f"feature_ts={built.feature_ts}",
+                as_of_str,
+            ]
+            if cal_conf is not None:
+                reasons.insert(1, f"cal_p_long={cp_long:.4f}")
+        elif signal == "SHORT":
+            reasons = [
+                f"p_short={p_short:.4f}>={p_enter} delta={p_short - p_long:.4f}>={delta}",
+                f"feature_ts={built.feature_ts}",
+                as_of_str,
+            ]
+            if cal_conf is not None:
+                reasons.insert(1, f"cal_p_short={cp_short:.4f}")
+        else:
+            reasons = [
                 f"no_signal: p_long={p_long:.4f} p_short={p_short:.4f} p_flat={p_flat:.4f} threshold={p_enter}",
                 f"feature_ts={built.feature_ts}",
                 as_of_str,
-            ],
+            ]
+
+        return PredictResponse(
+            signal=signal,
+            confidence=round(confidence, 4),
+            calibrated_confidence=round(cal_conf, 4) if cal_conf is not None else None,
+            calibration_method=cal_method,
+            model_version=_loaded.model_version,
+            reasons=reasons,
         )
 
     # --- legacy binary output ---
@@ -222,16 +246,26 @@ def predict(req: PredictRequest):
 
     proba_up = float(p[0, 1])
 
-    # 映射成 long/short 概率
+    # Map to long/short probabilities
     p_long = proba_up
     p_short = 1.0 - proba_up
     p_flat = None
 
+    # Calibrated probabilities for binary case
+    if cal_p is not None:
+        cp_long_bin = float(cal_p[0, 1])
+        cp_short_bin = 1.0 - cp_long_bin
+        eff_proba_up = cp_long_bin
+    else:
+        cp_long_bin = cp_short_bin = None
+        eff_proba_up = proba_up
+
     as_of_str_final = f"as_of_ts={as_of_ts}" if as_of_ts else "as_of_ts=latest"
 
-    if proba_up >= PROBA_LONG:
+    if eff_proba_up >= PROBA_LONG:
         signal = "LONG"
         confidence = proba_up
+        cal_conf_bin = cp_long_bin
         log_prediction(
             ts=feat_ts,
             symbol=symbol,
@@ -240,14 +274,22 @@ def predict(req: PredictRequest):
             proba_short=p_short,
             proba_flat=p_flat,
             signal=signal,
-            confidence=round(confidence, 4),
+            confidence=round(confidence, 6),
             model_version=_loaded.model_version,
             active_model=_loaded.active_model,
+            cal_proba_long=cp_long_bin,
+            cal_proba_short=cp_short_bin,
+            calibrated_confidence=round(cal_conf_bin, 6) if cal_conf_bin is not None else None,
+            calibration_method=cal_method,
+            threshold_long=PROBA_LONG,
+            threshold_short=PROBA_SHORT,
             extra={"as_of_ts": as_of_ts},
         )
         return PredictResponse(
             signal="LONG",
             confidence=round(proba_up, 4),
+            calibrated_confidence=round(cal_conf_bin, 4) if cal_conf_bin is not None else None,
+            calibration_method=cal_method,
             model_version=_loaded.model_version,
             reasons=[
                 f"proba_up={proba_up:.4f}>= {PROBA_LONG}",
@@ -256,9 +298,10 @@ def predict(req: PredictRequest):
             ],
         )
 
-    if proba_up <= PROBA_SHORT:
+    if eff_proba_up <= PROBA_SHORT:
         signal = "SHORT"
         confidence = 1.0 - proba_up
+        cal_conf_bin = cp_short_bin
         log_prediction(
             ts=feat_ts,
             symbol=symbol,
@@ -267,14 +310,22 @@ def predict(req: PredictRequest):
             proba_short=p_short,
             proba_flat=p_flat,
             signal=signal,
-            confidence=round(confidence, 4),
+            confidence=round(confidence, 6),
             model_version=_loaded.model_version,
             active_model=_loaded.active_model,
+            cal_proba_long=cp_long_bin,
+            cal_proba_short=cp_short_bin,
+            calibrated_confidence=round(cal_conf_bin, 6) if cal_conf_bin is not None else None,
+            calibration_method=cal_method,
+            threshold_long=PROBA_LONG,
+            threshold_short=PROBA_SHORT,
             extra={"as_of_ts": as_of_ts},
         )
         return PredictResponse(
             signal="SHORT",
             confidence=round(confidence, 4),
+            calibrated_confidence=round(cal_conf_bin, 4) if cal_conf_bin is not None else None,
+            calibration_method=cal_method,
             model_version=_loaded.model_version,
             reasons=[
                 f"proba_up={proba_up:.4f}<= {PROBA_SHORT}",
@@ -294,14 +345,22 @@ def predict(req: PredictRequest):
         proba_short=p_short,
         proba_flat=p_flat,
         signal=signal,
-        confidence=round(confidence, 4),
+        confidence=round(confidence, 6),
         model_version=_loaded.model_version,
         active_model=_loaded.active_model,
+        cal_proba_long=cp_long_bin,
+        cal_proba_short=cp_short_bin,
+        calibrated_confidence=None,
+        calibration_method=cal_method,
+        threshold_long=PROBA_LONG,
+        threshold_short=PROBA_SHORT,
         extra={"as_of_ts": as_of_ts},
     )
     return PredictResponse(
         signal="FLAT",
         confidence=round(confidence, 4),
+        calibrated_confidence=None,
+        calibration_method=cal_method,
         model_version=_loaded.model_version,
         reasons=[
             f"dead_zone: {PROBA_SHORT} < {proba_up:.4f} < {PROBA_LONG}",

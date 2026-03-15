@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
+import warnings
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -25,11 +27,84 @@ except Exception as e:
 else:
     _TA_IMPORT_ERROR = None
 
+logger = logging.getLogger(__name__)
 
 SUPPORTED_INTERVALS = {"1h", "4h", "1d"}
 
-# Multi-timeframe column prefixes used by event_v3
-_EXTRA_TF_PREFIXES = ("tf4h_", "tf1d_")
+
+# ---------------------------------------------------------------------------
+# Schema validation
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SchemaValidationResult:
+    """Result of a feature schema validation check."""
+    is_valid: bool
+    missing_columns: List[str]   # columns in schema but not in data
+    extra_columns: List[str]     # columns in data but not in schema
+    zero_fill_columns: List[str] # columns that were filled with 0.0 (were missing)
+    n_expected: int
+    n_actual: int
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "is_valid": self.is_valid,
+            "missing_columns": self.missing_columns,
+            "extra_columns": self.extra_columns,
+            "zero_fill_columns": self.zero_fill_columns,
+            "n_expected": self.n_expected,
+            "n_actual": self.n_actual,
+        }
+
+
+def validate_feature_schema(
+    df: pd.DataFrame,
+    expected_columns: List[str],
+    warn_on_missing: bool = True,
+) -> SchemaValidationResult:
+    """
+    Validate that df contains the expected feature columns.
+
+    Logs warnings for missing or extra columns to help detect
+    online/offline feature drift early.
+
+    Args:
+        df:               DataFrame with constructed features.
+        expected_columns: Canonical list of feature column names from training.
+        warn_on_missing:  If True, log a warning for each missing column.
+
+    Returns:
+        SchemaValidationResult with details of any mismatch.
+    """
+    actual_set = set(df.columns)
+    expected_set = set(expected_columns)
+
+    missing = sorted(expected_set - actual_set)
+    extra = sorted(actual_set - expected_set)
+
+    if warn_on_missing and missing:
+        logger.warning(
+            "Feature schema drift: %d columns missing from live data that exist in training schema. "
+            "They will be zero-filled. Missing: %s",
+            len(missing),
+            missing[:10],  # show first 10
+        )
+    if extra:
+        logger.debug(
+            "Feature schema: %d extra columns in live data (not in training schema). "
+            "They will be dropped. Extra: %s",
+            len(extra),
+            extra[:10],
+        )
+
+    return SchemaValidationResult(
+        is_valid=len(missing) == 0,
+        missing_columns=missing,
+        extra_columns=extra,
+        zero_fill_columns=missing,
+        n_expected=len(expected_columns),
+        n_actual=len(df.columns),
+    )
 
 
 @dataclass
@@ -37,6 +112,10 @@ class FeatureBuildResult:
     X_row: np.ndarray
     feature_columns: List[str]
     feature_ts: str
+    schema_validation: Optional[SchemaValidationResult] = None
+
+# Multi-timeframe column prefixes used by event_v3
+_EXTRA_TF_PREFIXES = ("tf4h_", "tf1d_")
 
 
 def _to_utc_dt(ts: Any) -> datetime:
@@ -337,7 +416,11 @@ def build_event_v3_feature_row(
 
     feature_columns = _load_feature_columns_event_v3(model_dir)
 
+    # Run schema validation BEFORE reindex to detect drift
+    schema_result = validate_feature_schema(merged, feature_columns, warn_on_missing=True)
+
     # ONE-SHOT alignment: avoids DataFrame fragmentation warnings
+    # Columns in schema but missing from data → filled with 0.0
     merged = merged.reindex(columns=feature_columns, fill_value=0.0)
 
     merged = merged.replace([np.inf, -np.inf], np.nan).fillna(0.0)
@@ -354,7 +437,12 @@ def build_event_v3_feature_row(
         .replace("+00:00", "Z")
     )
     X_row = X[-1:].astype(np.float32)
-    return FeatureBuildResult(X_row=X_row, feature_columns=feature_columns, feature_ts=latest_ts)
+    return FeatureBuildResult(
+        X_row=X_row,
+        feature_columns=feature_columns,
+        feature_ts=latest_ts,
+        schema_validation=schema_result,
+    )
 
 
 def build_latest_feature_row_from_klines(

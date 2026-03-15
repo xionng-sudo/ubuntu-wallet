@@ -1,0 +1,24 @@
+[Unit]
+Description=ubuntu-wallet prediction evaluator (evaluate_from_logs.py)
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ubuntu-wallet/scripts
+# Activate the venv so sklearn/pandas etc. are available
+ExecStart=/bin/bash -c 'source /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/activate && \
+  python /home/ubuntu/ubuntu-wallet/scripts/evaluate_from_logs.py \
+    --log-path /home/ubuntu/ubuntu-wallet/data/predictions_log.jsonl \
+    --data-dir /home/ubuntu/ubuntu-wallet/data \
+    --interval 1h \
+    --active-model event_v3 \
+    --threshold 0.55 \
+    --tp 0.0175 \
+    --sl 0.007 \
+    --fee 0.0004 \
+    --horizon-bars 6 \
+    >> /home/ubuntu/ubuntu-wallet/logs/evaluate_predictions.log 2>&1'
+
+[Install]
+WantedBy=multi-user.target
