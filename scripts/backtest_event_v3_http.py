@@ -37,6 +37,7 @@ import math
 import statistics
 import sys
 import time
+from bisect import bisect_right
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -447,6 +448,77 @@ def decide_side(p_long: Optional[float], p_short: Optional[float], threshold: fl
     return "FLAT"
 
 
+def _sma(vals: List[float], window: int) -> List[Optional[float]]:
+    out: List[Optional[float]] = []
+    s = 0.0
+    for i, v in enumerate(vals):
+        s += v
+        if i >= window:
+            s -= vals[i - window]
+        if i + 1 < window:
+            out.append(None)
+        else:
+            out.append(s / window)
+    return out
+
+
+def _trend_series(
+    klines: List[Dict[str, Any]],
+    fast: int = 5,
+    slow: int = 20,
+    eps: float = 0.001,
+) -> List[str]:
+    """Return per-bar trend: 'UP' / 'DOWN' / 'NEUTRAL' based on fast/slow SMA."""
+    closes = [float(k["close"]) for k in klines]
+    ma_fast = _sma(closes, fast)
+    ma_slow = _sma(closes, slow)
+    out: List[str] = []
+    for f, s in zip(ma_fast, ma_slow):
+        if f is None or s is None:
+            out.append("NEUTRAL")
+        elif f > s * (1.0 + eps):
+            out.append("UP")
+        elif f < s * (1.0 - eps):
+            out.append("DOWN")
+        else:
+            out.append("NEUTRAL")
+    return out
+
+
+def print_backtest_summary(
+    *,
+    model_version: str,
+    n_thresholds: int,
+    n_tp: int,
+    n_sl: int,
+    n_bars: int,
+    start_ts,
+    end_ts,
+    horizon: int,
+    fee: float,
+    slippage: float,
+    timeout_exit: str,
+    tie_breaker: str,
+    objective: str,
+    position_mode: str,
+) -> None:
+    print(f"Model version: {model_version}")
+    print(f"Grid: thresholds={n_thresholds} tp={n_tp} sl={n_sl}")
+    print(
+        f"Backtest bars: {n_bars} from {start_ts} to {end_ts}\n"
+        f"Exec: horizon={horizon} bars, fee/side={fee*100:.4f}%, slippage/side={slippage*100:.4f}%, "
+        f"timeout_exit={timeout_exit}, tie={tie_breaker}, objective={objective}, position_mode={position_mode}"
+    )
+    print(
+        "\n[回测摘要]\n"
+        f"- 模型版本: {model_version}\n"
+        f"- 网格规模: 阈值 {n_thresholds} 个 × TP {n_tp} 个 × SL {n_sl} 个\n"
+        f"- 回测区间: 共 {n_bars} 根 1h K 线，时间 {start_ts} → {end_ts}\n"
+        f"- 执行设定: 持有期 {horizon} 根K线, 单边手续费 {fee*100:.4f}%, 单边滑点 {slippage*100:.4f}%\n"
+        f"           超时平仓方式={timeout_exit}, TP/SL 同时触发时优先={tie_breaker}, 目标函数={objective}, 仓位模式={position_mode}\n"
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--data-dir", required=True)
@@ -480,6 +552,32 @@ def main() -> int:
     if not klines or len(klines) < args.warmup_bars + 50:
         print(f"ERROR: not enough klines rows: {len(klines)}", file=sys.stderr)
         return 2
+
+    # 4h / 1d K 线与趋势
+    try:
+        klines_4h = load_klines_1h(f"{args.data_dir.rstrip('/')}/klines_4h.json")
+        klines_1d = load_klines_1h(f"{args.data_dir.rstrip('/')}/klines_1d.json")
+    except Exception as e:
+        print(f"ERROR: failed to load 4h/1d klines: {e}", file=sys.stderr)
+        return 2
+
+    trend_4h_list = _trend_series(klines_4h, fast=5, slow=20, eps=0.001)
+    trend_1d_list = _trend_series(klines_1d, fast=5, slow=20, eps=0.001)
+
+    ts_4h = [k["ts"] for k in klines_4h]
+    ts_1d = [k["ts"] for k in klines_1d]
+
+    def trend_4h_at(ts) -> str:
+        idx = bisect_right(ts_4h, ts) - 1
+        if idx < 0:
+            return "NEUTRAL"
+        return trend_4h_list[idx]
+
+    def trend_1d_at(ts) -> str:
+        idx = bisect_right(ts_1d, ts) - 1
+        if idx < 0:
+            return "NEUTRAL"
+        return trend_1d_list[idx]
 
     since_dt = _to_utc_dt(args.since) if args.since else None
     until_dt = _to_utc_dt(args.until) if args.until else None
@@ -534,12 +632,21 @@ def main() -> int:
         _p_long, _p_short, _p_flat, mv = get_probs(as_of_ts)
         model_version = mv or model_version
 
-    print(f"Model version: {model_version}")
-    print(f"Grid: thresholds={len(thresholds)} tp={len(tp_grid)} sl={len(sl_grid)}")
-    print(
-        f"Backtest bars: {len(usable)} from {klines[usable[0]]['ts']} to {klines[usable[-1]]['ts']}\n"
-        f"Exec: horizon={horizon} bars, fee/side={args.fee*100:.4f}%, slippage/side={args.slippage*100:.4f}%, "
-        f"timeout_exit={args.timeout_exit}, tie={args.tie_breaker}, objective={args.objective}, position_mode={args.position_mode}"
+    print_backtest_summary(
+        model_version=model_version,
+        n_thresholds=len(thresholds),
+        n_tp=len(tp_grid),
+        n_sl=len(sl_grid),
+        n_bars=len(usable),
+        start_ts=klines[usable[0]]["ts"],
+        end_ts=klines[usable[-1]]["ts"],
+        horizon=horizon,
+        fee=args.fee,
+        slippage=args.slippage,
+        timeout_exit=args.timeout_exit,
+        tie_breaker=args.tie_breaker,
+        objective=args.objective,
+        position_mode=args.position_mode,
     )
 
     best: Optional[Tuple[float, float, float, Metrics, Tuple[float, ...]]] = None
@@ -563,6 +670,16 @@ def main() -> int:
                     as_of_ts = sig_ts.isoformat().replace("+00:00", "Z")
                     p_long, p_short, _p_flat, _mv = pred_cache[as_of_ts]
                     side = decide_side(p_long, p_short, thr)
+
+                    # 多周期过滤（方案 B）
+                    if side == "LONG":
+                        t4 = trend_4h_at(sig_ts)
+                        t1d = trend_1d_at(sig_ts)
+                        if t4 != "UP":
+                            side = "FLAT"
+                        elif t1d == "DOWN":
+                            side = "FLAT"
+
                     if side == "FLAT":
                         continue
 
@@ -584,7 +701,6 @@ def main() -> int:
                     trades.append(tr)
 
                     if args.position_mode == "single":
-                        # lock until exit time (inclusive-ish). Next signal must be at/after exit_ts.
                         next_allowed_ts = tr.exit_ts
 
                 m = compute_metrics(trades, total_bars=total_bars)
@@ -596,7 +712,10 @@ def main() -> int:
                     best = (thr, tp, sl, m, score)
 
     if best is None:
-        print("No config satisfies min signals/week constraint. Try lowering --min-signals-per-week.", file=sys.stderr)
+        msg_en = "No config satisfies min signals/week constraint. Try lowering --min-signals-per-week."
+        msg_zh = "没有任何参数组合满足每周最少信号数的约束，可以尝试降低 --min-signals-per-week。"
+        print(msg_en, file=sys.stderr)
+        print(msg_zh, file=sys.stderr)
         return 3
 
     thr, tp, sl, m, _score = best
