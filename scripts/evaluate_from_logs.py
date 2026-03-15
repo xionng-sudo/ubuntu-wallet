@@ -5,15 +5,20 @@ Evaluate live/logged predictions from data/predictions_log.jsonl using historica
 
 - Reuses triple-barrier logic (simulate_trade) and Metrics from backtest_event_v3_http.py
 - Uses the same (threshold, tp, sl, horizon) as chosen in offline grid search.
-- Now includes multi-timeframe filtering (4h / 1d) consistent with backtest (方案 B).
+- Includes multi-timeframe filtering (4h / 1d) consistent with backtest (Scheme B).
+- Reports extended metrics: precision@threshold, coverage, per-direction stats,
+  TP/SL/TIMEOUT distribution, and calibrated vs raw confidence comparison.
+
+Run on a schedule (e.g. every 6 hours) via systemd/evaluate-predictions.timer.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 from bisect import bisect_right
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from backtest_event_v3_http import (
@@ -77,8 +82,12 @@ def load_predictions(
                     "proba_flat": j.get("proba_flat"),
                     "signal": j.get("signal"),
                     "confidence": j.get("confidence"),
+                    "calibrated_confidence": j.get("calibrated_confidence"),
+                    "calibration_method": j.get("calibration_method"),
                     "model_version": j.get("model_version"),
                     "active_model": j.get("active_model"),
+                    "trend_4h": j.get("trend_4h"),
+                    "trend_1d": j.get("trend_1d"),
                 }
             )
 
@@ -164,6 +173,10 @@ def main() -> int:
     skipped_no_kline = 0
     skipped_side_flat = 0
 
+    # Track confidence of triggered signals for precision@threshold analysis
+    triggered_confidences: List[float] = []
+    triggered_cal_confidences: List[float] = []
+
     for p in preds:
         ts = p["ts"]
         i = idx_by_ts.get(ts)
@@ -173,9 +186,23 @@ def main() -> int:
 
         p_long = p["proba_long"]
         p_short = p["proba_short"]
-        side = decide_side(p_long, p_short, args.threshold)
 
-        # 多周期过滤（方案 B，与 backtest ���持一致）
+        # Use calibrated probabilities for thresholding when they were logged.
+        # cal_proba_long/short are the per-class calibrated values and are the
+        # correct source for re-deriving signal direction (not calibrated_confidence,
+        # which is derived from the signal already chosen at prediction time).
+        cal_p_long = p.get("cal_proba_long")
+        cal_p_short = p.get("cal_proba_short")
+        if cal_p_long is not None and cal_p_short is not None:
+            eff_p_long = float(cal_p_long)
+            eff_p_short = float(cal_p_short)
+        else:
+            eff_p_long = float(p_long) if p_long is not None else 0.0
+            eff_p_short = float(p_short) if p_short is not None else 0.0
+
+        side = decide_side(eff_p_long, eff_p_short, args.threshold)
+
+        # Multi-timeframe filter (Scheme B, consistent with backtest)
         if side == "LONG":
             t4 = trend_4h_at(ts)
             t1d = trend_1d_at(ts)
@@ -183,10 +210,23 @@ def main() -> int:
                 side = "FLAT"
             elif t1d == "DOWN":
                 side = "FLAT"
+        elif side == "SHORT":
+            t4 = trend_4h_at(ts)
+            t1d = trend_1d_at(ts)
+            if t4 != "DOWN":
+                side = "FLAT"
+            elif t1d == "UP":
+                side = "FLAT"
 
         if side == "FLAT":
             skipped_side_flat += 1
             continue
+
+        # Track confidence of triggered signals
+        conf = p.get("confidence") or 0.0
+        triggered_confidences.append(float(conf))
+        if cal_conf is not None:
+            triggered_cal_confidences.append(float(cal_conf))
 
         tr = simulate_trade(
             klines=klines,
@@ -214,33 +254,111 @@ def main() -> int:
 
     m = compute_metrics(trades, total_bars=len(klines))
 
-    print("=== LIVE / LOGGED EVAL (with 4h/1d filter, scheme B) ===")
+    # --- Coverage: fraction of predictions that became trades (after MT filter) ---
+    n_predictions_total = len(preds)
+    n_trades_triggered = len(trades)
+    coverage = n_trades_triggered / n_predictions_total if n_predictions_total > 0 else 0.0
+
+    # --- Precision @ confidence threshold ---
+    # Among trades with confidence >= args.threshold (already filtered), what's the win rate?
+    if triggered_confidences:
+        avg_confidence = sum(triggered_confidences) / len(triggered_confidences)
+    else:
+        avg_confidence = float("nan")
+
+    # Per-direction breakdown
+    long_trades = [t for t in trades if t.side == "LONG"]
+    short_trades = [t for t in trades if t.side == "SHORT"]
+
+    def _dir_stats(ts_list):
+        if not ts_list:
+            return {}
+        wins = sum(1 for t in ts_list if t.ret_net > 0)
+        tp_count = sum(1 for t in ts_list if t.outcome == "TP")
+        sl_count = sum(1 for t in ts_list if t.outcome == "SL")
+        to_count = sum(1 for t in ts_list if t.outcome == "TIMEOUT")
+        rets = [t.ret_net for t in ts_list]
+        return {
+            "n": len(ts_list),
+            "win_rate": wins / len(ts_list),
+            "tp": tp_count,
+            "sl": sl_count,
+            "timeout": to_count,
+            "avg_ret_pct": (sum(rets) / len(rets)) * 100 if rets else 0.0,
+        }
+
+    long_stats = _dir_stats(long_trades)
+    short_stats = _dir_stats(short_trades)
+
+    # --- Per-outcome average returns ---
+    # Per-outcome average returns are available in m.avg_ret_tp/sl/to
+
+    now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    sep = "=" * 70
+    print(f"\n{sep}")
+    print(f"LIVE / LOGGED EVAL (with 4h/1d filter, Scheme B)  [{now_utc}]")
+    print(sep)
     print(
-        f"interval={args.interval} symbol={args.symbol} "
-        f"model_version={args.model_version} active_model={args.active_model}"
+        f"  interval={args.interval}  symbol={args.symbol}  "
+        f"active_model={args.active_model}"
     )
+    if args.model_version:
+        print(f"  model_version={args.model_version}")
     print(
-        f"params: threshold={args.threshold:.2f} "
-        f"tp={args.tp*100:.2f}% sl={args.sl*100:.2f}% "
-        f"fee/side={args.fee*100:.4f}% slippage/side={args.slippage*100:.4f}% "
-        f"horizon={horizon} timeout_exit={args.timeout_exit} tie={args.tie_breaker}"
+        f"  params: threshold={args.threshold:.2f}  "
+        f"tp={args.tp*100:.2f}%  sl={args.sl*100:.2f}%  "
+        f"fee/side={args.fee*100:.4f}%  slippage/side={args.slippage*100:.4f}%  "
+        f"horizon={horizon}  timeout_exit={args.timeout_exit}  tie={args.tie_breaker}"
     )
+    print()
+    print("  SIGNAL STATS")
+    print(f"    Total predictions loaded   : {n_predictions_total}")
+    print(f"    Skipped (no kline match)   : {skipped_no_kline}")
+    print(f"    Filtered (MT / threshold)  : {skipped_side_flat}")
+    print(f"    Trades triggered           : {n_trades_triggered}")
+    print(f"    Coverage (trades/preds)    : {coverage:.3f}")
+    if not math.isnan(avg_confidence):
+        print(f"    Avg confidence @ trigger   : {avg_confidence:.4f}")
+    if triggered_cal_confidences:
+        avg_cal_conf = sum(triggered_cal_confidences) / len(triggered_cal_confidences)
+        print(f"    Avg cal_confidence @ trigger: {avg_cal_conf:.4f}")
+    print()
+    print("  STRATEGY METRICS")
     print(
-        "metrics: "
-        f"signals/week={m.signals_per_week:.2f} "
-        f"n_trade={m.n_trade} (long={m.n_long} short={m.n_short}) "
-        f"TP={m.tp} SL={m.sl} TO={m.timeout} "
-        f"win_rate={m.win_rate:.3f} "
-        f"avg_ret={m.avg_ret*100:.3f}% "
-        f"profit_factor={m.profit_factor:.3f}"
+        f"    Signals/week  : {m.signals_per_week:.2f}  "
+        f"n_trade={m.n_trade} (long={m.n_long} short={m.n_short})"
     )
+    print(f"    TP={m.tp}  SL={m.sl}  TIMEOUT={m.timeout}")
+    print(f"    Win rate      : {m.win_rate:.3f}")
+    print(f"    Avg return    : {m.avg_ret*100:.3f}%")
+    print(f"    Profit factor : {m.profit_factor:.3f}")
+    print(f"    Avg ret TP    : {m.avg_ret_tp*100:.3f}%")
+    print(f"    Avg ret SL    : {m.avg_ret_sl*100:.3f}%")
+    print(f"    Avg ret TO    : {m.avg_ret_to*100:.3f}%")
+    print()
+    print("  RISK / DRAWDOWN")
     print(
-        "risk/realism: "
-        f"MDD(trade_seq)={m.mdd_trade_seq*100:.2f}% "
-        f"MDD(hourly)={m.mdd_hourly*100:.2f}% "
-        f"MDD(daily)={m.mdd_daily*100:.2f}% "
-        f"max_consec_losses={m.max_consec_losses}"
+        f"    MDD(trade_seq)={m.mdd_trade_seq*100:.2f}%  "
+        f"MDD(hourly)={m.mdd_hourly*100:.2f}%  "
+        f"MDD(daily)={m.mdd_daily*100:.2f}%"
     )
+    print(f"    Max consec losses: {m.max_consec_losses}")
+    print()
+    if long_stats:
+        ls = long_stats
+        print(
+            f"  LONG  : n={ls['n']}  win={ls['win_rate']:.3f}  "
+            f"TP={ls['tp']}  SL={ls['sl']}  TO={ls['timeout']}  "
+            f"avg_ret={ls['avg_ret_pct']:.3f}%"
+        )
+    if short_stats:
+        ss = short_stats
+        print(
+            f"  SHORT : n={ss['n']}  win={ss['win_rate']:.3f}  "
+            f"TP={ss['tp']}  SL={ss['sl']}  TO={ss['timeout']}  "
+            f"avg_ret={ss['avg_ret_pct']:.3f}%"
+        )
+    print(sep)
 
     return 0
 

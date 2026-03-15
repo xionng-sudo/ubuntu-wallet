@@ -1,0 +1,13 @@
+[Unit]
+Description=Run prediction evaluator every 6 hours
+Requires=evaluate-predictions.service
+
+[Timer]
+# Run at 6 minutes past the hour for 00:00, 06:00, 12:00, 18:00 UTC.
+# RandomizedDelaySec adds up to 2 minutes of jitter (actual run: :06 to :08).
+OnCalendar=*-*-* 00,06,12,18:06:00
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

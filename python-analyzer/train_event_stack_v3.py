@@ -14,6 +14,10 @@ Architecture
     input  : [p_lgb_short, p_lgb_flat, p_lgb_long, p_xgb_short, p_xgb_flat, p_xgb_long]
     output : class probabilities (3-class)
 
+  Calibration (optional):
+    Isotonic or Platt scaling fitted on the held-out test set.
+    Saved to models/calibration_event_v3.pkl alongside other artifacts.
+
 Label encoding:  SHORT=0  FLAT=1  LONG=2
 
 Usage
@@ -21,13 +25,17 @@ Usage
   python python-analyzer/train_event_stack_v3.py [options]
 
   Options:
-    --data-dir   PATH   default: <repo_root>/data
-    --model-dir  PATH   default: <repo_root>/models
-    --p-enter    FLOAT  default: 0.65 (stored in model_meta.json)
-    --delta      FLOAT  default: 0.0  (stored in model_meta.json)
-    --horizon    INT    default: 12  (forward look-ahead bars for label)
-    --up-thresh  FLOAT  default: 0.015  (return threshold for LONG label)
-    --down-thresh FLOAT default: 0.015  (return threshold for SHORT label)
+    --data-dir    PATH    default: <repo_root>/data
+    --model-dir   PATH    default: <repo_root>/models
+    --p-enter     FLOAT   default: 0.65 (stored in model_meta.json)
+    --delta       FLOAT   default: 0.0  (stored in model_meta.json)
+    --label-method STRING default: ternary (ternary | triple_barrier)
+    --horizon     INT     default: 12  (forward look-ahead bars for label)
+    --up-thresh   FLOAT   default: 0.015  (return threshold for LONG label)
+    --down-thresh FLOAT   default: 0.015  (return threshold for SHORT label)
+    --tp-pct      FLOAT   default: 0.0175 (take-profit for triple_barrier label)
+    --sl-pct      FLOAT   default: 0.009  (stop-loss for triple_barrier label)
+    --calibration STRING  default: isotonic (isotonic | sigmoid | none)
 """
 from __future__ import annotations
 
@@ -49,7 +57,8 @@ import pandas as pd
 # ---------------------------------------------------------------------------
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ML_SERVICE_DIR = os.path.join(REPO_ROOT, "ml-service")
-for _d in [ML_SERVICE_DIR]:
+PY_ANALYZER_DIR = os.path.dirname(__file__)
+for _d in [ML_SERVICE_DIR, PY_ANALYZER_DIR]:
     if _d not in sys.path:
         sys.path.insert(0, _d)
 
@@ -57,10 +66,11 @@ from feature_builder import (  # type: ignore  (resolved at runtime via sys.path
     build_multi_tf_feature_df,
     get_feature_columns_like_trainer,
 )
+from labeling import make_labels as _make_labels_dispatch, LabelConfig  # type: ignore
 
 
 # ---------------------------------------------------------------------------
-# Label creation
+# Label creation (delegates to labeling.py)
 # ---------------------------------------------------------------------------
 
 def make_labels(
@@ -68,21 +78,34 @@ def make_labels(
     horizon: int = 12,
     up_thresh: float = 0.015,
     down_thresh: float = 0.015,
+    label_method: str = "ternary",
+    tp_pct: float = 0.0175,
+    sl_pct: float = 0.009,
 ) -> pd.Series:
     """
-    Assign 3-class labels based on forward return over `horizon` bars.
+    Assign 3-class labels. Delegates to labeling.py.
 
-      forward_return = close[t + horizon] / close[t] - 1
+    label_method="ternary" (default):
+        forward_return = close[t + horizon] / close[t] - 1
+        LONG  (2): forward_return >= +up_thresh
+        SHORT (0): forward_return <= -down_thresh
+        FLAT  (1): otherwise
 
-      LONG  (2): forward_return >= +up_thresh
-      SHORT (0): forward_return <= -down_thresh
-      FLAT  (1): otherwise
+    label_method="triple_barrier":
+        Uses TP / SL / horizon barriers aligned with live strategy.
+        LONG  (2): TP hit first
+        SHORT (0): SL hit first
+        FLAT  (1): timeout
     """
-    fwd_ret = df["close"].shift(-horizon) / df["close"] - 1
-    labels = pd.Series(1, index=df.index, dtype=int)  # FLAT
-    labels[fwd_ret >= up_thresh] = 2                   # LONG
-    labels[fwd_ret <= -down_thresh] = 0                # SHORT
-    return labels
+    cfg = LabelConfig(
+        method=label_method,
+        horizon=horizon,
+        up_thresh=up_thresh,
+        down_thresh=down_thresh,
+        tp_pct=tp_pct,
+        sl_pct=sl_pct,
+    )
+    return _make_labels_dispatch(df, cfg)
 
 
 # ---------------------------------------------------------------------------
@@ -97,16 +120,32 @@ def train_event_v3(
     horizon: int = 12,
     up_thresh: float = 0.015,
     down_thresh: float = 0.015,
+    label_method: str = "ternary",
+    tp_pct: float = 0.0175,
+    sl_pct: float = 0.009,
+    calibration_method: str = "isotonic",
 ) -> None:
     print(f"[train_event_v3] data_dir={data_dir}  model_dir={model_dir}")
+    print(f"[train_event_v3] label_method={label_method}  horizon={horizon}  "
+          f"up_thresh={up_thresh}  down_thresh={down_thresh}  "
+          f"tp_pct={tp_pct}  sl_pct={sl_pct}")
 
     # --- build multi-timeframe feature matrix ---
     print("[train_event_v3] building multi-tf features ...")
     merged = build_multi_tf_feature_df(data_dir)
     feature_cols = get_feature_columns_like_trainer(merged)
 
-    # --- create labels (drop last `horizon` rows, they have no forward return) ---
-    y_all = make_labels(merged, horizon=horizon, up_thresh=up_thresh, down_thresh=down_thresh)
+    # --- create labels ---
+    print(f"[train_event_v3] creating labels using method={label_method} ...")
+    y_all = make_labels(
+        merged,
+        horizon=horizon,
+        up_thresh=up_thresh,
+        down_thresh=down_thresh,
+        label_method=label_method,
+        tp_pct=tp_pct,
+        sl_pct=sl_pct,
+    )
     valid_idx = y_all.dropna().index
     merged_valid = merged.loc[valid_idx]
     y = y_all.loc[valid_idx].astype(int)
@@ -249,7 +288,43 @@ def train_event_v3(
     stack_test_acc = (stack_model.predict(stack_X_test) == y_test).mean()
     print(f"[train_event_v3] stacking test accuracy={stack_test_acc:.4f}")
 
-    # --- save artifacts ---
+    # --- compute test set metrics for metadata ---
+    p_stack_test = np.asarray(stack_model.predict_proba(stack_X_test))
+    y_pred_test = np.argmax(p_stack_test, axis=1)
+    try:
+        from sklearn.metrics import f1_score, roc_auc_score, brier_score_loss, precision_score, recall_score
+        f1 = float(f1_score(y_test, y_pred_test, average="macro", zero_division=0))
+        prec = float(precision_score(y_test, y_pred_test, average="macro", zero_division=0))
+        rec = float(recall_score(y_test, y_pred_test, average="macro", zero_division=0))
+        try:
+            auc = float(roc_auc_score(y_test, p_stack_test, multi_class="ovr", average="macro"))
+        except Exception:
+            auc = float("nan")
+        brier_vals = []
+        for c in range(3):
+            if c in np.unique(y_test):
+                brier_vals.append(brier_score_loss((y_test == c).astype(int), p_stack_test[:, c]))
+        brier = float(np.mean(brier_vals)) if brier_vals else float("nan")
+        summary_metrics = {
+            "test_accuracy": round(float(stack_test_acc), 4),
+            "test_f1_macro": round(f1, 4),
+            "test_precision_macro": round(prec, 4),
+            "test_recall_macro": round(rec, 4),
+            "test_auc_macro": round(auc, 4) if not np.isnan(auc) else None,
+            "test_brier_score": round(brier, 4) if not np.isnan(brier) else None,
+            "n_train": int(len(X_train)),
+            "n_test": int(len(X_test)),
+        }
+        print(
+            f"[train_event_v3] test metrics: "
+            f"accuracy={stack_test_acc:.4f} f1={f1:.4f} prec={prec:.4f} rec={rec:.4f} "
+            f"auc={auc:.4f} brier={brier:.4f}"
+        )
+    except Exception as e:
+        print(f"[train_event_v3] warning: could not compute extended metrics: {e}")
+        summary_metrics = {"test_accuracy": round(float(stack_test_acc), 4)}
+
+    # --- save model artifacts ---
     os.makedirs(model_dir, exist_ok=True)
 
     # LightGBM: joblib pkl (no version-mismatch issue for lgb)
@@ -277,9 +352,43 @@ def train_event_v3(
         json.dump(feature_cols, f, indent=2)
     print(f"[train_event_v3] saved {feat_col_path} ({len(feature_cols)} columns)")
 
-    # model_meta.json
+    # Capture trained_at now so it's consistent across all artifacts
     trained_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    _update_model_meta(model_dir, trained_at, p_enter, delta)
+
+    # --- fit and save calibration (single block, after trained_at is available) ---
+    if calibration_method and calibration_method.lower() != "none":
+        try:
+            from calibration import fit_calibration, save_calibration, default_calibration_path  # type: ignore
+            cal_model = fit_calibration(
+                y_true=y_test,
+                y_proba=p_stack_test,
+                method=calibration_method.lower(),
+                base_model_version=f"event_v3:lightgbm:{trained_at}",
+            )
+            cal_path = default_calibration_path(model_dir)
+            save_calibration(cal_model, cal_path)
+            print(f"[train_event_v3] saved calibration ({calibration_method}) to {cal_path}")
+        except Exception as e:
+            print(f"[train_event_v3] warning: calibration failed: {e}")
+
+    _update_model_meta(
+        model_dir=model_dir,
+        trained_at=trained_at,
+        p_enter=p_enter,
+        delta=delta,
+        label_method=label_method,
+        horizon=horizon,
+        up_thresh=up_thresh,
+        down_thresh=down_thresh,
+        tp_pct=tp_pct,
+        sl_pct=sl_pct,
+        calibration_method=calibration_method,
+        summary_metrics=summary_metrics,
+        n_features=len(feature_cols),
+        train_start=str(merged_valid.index[0]),
+        test_start=str(merged_valid.index[split]),
+        test_end=str(merged_valid.index[-1]),
+    )
     print(f"[train_event_v3] training complete. trained_at={trained_at}")
 
 
@@ -292,6 +401,18 @@ def _update_model_meta(
     trained_at: str,
     p_enter: float,
     delta: float,
+    label_method: str = "ternary",
+    horizon: int = 12,
+    up_thresh: float = 0.015,
+    down_thresh: float = 0.015,
+    tp_pct: float = 0.0175,
+    sl_pct: float = 0.009,
+    calibration_method: str = "isotonic",
+    summary_metrics: dict = None,
+    n_features: int = 0,
+    train_start: str = "",
+    test_start: str = "",
+    test_end: str = "",
 ) -> None:
     meta_path = os.path.join(model_dir, "model_meta.json")
     meta: dict = {}
@@ -304,6 +425,39 @@ def _update_model_meta(
 
     meta["active_model"] = "event_v3"
     meta["trained_at"] = trained_at
+    meta["model_version"] = f"event_v3:lightgbm:{trained_at}"
+    meta["feature_schema_version"] = "multi_tf_v1"
+    meta["n_features"] = n_features
+
+    meta["label_config"] = {
+        "method": label_method,
+        "horizon": horizon,
+        "up_thresh": up_thresh,
+        "down_thresh": down_thresh,
+        "tp_pct": tp_pct,
+        "sl_pct": sl_pct,
+    }
+
+    meta["threshold_config"] = {
+        "p_enter": p_enter,
+        "delta": delta,
+    }
+
+    meta["calibration_info"] = {
+        "method": calibration_method if calibration_method and calibration_method.lower() != "none" else None,
+        "artifact": "calibration_event_v3.pkl" if calibration_method and calibration_method.lower() != "none" else None,
+    }
+
+    meta["train_periods"] = {
+        "train_start": train_start,
+        "train_end": test_start,
+        "val_start": test_start,
+        "val_end": test_end,
+    }
+
+    if summary_metrics:
+        meta["summary_metrics"] = summary_metrics
+
     meta["event_v3"] = {
         "trained_at": trained_at,
         "p_enter": p_enter,
@@ -338,12 +492,20 @@ if __name__ == "__main__":
                         help="Minimum per-class probability to enter (stored in model_meta.json)")
     parser.add_argument("--delta", type=float, default=0.0,
                         help="Minimum margin (p_long - p_short) required (stored in model_meta.json)")
+    parser.add_argument("--label-method", choices=["ternary", "triple_barrier"], default="ternary",
+                        help="Label generation method: 'ternary' (forward return) or 'triple_barrier' (TP/SL/horizon)")
     parser.add_argument("--horizon", type=int, default=12,
                         help="Forward look-ahead bars for label generation")
     parser.add_argument("--up-thresh", type=float, default=0.015,
-                        help="Forward return threshold for LONG label (fraction, e.g. 0.015 = 1.5%%)")
+                        help="Forward return threshold for LONG label (fraction, e.g. 0.015 = 1.5%%). Used by ternary method.")
     parser.add_argument("--down-thresh", type=float, default=0.015,
-                        help="Forward return threshold for SHORT label (fraction)")
+                        help="Forward return threshold for SHORT label (fraction). Used by ternary method.")
+    parser.add_argument("--tp-pct", type=float, default=0.0175,
+                        help="Take-profit fraction for triple_barrier label (e.g. 0.0175 = 1.75%%). Used by triple_barrier method.")
+    parser.add_argument("--sl-pct", type=float, default=0.009,
+                        help="Stop-loss fraction for triple_barrier label (e.g. 0.009 = 0.9%%). Used by triple_barrier method.")
+    parser.add_argument("--calibration", choices=["isotonic", "sigmoid", "none"], default="isotonic",
+                        help="Probability calibration method to apply after training. Use 'none' to skip.")
     args = parser.parse_args()
 
     train_event_v3(
@@ -354,4 +516,8 @@ if __name__ == "__main__":
         horizon=args.horizon,
         up_thresh=args.up_thresh,
         down_thresh=args.down_thresh,
+        label_method=args.label_method,
+        tp_pct=args.tp_pct,
+        sl_pct=args.sl_pct,
+        calibration_method=args.calibration,
     )

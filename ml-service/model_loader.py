@@ -32,6 +32,9 @@ class LoadedModel:
     # event_v3 (3-class); holds runtime thresholds
     event_v3: Optional[Dict[str, Any]] = None  # {"p_enter": float, "delta": float}
 
+    # Calibration artifact (CalibratedModel from calibration.py, if available)
+    calibration: Optional[Any] = None
+
     @property
     def model_version(self) -> str:
         h = file_sha256(self.model_path)[:12] if self.model_path else "no-model"
@@ -127,6 +130,15 @@ def _load_base(
     )
 
 
+def _try_load_calibration(model_dir: str) -> Any:
+    """Silently load calibration artifact; return None if missing or error."""
+    try:
+        from calibration import load_calibration, default_calibration_path
+        return load_calibration(default_calibration_path(model_dir))
+    except Exception:
+        return None
+
+
 def load_model(model_dir: str) -> LoadedModel:
     meta = load_meta(model_dir)
 
@@ -169,7 +181,7 @@ def load_model(model_dir: str) -> LoadedModel:
         stacking_model = _load_joblib_if_exists(os.path.join(model_dir, stack_file))
 
         # primary = lightgbm (for version hash / expected_n_features)
-        return LoadedModel(
+        lm = LoadedModel(
             active_model="event_v3",
             name="lightgbm",
             model=lgb.model,
@@ -186,6 +198,8 @@ def load_model(model_dir: str) -> LoadedModel:
                 "delta": float(cfg.get("delta", 0.0)),
             },
         )
+        lm.calibration = _try_load_calibration(model_dir)
+        return lm
 
     # --- legacy stacking binary ---
     if active == "stacking":
@@ -211,7 +225,7 @@ def load_model(model_dir: str) -> LoadedModel:
         if primary is None:
             raise RuntimeError("stacking active but no base models found")
 
-        return LoadedModel(
+        lm = LoadedModel(
             active_model="stacking",
             name=primary.name,
             model=primary.model,
@@ -224,6 +238,8 @@ def load_model(model_dir: str) -> LoadedModel:
             stacking_model=stacking_model,
             base_models=base_models,
         )
+        lm.calibration = _try_load_calibration(model_dir)
+        return lm
 
     # --- legacy base model (prefer lightgbm) ---
     if "lightgbm" in meta:
@@ -240,6 +256,7 @@ def load_model(model_dir: str) -> LoadedModel:
             feature_columns=feature_columns,
         )
         lm.active_model = "lightgbm"
+        lm.calibration = _try_load_calibration(model_dir)
         return lm
 
     if "xgboost" in meta:
@@ -256,6 +273,7 @@ def load_model(model_dir: str) -> LoadedModel:
             feature_columns=feature_columns,
         )
         xm.active_model = "xgboost"
+        xm.calibration = _try_load_calibration(model_dir)
         return xm
 
     raise RuntimeError("model_meta.json has no supported model keys (lightgbm/xgboost/event_v3)")
