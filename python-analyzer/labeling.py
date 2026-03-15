@@ -133,9 +133,9 @@ def make_triple_barrier_labels(
       "short" : Only SHORT-side barriers.
 
     Labels:
-      UP / LONG  (2): TP first (or timeout with positive return > tp_pct/2).
-      DOWN/SHORT (0): SL first.
-      FLAT       (1): Timeout – neither barrier reached.
+      UP / LONG  (2): TP barrier hit first.
+      DOWN/SHORT (0): SL barrier hit first.
+      FLAT       (1): Timeout – neither barrier reached within horizon bars.
 
     Args:
         df:       DataFrame with columns: open, high, low, close. Sorted by time.
@@ -164,15 +164,20 @@ def make_triple_barrier_labels(
             h = highs[j]
             lo = lows[j]
 
-            hit_tp = h >= tp_price
-            hit_sl = lo <= sl_price
+            hit_tp = (h >= tp_price) if direction in ("both", "long") else False
+            hit_sl = (lo <= sl_price) if direction in ("both", "long", "short") else False
+
+            if direction == "short":
+                # For short-only: TP is a downside move, SL is an upside move
+                hit_tp = lo <= sl_price   # price falls to SL → SHORT wins
+                hit_sl = h >= tp_price    # price rises to TP → stop out
 
             if hit_tp and hit_sl:
                 # tie-break: SL (conservative)
                 outcome = 0  # SHORT / DOWN
                 break
             if hit_tp:
-                outcome = 2  # LONG / UP
+                outcome = 2 if direction != "short" else 0
                 break
             if hit_sl:
                 outcome = 0  # SHORT / DOWN

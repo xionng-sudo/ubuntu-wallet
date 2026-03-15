@@ -252,7 +252,7 @@ def _evaluate_fold(
     val_end_ts = str(index[val_idx[-1]]) if hasattr(index, "__getitem__") else ""
 
     return FoldMetrics(
-        fold=fold + 1,
+        fold=fold,
         train_start=tr_start_ts,
         train_end=tr_end_ts,
         val_start=val_start_ts,
@@ -310,11 +310,8 @@ def run_walkforward_cv(
             f"val [{val_idx[0]}:{val_idx[-1]}]",
             flush=True,
         )
-        metrics = _evaluate_fold(fold_num - 1, X, y, index, train_idx, val_idx, cfg)
-        # override fold number to be 1-indexed chronologically
-        metrics_dict = asdict(metrics)
-        metrics_dict["fold"] = fold_num
-        results.append(FoldMetrics(**metrics_dict))
+        metrics = _evaluate_fold(fold_num, X, y, index, train_idx, val_idx, cfg)
+        results.append(metrics)
 
         print(
             f"  auc={metrics.auc_macro:.4f} f1={metrics.f1_macro:.4f} "
