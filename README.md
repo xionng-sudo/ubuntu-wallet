@@ -1,10 +1,219 @@
-# 🔮 ETH 加密货币预测系统
+# 🔮 ETH Crypto Prediction & ML Trading System
 
-> 基于 Go + Python 的 ETH 走势预测系统，集成三大交易所数据采集、技术分析、AI 机器学习预测、实时可视化仪表板
+> High-precision, continuously-evaluable ML trading pipeline for ETH perpetual futures.
+> Built on Go data collection + Python ML training + FastAPI inference + systematic evaluation loop.
+
+**→ For a full technical and operational guide see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
 
 ---
 
-## 📑 目录
+## Quick Start
+
+```bash
+# 1. Install dependencies
+./scripts/install.sh
+
+# 2. Build and start Go collector (collects kline data)
+cd go-collector && go build -o go-collector . && ./go-collector &
+
+# 3. Train the event_v3 model (needs klines_1h/4h/1d.json in data/)
+source ml-service/.venv/bin/activate
+python python-analyzer/train_event_stack_v3.py \
+  --data-dir data --model-dir models \
+  --label-method ternary --horizon 12 --up-thresh 0.015 \
+  --calibration isotonic
+
+# 4. Start ml-service (inference API on port 9000)
+cd ml-service && uvicorn app:app --host 127.0.0.1 --port 9000
+
+# 5. Verify health
+curl http://127.0.0.1:9000/healthz
+
+# 6. Run backtest
+python scripts/backtest_event_v3_http.py \
+  --data-dir data --base-url http://127.0.0.1:9000 \
+  --threshold 0.65 --tp-grid 0.0175:0.0175:0.001 \
+  --sl-grid 0.007:0.007:0.001 --horizon-bars 6
+
+# 7. Simulate / replay live trading
+python scripts/live_trader_eth_perp_simulated.py \
+  --data-dir data --tp 0.0175 --sl 0.007 --threshold 0.65
+
+# 8. Evaluate logged predictions
+python scripts/evaluate_from_logs.py \
+  --log-path data/predictions_log.jsonl --data-dir data \
+  --threshold 0.55 --tp 0.0175 --sl 0.007 --horizon-bars 6
+```
+
+---
+
+## System Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                  Market Data Collection                         │
+│  Binance API  ──┐                                               │
+│  OKX API      ──┤── go-collector (port 8080) ──► data/         │
+│  Coinbase API ──┘   klines_1h/4h/1d.json                       │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                ML Training Pipeline (offline)                   │
+│                                                                 │
+│  labeling.py ──────────────────────────────────┐               │
+│    make_ternary_labels()                        │               │
+│    make_triple_barrier_labels()                 │               │
+│                                                 ▼               │
+│  train_event_stack_v3.py                  LightGBM + XGBoost   │
+│    build_multi_tf_feature_df()           (base models, 3-class) │
+│    ── 1h features                               │               │
+│    ── 4h features (prefix tf4h_)          LogisticRegression    │
+│    ── 1d features (prefix tf1d_)         (stacking meta-model) │
+│                                                 │               │
+│  walkforward_cv.py                       calibration.py         │
+│    (time-series CV, no leakage)          (isotonic/sigmoid)     │
+│                                                 │               │
+│                              ┌─────────────────▼──────────┐    │
+│                              │   models/ directory         │    │
+│                              │   lightgbm_event_v3.pkl     │    │
+│                              │   xgboost_event_v3.json     │    │
+│                              │   stacking_event_v3.pkl     │    │
+│                              │   calibration_event_v3.pkl  │    │
+│                              │   feature_columns_event_v3.json│  │
+│                              │   model_meta.json           │    │
+│                              └────────────────────────────┘    │
+└─────────────────────────────────────────────────────────────────┘
+         │ (model artifacts)
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                   ml-service (FastAPI, port 9000)               │
+│                                                                 │
+│  POST /predict                                                  │
+│    feature_builder.py ── builds multi-tf features              │
+│      schema_validation() ── detects online/offline drift       │
+│    model_loader.py ── loads models + calibration               │
+│    calibration.py ── calibrate_proba()                         │
+│    prediction_logger.py ── logs to data/predictions_log.jsonl  │
+│                                                                 │
+│  Response: { signal, confidence, calibrated_confidence, ... }  │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                Strategy / Decision Layer                        │
+│                                                                 │
+│  Multi-timeframe filter (Scheme B):                             │
+│    LONG allowed  : 4h=UP and 1d≠DOWN                           │
+│    SHORT allowed : 4h=DOWN and 1d≠UP                           │
+│                                                                 │
+│  Execution:                                                     │
+│    backtest_event_v3_http.py  (offline grid search)            │
+│    live_trader_eth_perp_simulated.py  (historical replay)      │
+│    live_trader_eth_perp_binance.py    (live DRY-RUN / real)    │
+└─────────────────────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                Evaluation Loop (closed-loop)                    │
+│                                                                 │
+│  evaluate_from_logs.py  (scheduled every 6h via systemd timer) │
+│    reads data/predictions_log.jsonl                            │
+│    simulates triple-barrier exits on real klines               │
+│    reports: win_rate, avg_ret, MDD, coverage, TP/SL/TO dist    │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Key Components
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Go collector | `go-collector/` | Market data ingestion (klines, trader data) |
+| Training pipeline | `python-analyzer/train_event_stack_v3.py` | Train LightGBM+XGBoost+stacking model |
+| Labeling | `python-analyzer/labeling.py` | Ternary & triple-barrier label generation |
+| Walk-forward CV | `python-analyzer/walkforward_cv.py` | Time-series CV without leakage |
+| ML inference API | `ml-service/app.py` | FastAPI: `/predict`, `/healthz` |
+| Feature builder | `ml-service/feature_builder.py` | Multi-tf feature construction + schema validation |
+| Model loader | `ml-service/model_loader.py` | Load models + calibration artifacts |
+| Calibration | `ml-service/calibration.py` | Isotonic/Platt calibration |
+| Prediction logger | `ml-service/prediction_logger.py` | JSONL log with raw+calibrated probabilities |
+| Backtest engine | `scripts/backtest_event_v3_http.py` | Triple-barrier backtest + grid search |
+| Simulated trader | `scripts/live_trader_eth_perp_simulated.py` | Historical replay with risk engine |
+| Evaluation | `scripts/evaluate_from_logs.py` | Evaluate logged predictions vs real outcomes |
+| Multi-TF utils | `scripts/mt_trend_utils.py` | MTTrendContext (4h/1d trend filters) |
+
+---
+
+## Best Practices
+
+### Signal quality over quantity
+- Use threshold ≥ 0.65 (or calibrated_confidence ≥ 0.65) to ensure high precision
+- Multi-timeframe filter reduces false breakouts significantly
+- Triple-barrier labels better align training with actual exit logic
+
+### Calibration
+After training, check `/healthz` for `calibration_available: true`. When calibration is loaded,
+the system uses calibrated probabilities for thresholding and logs both raw and calibrated
+probabilities for each prediction. This makes confidence more reliable for decision making.
+
+### Walk-forward validation
+Before deploying a new model, always run walkforward_cv.py to check for temporal leakage
+and understand generalization across different time periods:
+
+```bash
+python python-analyzer/walkforward_cv.py \
+  --data-dir data --n-splits 5 --gap-bars 12 \
+  --label-method ternary --confidence-threshold 0.65 \
+  --output-csv /tmp/cv_report.csv
+```
+
+### Evaluation loop
+The predictions_log.jsonl is the key monitoring artifact. Schedule evaluate_from_logs.py
+via `systemd/evaluate-predictions.timer` to get automatic performance reports every 6 hours.
+
+---
+
+## Recommended Strategy Parameters
+
+Based on backtesting and live evaluation (as of 2026-03):
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| threshold | 0.65 | Use calibrated_confidence when available |
+| tp | 1.75% | Take-profit |
+| sl | 0.70% | Stop-loss |
+| horizon | 6h | Max holding period |
+| interval | 1h | Trading timeframe |
+| 4h filter | UP required for LONG | Multi-TF Scheme B |
+| 1d filter | Not DOWN for LONG | Multi-TF Scheme B |
+
+---
+
+## Deployment (Production)
+
+```bash
+# Install and enable systemd services
+sudo cp systemd/go-collector.service /etc/systemd/system/
+sudo cp systemd/ml-service.service /etc/systemd/system/
+sudo cp systemd/evaluate-predictions.service /etc/systemd/system/
+sudo cp systemd/evaluate-predictions.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now go-collector ml-service
+sudo systemctl enable --now evaluate-predictions.timer
+
+# Monitor
+sudo journalctl -fu ml-service
+sudo journalctl -fu evaluate-predictions
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete deployment, maintenance,
+and troubleshooting documentation.
+
+---
+
+## 📑 目录 (Original Chinese Documentation)
 
 1. [系统架构](#系统架构)
 2. [技术栈与库版本](#技术栈与库版本)

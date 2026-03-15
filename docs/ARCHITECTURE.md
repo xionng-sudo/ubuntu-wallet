@@ -800,7 +800,7 @@ The `check-go-collector.timer` fires `check-go-collector.service` (oneshot) ever
 2. If unreachable or `ok: false`, sends a Telegram alert.
 3. Optionally restarts go-collector after a 5-minute cooldown.
 
-The `evaluate-predictions.timer` triggers `evaluate_from_logs.py` four times per day (at 00:06, 06:06, 12:06, 18:06 UTC) with a `RandomizedDelaySec=120` jitter. The 120-second randomized delay staggers the evaluation job so it does not contend with other scheduled work that may fire at the top of those hours.
+The `evaluate-predictions.timer` triggers `evaluate_from_logs.py` four times per day (at 00:06, 06:06, 12:06, 18:06 UTC) with a `RandomizedDelaySec=120` jitter. The 120-second randomized delay staggers the evaluation job so it distributes the workload within a 2-minute window (e.g., 00:06:00 to 00:08:00) to avoid multiple instances starting simultaneously if running on multiple nodes.
 
 Configure Telegram in `/etc/ubuntu-wallet/telegram.env`:
 ```

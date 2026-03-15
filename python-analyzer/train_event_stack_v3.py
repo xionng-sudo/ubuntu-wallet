@@ -324,25 +324,7 @@ def train_event_v3(
         print(f"[train_event_v3] warning: could not compute extended metrics: {e}")
         summary_metrics = {"test_accuracy": round(float(stack_test_acc), 4)}
 
-    # --- fit calibration on test set ---
-    cal_artifact_path = None
-    if calibration_method and calibration_method.lower() != "none":
-        try:
-            from calibration import fit_calibration, save_calibration, default_calibration_path  # type: ignore
-            cal_model = fit_calibration(
-                y_true=y_test,
-                y_proba=p_stack_test,
-                method=calibration_method.lower(),
-                base_model_version=f"event_v3:{trained_at_tmp if 'trained_at_tmp' in dir() else 'pending'}",
-            )
-            cal_path = default_calibration_path(model_dir)
-            save_calibration(cal_model, cal_path)
-            cal_artifact_path = cal_path
-            print(f"[train_event_v3] saved calibration ({calibration_method}) to {cal_path}")
-        except Exception as e:
-            print(f"[train_event_v3] warning: calibration failed: {e}")
-
-    # --- save artifacts ---
+    # --- save model artifacts ---
     os.makedirs(model_dir, exist_ok=True)
 
     # LightGBM: joblib pkl (no version-mismatch issue for lgb)
@@ -370,11 +352,11 @@ def train_event_v3(
         json.dump(feature_cols, f, indent=2)
     print(f"[train_event_v3] saved {feat_col_path} ({len(feature_cols)} columns)")
 
-    # model_meta.json
+    # Capture trained_at now so it's consistent across all artifacts
     trained_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    # Save calibration with correct trained_at in base_model_version
-    if calibration_method and calibration_method.lower() != "none" and cal_artifact_path is None:
+    # --- fit and save calibration (single block, after trained_at is available) ---
+    if calibration_method and calibration_method.lower() != "none":
         try:
             from calibration import fit_calibration, save_calibration, default_calibration_path  # type: ignore
             cal_model = fit_calibration(
@@ -387,17 +369,7 @@ def train_event_v3(
             save_calibration(cal_model, cal_path)
             print(f"[train_event_v3] saved calibration ({calibration_method}) to {cal_path}")
         except Exception as e:
-            print(f"[train_event_v3] warning: calibration save failed: {e}")
-    elif cal_artifact_path:
-        # Update the base_model_version in the already-saved calibration
-        try:
-            from calibration import load_calibration, save_calibration, default_calibration_path  # type: ignore
-            cal = load_calibration(default_calibration_path(model_dir))
-            if cal is not None:
-                cal.base_model_version = f"event_v3:lightgbm:{trained_at}"
-                save_calibration(cal, default_calibration_path(model_dir))
-        except Exception:
-            pass
+            print(f"[train_event_v3] warning: calibration failed: {e}")
 
     _update_model_meta(
         model_dir=model_dir,

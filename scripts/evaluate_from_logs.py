@@ -187,17 +187,18 @@ def main() -> int:
         p_long = p["proba_long"]
         p_short = p["proba_short"]
 
-        # Use calibrated confidence for thresholding if available
-        cal_conf = p.get("calibrated_confidence")
-        eff_p_long = p_long
-        eff_p_short = p_short
-        if cal_conf is not None:
-            # When calibrated confidence is logged, use it for thresholding
-            # by scaling the effective probabilities
-            if p.get("signal") == "LONG" and p_long is not None:
-                eff_p_long = cal_conf
-            elif p.get("signal") == "SHORT" and p_short is not None:
-                eff_p_short = cal_conf
+        # Use calibrated probabilities for thresholding when they were logged.
+        # cal_proba_long/short are the per-class calibrated values and are the
+        # correct source for re-deriving signal direction (not calibrated_confidence,
+        # which is derived from the signal already chosen at prediction time).
+        cal_p_long = p.get("cal_proba_long")
+        cal_p_short = p.get("cal_proba_short")
+        if cal_p_long is not None and cal_p_short is not None:
+            eff_p_long = float(cal_p_long)
+            eff_p_short = float(cal_p_short)
+        else:
+            eff_p_long = float(p_long) if p_long is not None else 0.0
+            eff_p_short = float(p_short) if p_short is not None else 0.0
 
         side = decide_side(eff_p_long, eff_p_short, args.threshold)
 
@@ -272,11 +273,11 @@ def main() -> int:
     def _dir_stats(ts_list):
         if not ts_list:
             return {}
-        wins = sum(1 for t in ts_list if getattr(t, "net_ret", getattr(t, "ret", 0)) > 0)
+        wins = sum(1 for t in ts_list if t.ret_net > 0)
         tp_count = sum(1 for t in ts_list if t.outcome == "TP")
         sl_count = sum(1 for t in ts_list if t.outcome == "SL")
         to_count = sum(1 for t in ts_list if t.outcome == "TIMEOUT")
-        rets = [getattr(t, "net_ret", getattr(t, "ret", 0)) for t in ts_list]
+        rets = [t.ret_net for t in ts_list]
         return {
             "n": len(ts_list),
             "win_rate": wins / len(ts_list),
@@ -290,15 +291,7 @@ def main() -> int:
     short_stats = _dir_stats(short_trades)
 
     # --- Per-outcome average returns ---
-    tp_trades = [t for t in trades if t.outcome == "TP"]
-    sl_trades = [t for t in trades if t.outcome == "SL"]
-    to_trades = [t for t in trades if t.outcome == "TIMEOUT"]
-
-    def _avg_ret(ts_list):
-        if not ts_list:
-            return float("nan")
-        rets = [getattr(t, "net_ret", getattr(t, "ret", 0)) for t in ts_list]
-        return sum(rets) / len(rets) * 100
+    # Per-outcome average returns are available in m.avg_ret_tp/sl/to
 
     now_utc = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     sep = "=" * 70
@@ -339,9 +332,9 @@ def main() -> int:
     print(f"    Win rate      : {m.win_rate:.3f}")
     print(f"    Avg return    : {m.avg_ret*100:.3f}%")
     print(f"    Profit factor : {m.profit_factor:.3f}")
-    print(f"    Avg ret TP    : {_avg_ret(tp_trades):.3f}%")
-    print(f"    Avg ret SL    : {_avg_ret(sl_trades):.3f}%")
-    print(f"    Avg ret TO    : {_avg_ret(to_trades):.3f}%")
+    print(f"    Avg ret TP    : {m.avg_ret_tp*100:.3f}%")
+    print(f"    Avg ret SL    : {m.avg_ret_sl*100:.3f}%")
+    print(f"    Avg ret TO    : {m.avg_ret_to*100:.3f}%")
     print()
     print("  RISK / DRAWDOWN")
     print(
