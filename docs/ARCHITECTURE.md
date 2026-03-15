@@ -168,6 +168,7 @@ Production service management on Ubuntu 22.04+.
 | `ml-service.service` | Service | Runs uvicorn/FastAPI, auto-restarts |
 | `evaluate-predictions.service` | oneshot | Triggered to run `evaluate_from_logs.py` |
 | `check-go-collector.service` | oneshot | Health check, sends Telegram alert on failure |
+| `evaluate-predictions.timer` | Timer | Runs evaluate-predictions.service at 00:06, 06:06, 12:06, 18:06 UTC |
 | `check-go-collector.timer` | Timer | Triggers health check every 60s |
 
 ---
@@ -798,6 +799,8 @@ The `check-go-collector.timer` fires `check-go-collector.service` (oneshot) ever
 1. Calls `GET http://127.0.0.1:8080/healthz`.
 2. If unreachable or `ok: false`, sends a Telegram alert.
 3. Optionally restarts go-collector after a 5-minute cooldown.
+
+The `evaluate-predictions.timer` triggers `evaluate_from_logs.py` four times per day (at 00:06, 06:06, 12:06, 18:06 UTC) with a `RandomizedDelaySec=120` jitter. The 120-second randomized delay staggers the evaluation job so it does not contend with other scheduled work that may fire at the top of those hours.
 
 Configure Telegram in `/etc/ubuntu-wallet/telegram.env`:
 ```
