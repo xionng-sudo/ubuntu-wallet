@@ -33,6 +33,8 @@
 
 ## 仓库目录结构
 
+> **说明**：本节只列出当前仓库中已存在并已纳入版本控制的目录/文件。部署后服务器上的运行目录、日志文件、模型产物、虚拟环境等不在本节中展示。
+
 ```
 ubuntu-wallet/
 ├── .env.example                  # 环境变量模板（复制为 .env 并填写）
@@ -218,20 +220,45 @@ deactivate
 
 ## 关键文件位置速查
 
-| 文件                                          | 说明                          |
-|-----------------------------------------------|-------------------------------|
-| `~/ubuntu-wallet/data/predictions_log.jsonl`  | 预测日志（核心证据）          |
-| `~/ubuntu-wallet/data/raw/klines_1h.json`     | 1h K 线数据                   |
-| `~/ubuntu-wallet/data/raw/klines_4h.json`     | 4h K 线数据                   |
-| `~/ubuntu-wallet/data/raw/klines_1d.json`     | 日线 K 线数据                 |
-| `~/ubuntu-wallet/models/`                             | 模型文件目录（训练默认输出，ml-service 加载源）|
-| `~/ubuntu-wallet/models_backup/`                      | 模型备份目录（建议在每次换模型前手动备份）     |
-| `~/ubuntu-wallet/logs/evaluate_predictions.log` | 评估任务日志                |
-| `~/ubuntu-wallet/check-go-collector.log`      | go-collector 健康检查日志     |
-| `/etc/ubuntu-wallet/collector.env`            | 交易所 API Key（不进 Git）    |
-| `/etc/ubuntu-wallet/telegram.env`             | Telegram 通知配置（不进 Git） |
-| `~/ubuntu-wallet/bin/go-collector`            | go-collector 编译产物         |
-| `~/ubuntu-wallet/ml-service/.venv/`           | ml-service Python 虚拟环境    |
+### 仓库内已存在的关键文件/目录
+
+| 路径                                          | 说明                                   |
+|-----------------------------------------------|----------------------------------------|
+| `.env.example`                                | 环境变量模板                           |
+| `docs/DEPLOY_CN.md`                           | 中文部署手册                           |
+| `docs/RUNBOOK_CN.md`                          | 中文运维手册                           |
+| `docs/MODEL_LIFECYCLE_CN.md`                  | 模型生命周期文档                       |
+| `docs/FAILURE_MODES_CN.md`                    | 故障排查与恢复手册                     |
+| `go-collector/main.go`                        | go-collector 程序入口                  |
+| `ml-service/app.py`                           | ml-service FastAPI 入口                |
+| `python-analyzer/train_event_stack_v3.py`     | 主训练脚本                             |
+| `python-analyzer/walkforward_cv.py`           | Walk-Forward 验证脚本                  |
+| `scripts/evaluate_from_logs.py`               | prediction log 评估脚本                |
+| `scripts/backtest_event_v3_http.py`           | 调用 ml-service 的 HTTP 回测脚本       |
+| `systemd/ml-service.service`                  | ml-service systemd 服务文件            |
+| `systemd/go-collector.service`                | go-collector systemd 服务文件          |
+| `systemd/evaluate-predictions.service`        | 自动评估任务服务文件                   |
+| `systemd/env/collector.env.example`           | collector 环境变量模板                 |
+| `systemd/env/telegram.env.example`            | Telegram 通知环境变量模板              |
+
+### 部署后服务器上的常见运行路径（非仓库内容）
+
+> **注意**：以下路径用于部署/运维说明，通常只会在服务器运行环境中出现，**不是 Git 仓库内已有文件**。
+
+| 路径                                          | 说明                                   |
+|-----------------------------------------------|----------------------------------------|
+| `~/ubuntu-wallet/data/predictions_log.jsonl`  | 预测日志（运行后生成）                 |
+| `~/ubuntu-wallet/data/raw/klines_1h.json`     | 1h K 线数据（采集后生成）              |
+| `~/ubuntu-wallet/data/raw/klines_4h.json`     | 4h K 线数据（采集后生成）              |
+| `~/ubuntu-wallet/data/raw/klines_1d.json`     | 日线 K 线数据（采集后生成）            |
+| `~/ubuntu-wallet/models/`                     | 模型文件目录（训练默认输出，服务加载源）|
+| `~/ubuntu-wallet/models_backup/`              | 模型备份目录（建议人工维护）           |
+| `~/ubuntu-wallet/logs/evaluate_predictions.log` | 评估任务日志（部署后写入）          |
+| `~/ubuntu-wallet/check-go-collector.log`      | 健康检查日志（部署后写入）             |
+| `/etc/ubuntu-wallet/collector.env`            | 交易所 API Key 配置（服务器本地）      |
+| `/etc/ubuntu-wallet/telegram.env`             | Telegram 通知配置（服务器本地）        |
+| `~/ubuntu-wallet/bin/go-collector`            | go-collector 编译产物（构建后生成）    |
+| `~/ubuntu-wallet/ml-service/.venv/`           | ml-service Python 虚拟环境（部署后创建）|
 
 ---
 
@@ -255,8 +282,8 @@ deactivate
 
 1. **API Key 安全**：`/etc/ubuntu-wallet/*.env` 只存在于服务器本地，**绝对不要提交到 Git**
 2. **端口确认**：ml-service 使用端口 **9000**（不是 8000）
-3. **部署用户**：服务以 `ubuntu` 用户运行，路径基于 `/home/ubuntu/ubuntu-wallet/`
+3. **部署路径**：文档里的 `~/ubuntu-wallet/` 表示部署服务器上的典型 checkout 路径，不是仓库内固定路径
 4. **venv 路径**：
-   - ml-service 推理 venv：`ml-service/.venv/`
-   - 训练/分析 venv：`venv-analyzer/`（如有）
+   - ml-service 推理 venv：`~/ubuntu-wallet/ml-service/.venv/`（部署后创建）
+   - 训练/分析 venv：通常由操作者自行创建，例如 `~/ubuntu-wallet/venv-analyzer/`（非仓库内容）
 5. **真仓前必须先完成 2 周以上 DRY-RUN**
