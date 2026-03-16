@@ -6,7 +6,8 @@ After=network-online.target
 Type=oneshot
 User=ubuntu
 WorkingDirectory=/home/ubuntu/ubuntu-wallet/scripts
-# Activate the venv so sklearn/pandas etc. are available
+# Activate the ml-service venv; it must install ml-service/requirements.txt
+# (including requests, which is used by shared reporting/backtest utilities).
 ExecStart=/bin/bash -c 'source /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/activate && \
   python /home/ubuntu/ubuntu-wallet/scripts/evaluate_from_logs.py \
     --log-path /home/ubuntu/ubuntu-wallet/data/predictions_log.jsonl \

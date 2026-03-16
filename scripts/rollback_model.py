@@ -14,6 +14,7 @@ Registry layout (all paths relative to --model-dir, default: <repo_root>/models)
     feature_columns_event_v3.json
     calibration_event_v3.pkl
     registry.json                # NEW: model version history
+    current.json                 # NEW: production model pointer used by loader
     archive/                     # NEW: versioned backups
       <version>/
         model_meta.json
@@ -25,6 +26,7 @@ Steps performed by this script:
   2. Find the most recent "archived" entry (the one just before current prod)
   3. Copy all artifact files from archive/<version>/ back to models/
   4. Update registry.json: set that entry to "prod", set old prod to "archived"
+  5. Update current.json so ml-service loads the restored archived version
 
 Usage
 -----
@@ -63,6 +65,18 @@ def _save_registry(model_dir: str, registry: Dict[str, Any]) -> None:
     path = os.path.join(model_dir, "registry.json")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(registry, f, indent=2)
+
+
+def _save_current_pointer(model_dir: str, target: Dict[str, Any]) -> None:
+    path = os.path.join(model_dir, "current.json")
+    pointer = {
+        "model_version": target.get("model_version"),
+        "trained_at": target.get("trained_at"),
+        "path": target.get("archive_dir"),
+        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(pointer, f, indent=2)
 
 
 def _find_current_prod(entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -185,7 +199,9 @@ def main() -> int:
 
     if not dry:
         _save_registry(model_dir, registry)
+        _save_current_pointer(model_dir, target)
         print("\nRegistry updated.", flush=True)
+        print("current.json updated.", flush=True)
         print(f"Rollback complete. Active model is now: {target.get('model_version')}", flush=True)
         print(
             "Restart ml-service to load the restored model:\n"

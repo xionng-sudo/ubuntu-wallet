@@ -519,6 +519,25 @@ _ARTIFACT_FILES = [
 ]
 
 
+def _write_current_pointer(
+    model_dir: str,
+    model_version: str,
+    trained_at: str,
+    archive_rel: str,
+) -> None:
+    """Write models/current.json to the archived production artifact directory."""
+    current_path = os.path.join(model_dir, "current.json")
+    current = {
+        "model_version": model_version,
+        "trained_at": trained_at,
+        "path": archive_rel,
+        "updated_at": trained_at,
+    }
+    with open(current_path, "w", encoding="utf-8") as f:
+        json.dump(current, f, indent=2)
+    print(f"[train_event_v3] updated {current_path} -> {archive_rel}")
+
+
 def _register_model(
     model_dir: str,
     model_version: str,
@@ -596,6 +615,12 @@ def _register_model(
     with open(registry_path, "w", encoding="utf-8") as f:
         json.dump(registry, f, indent=2)
     print(f"[train_event_v3] updated registry.json ({len(entries)} entries, current prod: {model_version})")
+    _write_current_pointer(
+        model_dir=model_dir,
+        model_version=model_version,
+        trained_at=trained_at,
+        archive_rel=archive_rel,
+    )
 
 
 # ---------------------------------------------------------------------------

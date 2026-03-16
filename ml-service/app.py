@@ -8,7 +8,14 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from feature_builder import build_event_v3_feature_row, build_latest_feature_row_from_klines
-from model_loader import LoadedModel, load_model, load_model_from_registry, get_prod_registry_entry, predict_proba
+from model_loader import (
+    LoadedModel,
+    get_prod_registry_entry,
+    load_current_pointer,
+    load_model_from_registry,
+    predict_proba,
+    resolve_current_model_dir,
+)
 from prediction_logger import log_prediction
 
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models")))
@@ -91,6 +98,7 @@ def healthz():
         return {"ok": False, "model_dir": MODEL_DIR, "data_dir": DATA_DIR}
 
     reg_entry = get_prod_registry_entry(MODEL_DIR)
+    pointer = load_current_pointer(MODEL_DIR)
     registry_info = None
     if reg_entry is not None:
         registry_info = {
@@ -103,12 +111,14 @@ def healthz():
     return {
         "ok": True,
         "model_dir": MODEL_DIR,
+        "active_model_dir": resolve_current_model_dir(MODEL_DIR),
         "data_dir": DATA_DIR,
         "model_version": _loaded.model_version,
         "model_expected_n_features": _loaded.expected_n_features,
         "calibration_available": _loaded.calibration is not None,
         "calibration_method": _loaded.calibration.method if _loaded.calibration is not None else None,
         "registry": registry_info,
+        "current_pointer": pointer,
     }
 
 

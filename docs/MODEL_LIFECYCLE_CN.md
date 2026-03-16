@@ -26,7 +26,7 @@
 > - `scripts/backtest_event_v3_http.py --help` 与 `scripts/evaluate_from_logs.py --help` 已额外执行确认；
 > - `/predict` 最小请求体按 `PredictRequest` 当前字段定义核对为 `{"symbol": "ETHUSDT", "interval": "1h"}`。
 >
-> **再次强调**：第 2~7 章主要对应当前仓库里已有脚本；第 8~11 章描述的是基于这些脚本进行的**人工运维流程**，从 P0-2 开始，仓库已有 `scripts/rollback_model.py` + `models/registry.json` + 训练后自动归档支持。完整的“候选 → 生产”自动切换状态机尚未内建。
+> **再次强调**：第 2~7 章主要对应当前仓库里已有脚本；第 8~11 章描述的是基于这些脚本进行的**人工运维流程**，从 P0-2 开始，仓库已有 `scripts/rollback_model.py` + `models/registry.json` + `models/current.json` + 训练后自动归档支持。完整的“候选 → 生产”自动审批/切换状态机尚未内建。
 
 ---
 
@@ -206,24 +206,25 @@ cat ~/ubuntu-wallet/models/feature_columns_event_v3.json | python3 -m json.tool 
 
 ## 3.3 特征验证
 
-在训练前，建议用数据验证特征构建：
+在训练前，建议做两层验证：
+- **训练 / walk-forward 路径**：`build_multi_tf_feature_df()` + `get_feature_columns_like_trainer()`
+- **在线推理路径**：`build_event_v3_feature_row()`
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
+source venv-analyzer/bin/activate
 
-python3 -c "
-import sys
-sys.path.insert(0, 'ml-service')
-from feature_builder import build_event_v3_feature_row
-result = build_event_v3_feature_row(data_dir='data', expected_n_features=None)
-print(f'特征数量 (feature count): {result.X_row.shape[1]}')
-print(f'特征时间戳 (feature_ts): {result.feature_ts}')
-print(f'前5个特征值 (first 5 values): {result.X_row[0, :5]}')
-"
-
-deactivate
+python scripts/export_feature_schema.py \
+  --model-dir models \
+  --data-dir data \
+  --rebuild \
+  --validate-inference-row
 ```
+
+该命令会同时验证：
+- 保存的 `feature_columns_event_v3.json`
+- 训练 / walk-forward 重建出的 schema
+- `/predict` 实际使用的单行在线特征契约（列顺序 + `1 x n_features` 形状）
 
 ---
 
@@ -741,8 +742,9 @@ echo "=== 候选模型（Candidate）===" && grep -E "threshold=|win_rate|avg_re
 
 **当前仓库已提供以下模型管理机制（P0-2 已实现）：**
 - `models/registry.json`：记录所有训练过的模型条目及状态（prod / archived）
+- `models/current.json`：当前线上生产模型指针，`ml-service` 启动时优先按该指针解析实际加载目录
 - `models/archive/event_v3-<timestamp>/`：每次训练后的完整模型文件备份（训练时自动创建）
-- `scripts/rollback_model.py`：基于 registry.json 的一键回滚脚本（支持 `--dry-run`）
+- `scripts/rollback_model.py`：基于 registry.json + current.json 的一键回滚脚本（支持 `--dry-run`）
 
 **当前仓库尚未内建以下机制（后续可演进）：**
 - 没有自动维护 `current / candidates` 这类目录树
@@ -756,7 +758,7 @@ echo "=== 候选模型（Candidate）===" && grep -E "threshold=|win_rate|avg_re
   - 独立版本目录（例如 `models/v20260315/`）
   - 甚至进一步演进到 `current / archive / candidates` 这样的目录约定
 
-> **一句话总结**：下面第 8~11 章里的"晋升 / 回滚 / 退役"，当前仓库已实现 registry 注册 + archive 备份 + `rollback_model.py` 脚本，但"候选 → 生产"完整自动切换工作流仍需手工结合脚本完成。
+> **一句话总结**：下面第 8~11 章里的"晋升 / 回滚 / 退役"，当前仓库已实现 `current.json` 生产指针 + registry 注册 + archive 备份 + `rollback_model.py` 脚本，但"候选 → 生产"完整自动切换工作流仍需手工结合脚本完成。
 
 ---
 
@@ -1007,7 +1009,8 @@ deactivate
 ## 10.2 回滚步骤（脚本方式，P0-2 已实现）
 
 > **当前实现**：从 P0-2 开始，每次训练后模型会自动归档至 `models/archive/event_v3-<timestamp>/`，
-> 并在 `models/registry.json` 里记录状态。可用 `scripts/rollback_model.py` 一键回滚。
+> 同时更新 `models/registry.json` 与 `models/current.json`。`ml-service` 启动时优先按 `current.json`
+> 指向的目录加载当前生产模型。可用 `scripts/rollback_model.py` 一键回滚。
 
 ### 步骤 1：确认 registry 里有可用的 archived 版本（Dry run 预览）
 
@@ -1031,6 +1034,7 @@ python ~/ubuntu-wallet/scripts/rollback_model.py --model-dir ~/ubuntu-wallet/mod
 # 1. 从 registry.json 找到最近一条 archived 条目
 # 2. 将该版本的文件从 models/archive/<version>/ 复制回 models/
 # 3. 更新 registry.json（旧 prod → archived，被恢复版本 → prod）
+# 4. 更新 current.json（指向新的生产目录）
 ```
 
 ### 步骤 4：重启服务并验证
@@ -1039,7 +1043,7 @@ python ~/ubuntu-wallet/scripts/rollback_model.py --model-dir ~/ubuntu-wallet/mod
 sudo systemctl restart ml-service
 sleep 5
 
-# 验证版本已恢复（registry.model_version 应显示回滚后的版本）
+# 验证版本已恢复（registry.model_version / current_pointer.model_version 应显示回滚后的版本）
 curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 # 确认 ok: true、calibration_available: true
@@ -1054,8 +1058,8 @@ curl -s -X POST http://127.0.0.1:9000/predict \
   -d '{"symbol": "ETHUSDT", "interval": "1h"}' | python3 -m json.tool
 ```
 
-> **手工回滚备选方案**：若 registry.json 损坏，可手工从 `models/archive/event_v3-<timestamp>/` 
-> 复制文件到 `models/` 再重启服务。
+> **手工回滚备选方案**：若 registry.json / current.json 损坏，可手工从 `models/archive/event_v3-<timestamp>/`
+> 复制文件到 `models/`，并把 `current.json` 里的 `path` 指到该目录后再重启服务。
 
 ## 10.3 回滚后记录
 

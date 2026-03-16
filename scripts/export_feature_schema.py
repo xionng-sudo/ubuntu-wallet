@@ -13,8 +13,10 @@ to align the feature vector with training.
 
 This script:
   1. Loads the schema from models/feature_columns_event_v3.json
-  2. Optionally rebuilds the schema from klines data (--rebuild flag)
-  3. Validates consistency between the file and a live data build
+  2. Optionally rebuilds the schema from klines data using the same training /
+     walk-forward feature path (--rebuild flag)
+  3. Optionally validates the online inference row contract using
+     build_event_v3_feature_row() (--validate-inference-row)
   4. Writes a canonical schema copy to --output if specified
 
 Usage
@@ -28,6 +30,13 @@ Usage
     --data-dir data \
     --rebuild
 
+  # Full offline/online contract validation:
+  python scripts/export_feature_schema.py \
+    --model-dir models \
+    --data-dir data \
+    --rebuild \
+    --validate-inference-row
+
   # Export schema to a named file for reference:
   python scripts/export_feature_schema.py \
     --model-dir models \
@@ -40,7 +49,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ML_SERVICE_DIR = os.path.join(REPO_ROOT, "ml-service")
@@ -75,6 +84,27 @@ def _rebuild_schema_from_data(data_dir: str) -> List[str]:
     return cols
 
 
+def _validate_inference_row(data_dir: str, model_dir: str, saved_cols: List[str]) -> Dict[str, Any]:
+    """Validate build_event_v3_feature_row() against the saved schema."""
+    from feature_builder import build_event_v3_feature_row  # type: ignore
+
+    built = build_event_v3_feature_row(
+        data_dir=data_dir,
+        model_dir=model_dir,
+        expected_n_features=len(saved_cols),
+    )
+    same_columns = list(built.feature_columns) == list(saved_cols)
+    x_shape_ok = tuple(built.X_row.shape) == (1, len(saved_cols))
+    schema_validation = built.schema_validation.to_dict() if built.schema_validation is not None else None
+    return {
+        "feature_ts": built.feature_ts,
+        "same_columns": same_columns,
+        "x_shape_ok": x_shape_ok,
+        "x_shape": list(built.X_row.shape),
+        "schema_validation": schema_validation,
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description="Export and validate event_v3 feature schema"
@@ -93,6 +123,11 @@ def main() -> int:
         "--rebuild",
         action="store_true",
         help="Rebuild schema from klines data and compare to saved schema",
+    )
+    ap.add_argument(
+        "--validate-inference-row",
+        action="store_true",
+        help="Validate that build_event_v3_feature_row() produces a 1xN row aligned to the saved schema",
     )
     ap.add_argument(
         "--output",
@@ -121,6 +156,8 @@ def main() -> int:
     print(f"  4h features (tf4h_): {sum(1 for c in saved_cols if c.startswith('tf4h_'))}")
     print(f"  1d features (tf1d_): {sum(1 for c in saved_cols if c.startswith('tf1d_'))}")
     print(f"{'='*60}")
+
+    validation_summary: Dict[str, Any] = {}
 
     # 2. Rebuild and compare (optional)
     if args.rebuild:
@@ -153,8 +190,39 @@ def main() -> int:
 
         if missing_from_rebuilt or extra_in_rebuilt:
             return 1
+        validation_summary["train_walkforward_rebuild"] = {
+            "same_columns": True,
+            "n_features": len(rebuilt_cols),
+        }
 
-    # 3. Write output (optional)
+    # 3. Validate inference row contract (optional)
+    if args.validate_inference_row:
+        try:
+            inference_check = _validate_inference_row(data_dir, model_dir, saved_cols)
+        except Exception as e:
+            print(f"\nERROR validating inference row: {e}", flush=True)
+            return 2
+
+        print(f"\n{'='*60}")
+        print("INFERENCE ROW CONTRACT CHECK")
+        print(f"  feature_ts        : {inference_check['feature_ts']}")
+        print(f"  columns_match     : {inference_check['same_columns']}")
+        print(f"  x_row_shape       : {tuple(inference_check['x_shape'])}")
+        print(f"  expected_x_shape  : {(1, len(saved_cols))}")
+        schema_validation = inference_check.get("schema_validation") or {}
+        print(
+            "  schema_validation : "
+            f"is_valid={schema_validation.get('is_valid')} "
+            f"missing={len(schema_validation.get('missing_columns') or [])} "
+            f"extra={len(schema_validation.get('extra_columns') or [])}"
+        )
+        print(f"{'='*60}")
+
+        if not inference_check["same_columns"] or not inference_check["x_shape_ok"]:
+            return 1
+        validation_summary["inference_row"] = inference_check
+
+    # 4. Write output (optional)
     if args.output:
         out_path = os.path.abspath(args.output)
         os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
@@ -163,6 +231,7 @@ def main() -> int:
             "model_dir": model_dir,
             "n_features": len(saved_cols),
             "feature_columns": saved_cols,
+            "validation_summary": validation_summary,
         }
         with open(out_path, "w", encoding="utf-8") as f:
             json.dump(schema_doc, f, indent=2)

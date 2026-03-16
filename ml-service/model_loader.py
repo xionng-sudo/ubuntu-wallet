@@ -305,22 +305,62 @@ def get_prod_registry_entry(model_dir: str) -> Optional[Dict[str, Any]]:
     return sorted(prods, key=lambda e: e.get("trained_at", ""), reverse=True)[0]
 
 
+def load_current_pointer(model_dir: str) -> Optional[Dict[str, Any]]:
+    """Load models/current.json. Returns None if not present."""
+    path = os.path.join(model_dir, "current.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else None
+
+
+def resolve_current_model_dir(model_dir: str) -> str:
+    """
+    Resolve the actual artifact directory to load.
+
+    If models/current.json exists, use its relative/absolute path.
+    Otherwise fall back to the flat model_dir for backward compatibility.
+    """
+    pointer = load_current_pointer(model_dir)
+    if pointer is None:
+        return model_dir
+
+    raw_path = str(pointer.get("path") or "").strip()
+    if not raw_path:
+        raise RuntimeError("current.json exists but path is empty")
+
+    resolved = raw_path if os.path.isabs(raw_path) else os.path.join(model_dir, raw_path)
+    resolved = os.path.abspath(resolved)
+    if not os.path.isdir(resolved):
+        raise RuntimeError(f"current.json points to missing model dir: {resolved}")
+    return resolved
+
+
 def load_model_from_registry(model_dir: str) -> "LoadedModel":
     """
-    Load the production model referenced by registry.json.
+    Load the production model referenced by current.json / registry.json.
 
-    Falls back to plain load_model(model_dir) if no registry exists,
+    Falls back to plain load_model(model_dir) if no current pointer exists,
     which preserves backward compatibility with existing deployments.
     """
+    pointer = load_current_pointer(model_dir)
     entry = get_prod_registry_entry(model_dir)
-    if entry is None:
-        # No registry or no prod entry: use flat model_dir as before
+    resolved_model_dir = resolve_current_model_dir(model_dir)
+
+    if pointer is None and entry is None:
         return load_model(model_dir)
 
-    # The flat model_dir IS the active model directory; the registry entry
-    # is informational.  Verify version consistency as a sanity check.
-    lm = load_model(model_dir)
-    return lm
+    if pointer is not None and entry is not None:
+        pointer_model_version = str(pointer.get("model_version") or "").strip()
+        registry_model_version = str(entry.get("model_version") or "").strip()
+        if pointer_model_version and registry_model_version and pointer_model_version != registry_model_version:
+            raise RuntimeError(
+                "current.json and registry.json disagree on production model: "
+                f"pointer={pointer_model_version} registry={registry_model_version}"
+            )
+
+    return load_model(resolved_model_dir)
 
 
 def _xgb_predict_proba(model: Any, Xs: np.ndarray) -> np.ndarray:

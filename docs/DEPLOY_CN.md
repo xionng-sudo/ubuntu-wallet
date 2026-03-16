@@ -501,7 +501,7 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 ## 12.1 手工测试评估脚本
 
-> **注意**：`evaluate-predictions.service` 使用 `ml-service/.venv`（见 systemd 服务文件），手工运行时也建议使用相同 venv。
+> **注意**：`evaluate-predictions.service` 与 `daily-report.service` 都使用 `ml-service/.venv`（见 systemd 服务文件），手工运行时也建议使用相同 venv。该 venv 需要安装 `ml-service/requirements.txt`，其中包含共享评估/日报脚本依赖的 `requests`。
 
 ```bash
 cd ~/ubuntu-wallet
@@ -616,6 +616,8 @@ sudo cp ~/ubuntu-wallet/systemd/go-collector.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/ml-service.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/evaluate-predictions.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/evaluate-predictions.timer /etc/systemd/system/
+sudo cp ~/ubuntu-wallet/systemd/daily-report.service /etc/systemd/system/
+sudo cp ~/ubuntu-wallet/systemd/daily-report.timer /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/check-go-collector.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/check-go-collector.timer /etc/systemd/system/
 ```
@@ -636,6 +638,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable go-collector
 sudo systemctl enable ml-service
 sudo systemctl enable evaluate-predictions.timer
+sudo systemctl enable daily-report.timer
 sudo systemctl enable check-go-collector.timer
 ```
 
