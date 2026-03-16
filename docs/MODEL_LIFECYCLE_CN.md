@@ -20,6 +20,8 @@
 > - `scripts/backtest_event_v3_http.py`
 > - `scripts/evaluate_from_logs.py`
 > - `ml-service/app.py` 中的 `PredictRequest`
+>
+> **再次强调**：第 2~7 章主要对应当前仓库里已有脚本；第 8~11 章描述的是基于这些脚本进行的**人工运维流程**。仓库当前并没有一个“候选 → 生产 → 归档 → 回滚”的内建状态机或模型注册中心。
 
 ---
 
@@ -45,7 +47,7 @@
 
 # 1. 模型生命周期总览
 
-`ubuntu-wallet` 中的模型生命周期分为以下阶段：
+`ubuntu-wallet` 中的模型生命周期可以按下面这个**运维视角**来理解：
 
 ```
 数据准备
@@ -60,11 +62,11 @@ Walk-Forward 交叉验证（walkforward_cv.py）
   ↓
 候选模型评估（evaluate_from_logs.py / backtest）
   ↓
-模型晋升为生产（promotion）
+人工上线 / 晋升（promotion as ops process）
   ↓
 生产期间持续监控（evaluate-predictions.timer）
   ↓
-回滚（rollback）或退役（retirement）
+人工回滚（rollback）或退役（retirement）
 ```
 
 在团队运维流程里，可以用下面这些**流程状态标签**描述模型所处阶段：
@@ -557,7 +559,8 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 ## 7.1 什么是候选模型评估
 
-候选模型（candidate model）是训练完成但尚未上线的模型。
+候选模型（candidate model）在本文中是一个**运维标签**：表示“准备拿来比较或上线的那组模型文件”。
+它**不是**当前仓库自动维护的状态，也不意味着仓库里一定存在 `candidate/production` 这类目录或状态字段。
 在正式上线前，需要通过以下评估确认其质量：
 
 1. **历史回测**（Backtest）：在已知历史数据上模拟运行
@@ -568,13 +571,14 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 > **重要说明（Important）**：`backtest_event_v3_http.py` 通过调用**正在运行的 ml-service `/predict` 端点**来获取预测，**不是**直接读取模型文件。因此：
 > - 运行回测前，ml-service 必须已启动并加载了目标模型
-> - 要测试候选模型，需先将 ml-service 指向候选模型目录（通过 `MODEL_DIR` 环境变量），重启服务，再运行回测
+> - 要测试候选模型，需先让 ml-service 实际加载候选模型文件，再运行回测
+> - **当前仓库提交的 `systemd/ml-service.service` 并未内置 `Environment=MODEL_DIR=...`**，所以仅在 shell 里 `export MODEL_DIR=...` 后执行 `systemctl restart ml-service`，并不能保证 systemd 服务切到候选目录
 
 ### 方法一：网格搜索（寻找最佳阈值/TP/SL 组合）
 
 ```bash
 # 确保 ml-service 正在运行并加载了目标模型
-# （如需测试候选模型，先修改 MODEL_DIR 并重启 ml-service，见第 8 章）
+# （如需测试候选模型，先按第 7.3/第 8 章的方法让 ml-service 实际加载那组文件）
 
 cd ~/ubuntu-wallet
 source venv-analyzer/bin/activate
@@ -653,13 +657,21 @@ python scripts/backtest_event_v3_http.py \
 deactivate
 ```
 
-### 步骤 2：切换 ml-service 至候选模型，对候选模型回测
+### 步骤 2：让 ml-service 临时加载候选模型，对候选模型回测
 
 ```bash
-# 修改 MODEL_DIR 指向候选模型目录（如已用 --model-dir 训练到独立目录）
-# 方法一：修改 systemd 服务文件，添加 Environment=MODEL_DIR=...
-# 方法二：直接设置环境变量临时测试（不持久化）
-export MODEL_DIR=~/ubuntu-wallet/models/v20260315
+# 当前仓库提交的 systemd/ml-service.service 默认没有 Environment=MODEL_DIR=...
+# 因此这里要么：
+# 1) 临时修改 systemd override，让服务读候选目录；或
+# 2) 直接把候选文件复制到 ~/ubuntu-wallet/models/ 后重启，再做对比
+#
+# 下面示例演示“临时 systemd override”做法：
+# sudo systemctl edit ml-service
+# 写入：
+#   [Service]
+#   Environment=MODEL_DIR=/home/ubuntu/ubuntu-wallet/models/v20260315
+# 保存退出后：
+sudo systemctl daemon-reload
 sudo systemctl restart ml-service
 sleep 5
 curl -s http://127.0.0.1:9000/healthz | python3 -c "import sys,json; m=json.load(sys.stdin); print('候选模型 (Candidate model):', m['model_version'])"
@@ -681,6 +693,8 @@ deactivate
 echo "=== 生产模型（Production）===" && grep -E "threshold=|win_rate|avg_ret|MDD" /tmp/backtest_production.txt
 echo "=== 候选模型（Candidate）===" && grep -E "threshold=|win_rate|avg_ret|MDD" /tmp/backtest_candidate.txt
 ```
+
+> **如果这里只是做候选模型评估、还没有决定正式上线**：请撤销刚才的临时 systemd override（例如再次 `sudo systemctl edit ml-service` 清空 override，随后 `sudo systemctl daemon-reload && sudo systemctl restart ml-service`），避免服务持续指向候选目录。
 
 对比关注点：
 
@@ -759,6 +773,7 @@ echo "当前生产模型（Current production model）: $(curl -s http://127.0.0
 > **当前实现说明**：ml-service 通过 `MODEL_DIR` 环境变量决定加载哪个目录的模型。
 > 默认值是 `<repo_root>/models/`（即 `~/ubuntu-wallet/models/`）。
 > 若训练时使用了 `--model-dir ~/ubuntu-wallet/models/v20260315/`，则需将 `MODEL_DIR` 指向该目录。
+> 但**当前仓库提交的** `systemd/ml-service.service` **本身并没有写入 `Environment=MODEL_DIR=...`**，所以在默认部署下它实际上依赖 `ml-service/app.py` 的默认目录 `../models`。
 >
 > **重要**：这里的“晋升”不是仓库内建的 promotion 机制，而是人工把新模型文件放到活动目录并重启服务。
 
@@ -1121,13 +1136,13 @@ EOF
 └── model_meta.json                       # 模型完整元数据
 ```
 
-## 12.2 推荐的版本化布局（团队约定，不是当前仓库内建结构）
+## 12.2 推荐的版本化布局（团队约定 / 未来目标状态示意，不是当前仓库内建结构）
 
 若要保留多个历史版本，建议用 `--model-dir` 指定独立目录：
 
 ```
 ~/ubuntu-wallet/
-├── models/                               # 当前生产模型（ml-service 默认读此目录）
+├── models/                               # 当前活动加载目录（通常作为生产模型目录使用）
 │   ├── lightgbm_event_v3.pkl
 │   └── ...（同上）
 │
@@ -1144,6 +1159,16 @@ EOF
 ```
 
 > **再次强调**：上面的 `models_backup/`、`models/v20260315/` 是推荐的人工作业布局，不是代码里自动维护的目录树。
+
+若团队未来想继续演进到更强的 roadmap / target-state 流程，也**可以另外设计**如下目录规范：
+
+```text
+data/models/current/
+data/models/archive/
+data/models/candidates/
+```
+
+> **但这只是未来目标状态示意**。当前仓库没有自动创建、维护或切换这些 `data/models/current|archive|candidates` 目录；如果文档里提到这些词，请一律理解为团队流程术语，而不是已实现功能。
 
 ## 12.3 模型版本号格式
 
@@ -1270,7 +1295,7 @@ DATA_DIR=/home/ubuntu/ubuntu-wallet/data      # 数据根目录
 
 ## 上线前检查
 
-- [ ] `~/ubuntu-wallet/models/` 中所有文件是候选模型（不是旧版本）
+- [ ] `~/ubuntu-wallet/models/` 中已经放入**计划上线的那组模型文件**（不是旧版本残留）
 - [ ] `models_backup/` 中已有上一版本的备份
 - [ ] 回测对比完成（win_rate 和 MDD 满足要求）
 - [ ] 手工测试 `/predict` 返回正确（`model_version` 为新值）
