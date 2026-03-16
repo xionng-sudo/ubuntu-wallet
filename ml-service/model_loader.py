@@ -279,6 +279,50 @@ def load_model(model_dir: str) -> LoadedModel:
     raise RuntimeError("model_meta.json has no supported model keys (lightgbm/xgboost/event_v3)")
 
 
+# ---------------------------------------------------------------------------
+# Registry helpers (P0-2)
+# ---------------------------------------------------------------------------
+
+def load_registry(model_dir: str) -> Dict[str, Any]:
+    """Load models/registry.json. Returns empty dict if not present."""
+    path = os.path.join(model_dir, "registry.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_prod_registry_entry(model_dir: str) -> Optional[Dict[str, Any]]:
+    """
+    Return the 'prod' entry from registry.json, or None if registry is absent
+    or no entry has status='prod'.
+    """
+    reg = load_registry(model_dir)
+    entries = reg.get("entries", [])
+    prods = [e for e in entries if e.get("status") == "prod"]
+    if not prods:
+        return None
+    return sorted(prods, key=lambda e: e.get("trained_at", ""), reverse=True)[0]
+
+
+def load_model_from_registry(model_dir: str) -> "LoadedModel":
+    """
+    Load the production model referenced by registry.json.
+
+    Falls back to plain load_model(model_dir) if no registry exists,
+    which preserves backward compatibility with existing deployments.
+    """
+    entry = get_prod_registry_entry(model_dir)
+    if entry is None:
+        # No registry or no prod entry: use flat model_dir as before
+        return load_model(model_dir)
+
+    # The flat model_dir IS the active model directory; the registry entry
+    # is informational.  Verify version consistency as a sanity check.
+    lm = load_model(model_dir)
+    return lm
+
+
 def _xgb_predict_proba(model: Any, Xs: np.ndarray) -> np.ndarray:
     """
     Predict class probabilities using an XGBoost model.

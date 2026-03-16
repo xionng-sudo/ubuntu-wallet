@@ -217,14 +217,22 @@
   - 从 prediction log 评估后验表现
 - `mt_trend_utils.py`
   - 多周期趋势工具
+- `report_threshold_grid.py` *(P0-3 新增)*
+  - 阈值网格分析工具：对 prediction log 的多个 threshold 值批量输出 precision / coverage / avg_return / MDD / LONG/SHORT 分项统计
+  - 支持 JSON / CSV 双格式输出
+- `generate_daily_report.py` *(P0-4 新增)*
+  - 每日评估报告生成器：输出 `daily_eval_YYYY-MM-DD.json` 和 `daily_eval_YYYY-MM-DD.md`
+  - 包含 model_version / precision / coverage / TP/SL/TIMEOUT 分布 / LONG/SHORT 分方向结果
+- `export_feature_schema.py` *(P0-1 新增)*
+  - 从训练模型目录导出 / 验证 `feature_columns_event_v3.json` 特征 schema，支持 `--rebuild` 与保存时 schema 一致性对比
+- `rollback_model.py` *(P0-2 新增)*
+  - 基于 `models/registry.json` 的一键式模型回滚脚本，支持 `--dry-run` 预览
 - `eth_perp_engine_binance.py`
   - ETH 永续风险与执行引擎外壳
 - `live_trader_eth_perp_binance.py`
   - ETH 实时/准实时交易执行脚本
 - `live_trader_eth_perp_simulated.py`
   - 历史顺序回放模拟交易脚本
-- `run_live_eval_1h.sh`
-  - 评估相关 shell 脚本
 - `install.sh`
   - 安装辅助脚本
 - `run.sh`
@@ -257,7 +265,11 @@
 - `evaluate-predictions.service`
   - 评估任务服务
 - `evaluate-predictions.timer`
-  - 评估任务定时器
+  - 评估任务定时器（每 6 小时运行一次 evaluate_from_logs.py）
+- `daily-report.service` *(P0-4 新增)*
+  - 每日报告生成任务服务
+- `daily-report.timer` *(P0-4 新增)*
+  - 每日报告定时器（UTC 01:05 每天运行一次 generate_daily_report.py）
 - `DEPLOY-NEW-SERVER.md`
   - 新服务器部署说明
 - `UPGRADE.md`

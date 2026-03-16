@@ -8,7 +8,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from feature_builder import build_event_v3_feature_row, build_latest_feature_row_from_klines
-from model_loader import LoadedModel, load_model, predict_proba
+from model_loader import LoadedModel, load_model, load_model_from_registry, get_prod_registry_entry, predict_proba
 from prediction_logger import log_prediction
 
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models")))
@@ -82,13 +82,24 @@ app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v
 @app.on_event("startup")
 def _startup():
     global _loaded
-    _loaded = load_model(MODEL_DIR)
+    _loaded = load_model_from_registry(MODEL_DIR)
 
 
 @app.get("/healthz")
 def healthz():
     if _loaded is None:
         return {"ok": False, "model_dir": MODEL_DIR, "data_dir": DATA_DIR}
+
+    reg_entry = get_prod_registry_entry(MODEL_DIR)
+    registry_info = None
+    if reg_entry is not None:
+        registry_info = {
+            "model_version": reg_entry.get("model_version"),
+            "trained_at": reg_entry.get("trained_at"),
+            "status": reg_entry.get("status"),
+            "n_features": reg_entry.get("n_features"),
+        }
+
     return {
         "ok": True,
         "model_dir": MODEL_DIR,
@@ -97,6 +108,7 @@ def healthz():
         "model_expected_n_features": _loaded.expected_n_features,
         "calibration_available": _loaded.calibration is not None,
         "calibration_method": _loaded.calibration.method if _loaded.calibration is not None else None,
+        "registry": registry_info,
     }
 
 
