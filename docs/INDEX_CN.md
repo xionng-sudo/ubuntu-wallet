@@ -224,8 +224,8 @@ deactivate
 | `~/ubuntu-wallet/data/raw/klines_1h.json`     | 1h K 线数据                   |
 | `~/ubuntu-wallet/data/raw/klines_4h.json`     | 4h K 线数据                   |
 | `~/ubuntu-wallet/data/raw/klines_1d.json`     | 日线 K 线数据                 |
-| `~/ubuntu-wallet/data/models/current/`        | 当前生产模型                  |
-| `~/ubuntu-wallet/data/models/archive/`        | 历史归档模型                  |
+| `~/ubuntu-wallet/models/`                             | 模型文件目录（训练默认输出，ml-service 加载源）|
+| `~/ubuntu-wallet/models_backup/`                      | 模型备份目录（建议在每次换模型前手动备份）     |
 | `~/ubuntu-wallet/logs/evaluate_predictions.log` | 评估任务日志                |
 | `~/ubuntu-wallet/check-go-collector.log`      | go-collector 健康检查日志     |
 | `/etc/ubuntu-wallet/collector.env`            | 交易所 API Key（不进 Git）    |

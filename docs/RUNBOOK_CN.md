@@ -133,7 +133,7 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
     "ok": true,
     "model_dir": "/home/ubuntu/ubuntu-wallet/models",
     "data_dir": "/home/ubuntu/ubuntu-wallet/data",
-    "model_version": "event_v3_20260315_120000",
+    "model_version": "event_v3:lightgbm:2026-03-15T12:00:00Z",
     "model_expected_n_features": 120,
     "calibration_available": true,
     "calibration_method": "isotonic"

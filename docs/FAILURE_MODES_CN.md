@@ -313,7 +313,7 @@ sudo systemctl restart go-collector
 ## 处理方法
 1. 停止认为“这是市场变了”
 2. 先确认 schema 是否一致
-3. 对比训练侧 `feature_schema.json` 与线上实际列
+3. 对比训练侧 `feature_columns_event_v3.json` 与线上实际特征列
 4. 必要时回滚到上一个稳定模型/代码版本
 
 ## 恢复后验证

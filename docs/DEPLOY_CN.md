@@ -214,7 +214,7 @@ mkdir -p ~/ubuntu-wallet/data/models
 
 建议至少两个虚拟环境：
 
-- `venv-ml-service`：在线推理服务
+- `venv-ml-service`（即 `ml-service/.venv/`，由 systemd 服务使用）：在线推理服务
 - `venv-analyzer`：训练、回测、评估、模拟交易
 
 理由：
@@ -357,26 +357,34 @@ mkdir -p ~/ubuntu-wallet/data/models
 
 # 9. 模型目录部署
 
-## 9.1 如果你已经有训练好的模型
-建议整理到一个明确目录，例如：
+## 9.1 模型目录说明
+
+`train_event_stack_v3.py` 默认将模型文件输出到 `~/ubuntu-wallet/models/`（即仓库根目录下的 `models/` 目录）。`ml-service` 也默认从此目录加载模型。
+
+实际输出的文件（7 个）：
 
 ```text
-~/ubuntu-wallet/data/models/current/
+~/ubuntu-wallet/models/
+├── lightgbm_event_v3.pkl          # LightGBM 模型
+├── lightgbm_event_v3_scaler.pkl   # LightGBM 特征缩放器
+├── xgboost_event_v3.json          # XGBoost 模型（原生 JSON）
+├── xgboost_event_v3_scaler.pkl    # XGBoost 特征缩放器
+├── stacking_event_v3.pkl          # 堆叠元模型
+├── feature_columns_event_v3.json  # 特征列名列表
+├── calibration_event_v3.pkl       # 概率校准器
+└── model_meta.json                # 模型元数据
 ```
 
-其中建议包含：
-- 模型文件
-- calibration artifact
-- `model_meta.json`
-- `feature_schema.json`
-
 ## 9.2 如果还没有模型
-先使用 `python-analyzer/train_event_stack_v3.py` 训练，再把模型产物复制到线上模型目录。
+
+先使用 `python-analyzer/train_event_stack_v3.py` 训练（见第 16 章），训练产物自动写入 `models/` 目录。
 
 ## 9.3 模型切换建议
-不要手工覆盖生产模型而不保留旧版本。建议：
-- `data/models/archive/` 保存历史模型
-- `data/models/current/` 指向当前生产模型
+
+不要手工覆盖生产模型而不保留旧版本。建议在每次切换前备份：
+- 用 `cp ~/ubuntu-wallet/models/*.pkl ~/ubuntu-wallet/models/*.json ~/ubuntu-wallet/models_backup/$(date -u +%Y%m%d_%H%M%S)/` 备份当前模型
+- 新模型文件准备好后，复制到 `models/` 目录
+- 重启 ml-service 加载新模型
 
 ---
 
@@ -451,16 +459,7 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
     "ok": true,
     "model_dir": "/home/ubuntu/ubuntu-wallet/models",
     "data_dir": "/home/ubuntu/ubuntu-wallet/data",
-    "model_version": "event_v3_20260315_120000",
-    "model_expected_n_features": 120,
-    "calibration_available": true,
-    "calibration_method": "isotonic"
-}
-```
-
-**字段说明（Field explanation）：**
-- `ok: true`：服务正常，模型已加载 / Service is healthy, model is loaded
-- `model_version`：当前加载的模型版本号 / Current loaded model version
+    "model_version": "event_v3:lightgbm:2026-03-15T12:00:00Z",
 - `model_expected_n_features`：模型期望的特征数量 / Number of features the model expects
 - `calibration_available: true`：校准器已加载（建议为 true）/ Calibration artifact is loaded
 - `calibration_method`：校准方法（isotonic 或 sigmoid）/ Calibration method used
@@ -753,9 +752,15 @@ git checkout <previous_commit_or_tag>
 ```
 
 ## 17.2 模型回滚
-将上一版稳定模型重新指向生产目录，例如：
-- 恢复 `data/models/current/`
-- 或恢复 current pointer
+在换模型前备份旧模型文件，回滚时恢复备份：
+```bash
+# 恢复备份到 models/ 目录
+BACKUP_TIMESTAMP="20260315_100000"
+cp ~/ubuntu-wallet/models_backup/$BACKUP_TIMESTAMP/*.pkl \
+   ~/ubuntu-wallet/models_backup/$BACKUP_TIMESTAMP/*.json \
+   ~/ubuntu-wallet/models/
+sudo systemctl restart ml-service
+```
 
 ## 17.3 服务回滚
 ```bash

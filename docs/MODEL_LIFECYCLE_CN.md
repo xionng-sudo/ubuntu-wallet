@@ -163,25 +163,25 @@ print(f'总条数 (total records): {len(timestamps)}')
 
 ## 3.2 特征 Schema 管理
 
-训练时会生成 `feature_schema.json`，记录模型期望的特征列表和顺序。
+训练时会生成 `feature_columns_event_v3.json`，记录模型期望的特征列名和顺序。
 
-**重要**：训练侧和推理侧（ml-service）必须使用完全相同的 feature schema。
+**重要**：训练侧和推理侧（ml-service）必须使用完全相同的特征列列表（`feature_columns_event_v3.json`）。
 
 ```bash
-# 查看训练生成的 feature schema
-cat ~/ubuntu-wallet/data/models/current/feature_schema.json | python3 -m json.tool | head -50
+# 查看训练生成的特征列文件（模型默认输出到 ~/ubuntu-wallet/models/）
+cat ~/ubuntu-wallet/models/feature_columns_event_v3.json | python3 -m json.tool | head -30
 
-# 预期输出（Expected output）示例：
-# {
-#     "version": "event_v3",
-#     "n_features": 120,
-#     "feature_names": [
-#         "close_1h",
-#         "rsi_14_1h",
-#         "macd_1h",
-#         ...
-#     ]
-# }
+# 预期输出（Expected output）示例（特征列名列表）：
+# [
+#     "close_1h",
+#     "volume_1h",
+#     "rsi_14_1h",
+#     "macd_1h",
+#     "ema20_1h",
+#     "atr_14_1h",
+#     ...
+# ]
+# （列表长度即 model_meta.json 中的 n_features 字段）
 ```
 
 ## 3.3 特征验证
@@ -260,62 +260,111 @@ deactivate
 ### 训练期间输出示例（Training output example）
 
 ```
-[INFO] Loading klines_1h.json: 8760 bars
-[INFO] Loading klines_4h.json: 2190 bars
-[INFO] Loading klines_1d.json: 365 bars
-[INFO] Generating labels with triple_barrier method...
-[INFO] tp_pct=0.0175 sl_pct=0.009 horizon=6 bars
-[INFO] Label distribution: LONG=2847 FLAT=3012 SHORT=2901
-[INFO] Training LightGBM base model...
-[INFO] Training XGBoost base model...
-[INFO] Training meta LogisticRegression...
-[INFO] Calibrating with isotonic regression...
-[INFO] Saving model to: data/models/event_v3_20260315_120000/
-[INFO] Training complete. model_version=event_v3_20260315_120000
+[train_event_v3] data_dir=/home/ubuntu/ubuntu-wallet/data  model_dir=/home/ubuntu/ubuntu-wallet/models
+[train_event_v3] label_method=triple_barrier  horizon=12  tp_pct=0.0175  sl_pct=0.009  calibration=isotonic
+[train_event_v3] building multi-tf features ...
+[train_event_v3] creating labels using method=triple_barrier ...
+[train_event_v3] samples=6789, features=120
+[train_event_v3] label distribution: {0: 2234, 1: 2321, 2: 2234}
+[train_event_v3] lgb test accuracy=0.4123  proba shape=(1000, 3)
+[train_event_v3] xgb test accuracy=0.4015  proba shape=(1000, 3)
+[train_event_v3] building out-of-fold stacking features ...
+[train_event_v3] stacking test accuracy=0.4456
+[train_event_v3] saved /home/ubuntu/ubuntu-wallet/models/lightgbm_event_v3.pkl
+[train_event_v3] saved /home/ubuntu/ubuntu-wallet/models/xgboost_event_v3.json (XGBoost native format)
+[train_event_v3] saved /home/ubuntu/ubuntu-wallet/models/stacking_event_v3.pkl
+[train_event_v3] saved /home/ubuntu/ubuntu-wallet/models/feature_columns_event_v3.json (120 columns)
+[train_event_v3] saved calibration (isotonic) to /home/ubuntu/ubuntu-wallet/models/calibration_event_v3.pkl
+[train_event_v3] training complete. trained_at=2026-03-15T12:00:00Z
+[train_event_v3] updated /home/ubuntu/ubuntu-wallet/models/model_meta.json
 ```
 
 **输出术语解释（Output term explanation）：**
-- `8760 bars`：8760条 K 线，约 1 年的小时线 / 8760 hourly candlestick records, approx. 1 year
-- `triple_barrier`：三重障碍标签法，同时设置止盈/止损/时间窗口
-- `Label distribution`：标签分布，应大致均衡，避免严重倾斜
-- `calibrating with isotonic`：使用等温回归进行概率校准
+- `data_dir=.../data`：读取 K 线数据的目录 / Directory containing klines files
+- `model_dir=.../models`：模型输出目录（默认为仓库根目录下的 `models/`）/ Model output directory
+- `samples=6789, features=120`：训练样本数和特征数 / Number of training samples and features
+- `label distribution: {0: 2234, 1: 2321, 2: 2234}`：三类标签分布，0=SHORT 1=FLAT 2=LONG，应大致均衡
+- `training complete. trained_at=...`：训练完成，`trained_at` 是此次训练的时间戳（也是模型版本的一部分）
 
 ## 4.4 训练产物
 
-训练完成后，`data/models/` 目录下会生成新的模型目录：
+训练完成后，模型文件保存在 `--model-dir` 指定的目录（**默认为 `~/ubuntu-wallet/models/`**，即仓库根目录下的 `models/` 目录）：
 
 ```
-data/models/event_v3_20260315_120000/
-├── model.pkl               # 主模型文件（Main model file）
-├── calibrator.pkl          # 校准器文件（Calibration artifact）
-├── feature_schema.json     # 特征 schema（Feature schema）
-└── model_meta.json         # 模型元数据（Model metadata）
+~/ubuntu-wallet/models/
+├── lightgbm_event_v3.pkl          # LightGBM 基础模型（Base model 1）
+├── lightgbm_event_v3_scaler.pkl   # LightGBM 特征缩放器（Feature scaler）
+├── xgboost_event_v3.json          # XGBoost 基础模型（Base model 2，原生 JSON 格式）
+├── xgboost_event_v3_scaler.pkl    # XGBoost 特征缩放器
+├── stacking_event_v3.pkl          # 堆叠元模型 LogisticRegression（Meta learner）
+├── feature_columns_event_v3.json  # 特征列名列表（Feature column names）
+├── calibration_event_v3.pkl       # 概率校准器（Calibration artifact）
+├── calibration_event_v3_meta.json # 校准器元数据
+└── model_meta.json                # 模型完整元数据（Model metadata）
 ```
+
+> **说明（Note）**：训练脚本默认将所有文件写入同一个目录（`models/`），不创建以版本号命名的子目录。
+> 若要管理多个版本（如生产 vs 候选），可以使用 `--model-dir` 参数指定不同目录，例如：
+> ```bash
+> python python-analyzer/train_event_stack_v3.py \
+>   --model-dir ~/ubuntu-wallet/models/v20260315/ \
+>   --label-method triple_barrier --tp-pct 0.0175 --sl-pct 0.009 --calibration isotonic
+> ```
 
 ## 4.5 查看训练结果
 
 ```bash
-cat ~/ubuntu-wallet/data/models/event_v3_20260315_120000/model_meta.json | python3 -m json.tool
+cat ~/ubuntu-wallet/models/model_meta.json | python3 -m json.tool
 
 # 预期输出（Expected output）：
 # {
-#     "model_version": "event_v3_20260315_120000",
 #     "active_model": "event_v3",
-#     "train_period": {
-#         "start": "2025-01-01",
-#         "end": "2026-03-15"
-#     },
+#     "trained_at": "2026-03-15T12:00:00Z",
+#     "model_version": "event_v3:lightgbm:2026-03-15T12:00:00Z",
+#     "feature_schema_version": "multi_tf_v1",
+#     "n_features": 120,
 #     "label_config": {
 #         "method": "triple_barrier",
+#         "horizon": 12,
+#         "up_thresh": 0.015,
+#         "down_thresh": 0.015,
 #         "tp_pct": 0.0175,
-#         "sl_pct": 0.009,
-#         "horizon": 6
+#         "sl_pct": 0.009
 #     },
-#     "calibration_method": "isotonic",
-#     "n_features": 120,
-#     "created_at": "2026-03-15T12:00:00Z",
-#     "status": "candidate"
+#     "threshold_config": {
+#         "p_enter": 0.65,
+#         "delta": 0.0
+#     },
+#     "calibration_info": {
+#         "method": "isotonic",
+#         "artifact": "calibration_event_v3.pkl"
+#     },
+#     "train_periods": {
+#         "train_start": "2025-01-01T00:00:00Z",
+#         "train_end": "2026-01-01T00:00:00Z",
+#         "val_start": "2026-01-01T00:00:00Z",
+#         "val_end": "2026-03-15T00:00:00Z"
+#     },
+#     "event_v3": {
+#         "trained_at": "2026-03-15T12:00:00Z",
+#         "p_enter": 0.65,
+#         "delta": 0.0,
+#         "paths": {
+#             "lightgbm_model": "lightgbm_event_v3.pkl",
+#             "lightgbm_scaler": "lightgbm_event_v3_scaler.pkl",
+#             "xgboost_model": "xgboost_event_v3.json",
+#             "xgboost_scaler": "xgboost_event_v3_scaler.pkl",
+#             "stacking_model": "stacking_event_v3.pkl",
+#             "feature_columns": "feature_columns_event_v3.json"
+#         }
+#     }
 # }
+#
+# 关键字段说明（Key field explanation）：
+# model_version  : 格式为 "event_v3:lightgbm:{trained_at}"，trained_at 是训练完成时的 UTC 时间戳
+# n_features     : 模型期望的输入特征数量
+# threshold_config.p_enter: ml-service 默认使用的置信度阈值（p_enter=0.65 表示信号触发门槛）
+# calibration_info.artifact: 校准器文件名（calibration_event_v3.pkl）
 ```
 
 ---
@@ -414,36 +463,51 @@ Walk-Forward 结果用于判断模型是否值得继续推进：
 
 ## 6.2 校准产物
 
-训练后会生成 `calibrator.pkl`：
+训练后在模型目录中生成 `calibration_event_v3.pkl`（注意：文件名是 `calibration_event_v3.pkl`，不是 `calibrator.pkl`）：
 
 ```bash
-ls -lh ~/ubuntu-wallet/data/models/event_v3_20260315_120000/
+ls -lh ~/ubuntu-wallet/models/
 
 # 预期输出（Expected output）：
-# total 8.2M
-# -rw-r--r-- 1 ubuntu ubuntu 7.8M Mar 15 12:01 model.pkl
-# -rw-r--r-- 1 ubuntu ubuntu 324K Mar 15 12:01 calibrator.pkl
-# -rw-r--r-- 1 ubuntu ubuntu 12K  Mar 15 12:01 feature_schema.json
-# -rw-r--r-- 1 ubuntu ubuntu 1.2K Mar 15 12:01 model_meta.json
+# total 18M
+# -rw-r--r-- 1 ubuntu ubuntu 4.2M Mar 15 12:01 lightgbm_event_v3.pkl
+# -rw-r--r-- 1 ubuntu ubuntu 156K Mar 15 12:01 lightgbm_event_v3_scaler.pkl
+# -rw-r--r-- 1 ubuntu ubuntu 8.1M Mar 15 12:01 xgboost_event_v3.json
+# -rw-r--r-- 1 ubuntu ubuntu 156K Mar 15 12:01 xgboost_event_v3_scaler.pkl
+# -rw-r--r-- 1 ubuntu ubuntu 324K Mar 15 12:01 stacking_event_v3.pkl
+# -rw-r--r-- 1 ubuntu ubuntu  18K Mar 15 12:01 feature_columns_event_v3.json
+# -rw-r--r-- 1 ubuntu ubuntu 280K Mar 15 12:01 calibration_event_v3.pkl
+# -rw-r--r-- 1 ubuntu ubuntu  312 Mar 15 12:01 calibration_event_v3_meta.json
+# -rw-r--r-- 1 ubuntu ubuntu 1.4K Mar 15 12:01 model_meta.json
 #
 # 说明（Explanation）：
-# model.pkl        主模型文件，通常几兆到几十兆
-# calibrator.pkl   校准器，通常几十KB到几百KB
-# feature_schema   特征列表，几KB
-# model_meta       元数据，通常<2KB
+# lightgbm_event_v3.pkl      LightGBM 模型，通常几MB
+# xgboost_event_v3.json      XGBoost 模型，原生 JSON 格式（避免 pickle 版本兼容问题）
+# stacking_event_v3.pkl      堆叠元模型（LogisticRegression）
+# feature_columns_event_v3   特征列名列表，json 数组
+# calibration_event_v3.pkl   校准器，joblib 格式，通常几百KB
+# model_meta.json            元数据，纯 JSON，1-2KB
 ```
 
 ## 6.3 验证校准是否有效
 
 ```bash
 cd ~/ubuntu-wallet
-source venv-analyzer/bin/activate
+source ml-service/.venv/bin/activate
 
 python3 -c "
-import pickle, numpy as np
-model = pickle.load(open('data/models/event_v3_20260315_120000/calibrator.pkl', 'rb'))
-print(f'校准器类型 (calibrator type): {type(model).__name__}')
-print('校准器加载成功 (calibrator loaded successfully)')
+import sys, joblib
+sys.path.insert(0, 'ml-service')
+from calibration import load_calibration, default_calibration_path
+cal = load_calibration(default_calibration_path('models'))
+if cal is None:
+    print('校准器未找到 (Calibration artifact not found)')
+else:
+    print(f'校准器类型 (calibrator type): {type(cal).__name__}')
+    print(f'方法 (method): {cal.method}')
+    print(f'类别数 (n_classes): {cal.n_classes}')
+    print(f'训练时间 (trained_at): {cal.trained_at}')
+    print('校准器加载成功 (calibration loaded successfully)')
 "
 
 deactivate
@@ -459,7 +523,7 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 #     "ok": true,
 #     "model_dir": "/home/ubuntu/ubuntu-wallet/models",
 #     "data_dir": "/home/ubuntu/ubuntu-wallet/data",
-#     "model_version": "event_v3_20260315_120000",
+#     "model_version": "event_v3:lightgbm:2026-03-15T12:00:00Z",
 #     "model_expected_n_features": 120,
 #     "calibration_available": true,
 #     "calibration_method": "isotonic"
@@ -467,8 +531,8 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 #
 # 字段说明（Field explanation）：
 # ok                   : true 表示服务和模型加载正常
-# model_version        : 当前加载的模型版本（即模型目录名）
-# calibration_available: true 表示校准器已加载，false 表示未找到校准器
+# model_version        : 格式 "event_v3:lightgbm:{trained_at}"，来自 model_meta.json
+# calibration_available: true 表示 calibration_event_v3.pkl 已加载
 # calibration_method   : 使用的校准方法（isotonic 或 sigmoid）
 ```
 
@@ -489,76 +553,120 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 ## 7.2 对候选模型执行回测
 
+> **重要说明（Important）**：`backtest_event_v3_http.py` 通过调用**正在运行的 ml-service `/predict` 端点**来获取预测，**不是**直接读取模型文件。因此：
+> - 运行回测前，ml-service 必须已启动并加载了目标模型
+> - 要测试候选模型，需先将 ml-service 指向候选模型目录（通过 `MODEL_DIR` 环境变量），重启服务，再运行回测
+
+### 方法一：网格搜索（寻找最佳阈值/TP/SL 组合）
+
 ```bash
+# 确保 ml-service 正在运行并加载了目标模型
+# （如需测试候选模型，先修改 MODEL_DIR 并重启 ml-service，见第 8 章）
+
 cd ~/ubuntu-wallet
 source venv-analyzer/bin/activate
 
 python scripts/backtest_event_v3_http.py \
-  --model-dir ~/ubuntu-wallet/data/models/event_v3_20260315_120000 \
   --data-dir ~/ubuntu-wallet/data \
-  --threshold 0.55 \
-  --tp 0.0175 \
-  --sl 0.007 \
+  --base-url http://127.0.0.1:9000 \
+  --thresholds "0.55:0.75:0.05" \
+  --tp-grid "0.015:0.025:0.0025" \
+  --sl-grid "0.007:0.012:0.001" \
+  --horizon-bars 6 \
   --fee 0.0004 \
-  --output-csv /tmp/backtest_candidate.csv
+  --position-mode single \
+  --objective avg_ret_mdd_daily
 
 deactivate
 ```
 
 ### 参数说明
 
-| 参数          | 含义                          | 说明                    |
-|---------------|-------------------------------|-------------------------|
-| `--threshold` | 信号触发阈值                  | 0.55 表示置信度超过55%时发出信号 |
-| `--tp`        | 止盈百分比（Take Profit）     | 0.0175 = 1.75%          |
-| `--sl`        | 止损百分比（Stop Loss）       | 0.007 = 0.7%            |
-| `--fee`       | 手续费率（Trading fee）       | 0.0004 = 0.04% 单边      |
+| 参数              | 含义                                        | 示例                     |
+|-------------------|---------------------------------------------|--------------------------|
+| `--data-dir`      | K 线数据目录（必需）                        | `~/ubuntu-wallet/data`   |
+| `--base-url`      | ml-service 地址                             | `http://127.0.0.1:9000`  |
+| `--thresholds`    | 阈值网格 `start:end:step`                   | `"0.55:0.75:0.05"` → 测试 0.55, 0.60, ..., 0.75 |
+| `--tp-grid`       | 止盈网格 `start:end:step`（小数，非百分比） | `"0.015:0.025:0.0025"` → 测试 1.5%~2.5% |
+| `--sl-grid`       | 止损网格 `start:end:step`                   | `"0.007:0.012:0.001"` → 测试 0.7%~1.2% |
+| `--horizon-bars`  | 最大持仓 K 线数（TIMEOUT 触发条件）         | `6`（6 小时后按收盘平仓）|
+| `--fee`           | 单边手续费率                                | `0.0004`（0.04%）        |
+| `--position-mode` | `single`=持仓中不开新仓 / `stack`=允许叠仓  | `single`（推荐）         |
+| `--objective`     | 最优化目标                                  | `avg_ret_mdd_daily`（日级别 MDD 最优）|
 
 ### 回测输出示例（Backtest output example）
 
 ```
-=== Backtest Results ===
-Total trades:    312
-Coverage:        0.183 (18.3% of bars generated a signal)
-Precision:       0.621 (62.1% of trades were profitable)
-Win rate:        0.621
-Avg return:      0.0089 per trade
-Max drawdown:    -0.048 (-4.8%)
-TP rate:         0.521
-SL rate:         0.289
-TIMEOUT rate:    0.190
-LONG trades:     187
-SHORT trades:    125
-LONG precision:  0.634
-SHORT precision: 0.601
+Precomputing predictions for 312 bars via http://127.0.0.1:9000 ...
+
+=== BEST CONFIG (grid objective) ===
+threshold=0.65 tp=1.75% sl=0.70% fee/side=0.0400% slippage/side=0.0000% horizon=6 timeout_exit=close tie=SL objective=avg_ret_mdd_daily position_mode=single
+metrics: signals/week=18.32 n_trade=312 (long=187 short=125) TP=162 SL=90 TO=60 win_rate=0.621 avg_ret=0.891% profit_factor=2.34
+decompose: avg_ret_tp=2.15% avg_ret_sl=-0.87% avg_ret_to=0.12% timeout_win_rate=0.55
+risk/realism: MDD(trade_seq)=4.80% MDD(hourly)=3.21% MDD(daily)=5.12% max_consec_losses=4 bars_to_exit(min/median/p90/max)=1/4.0/6.0/6
 ```
 
 **输出术语解释（Output term explanation）：**
-- `Coverage 0.183`：每 100 个 bar 中约有 18.3 个 bar 产生交易信号
-- `Precision 0.621`：在有信号的交易中，62.1% 盈利
-- `Win rate`：胜率（与 Precision 相同）
-- `Avg return`：每笔交易平均收益率 0.89%
-- `Max drawdown -0.048`：最大回撤 4.8%（资金从最高点下跌的最大幅度）
-- `TP rate 0.521`：52.1% 的交易达到止盈（Take Profit）
-- `SL rate 0.289`：28.9% 的交易触发止损（Stop Loss）
-- `TIMEOUT rate 0.190`：19.0% 的交易在 horizon 时间内未触发 TP/SL，按时间平仓
+- `Precomputing predictions for 312 bars`：依次为 312 根 K 线调用 `/predict`，可能需要几分钟
+- `threshold=0.65`：最优阈值（网格搜索选出的最佳配置）
+- `n_trade=312 (long=187 short=125)`：共 312 笔交易，做多 187 笔，做空 125 笔
+- `TP=162 SL=90 TO=60`：分别达到止盈/止损/超时平仓的笔数 / Trades reaching TP / SL / Timeout
+- `win_rate=0.621`：胜率 62.1% / Win rate
+- `avg_ret=0.891%`：每笔平均收益率 / Average return per trade
+- `profit_factor=2.34`：盈利因子（总盈利 / 总亏损）/ Profit factor
+- `MDD(daily)=5.12%`：按日统计的最大回撤 5.12% / Maximum drawdown measured daily
+- `max_consec_losses=4`：最多连续亏损 4 笔 / Maximum consecutive losses
 
 ## 7.3 候选模型与生产模型对比
 
-如果系统已有运行中的生产模型，必须对比：
+由于 `backtest_event_v3_http.py` 依赖运行中的 ml-service，比较候选模型与生产模型需要：
+
+**方法：分两次运行，中间切换 ml-service 使用的模型**
+
+### 步骤 1：对生产模型执行回测并记录结果
 
 ```bash
-# 生产模型回测
-python scripts/backtest_event_v3_http.py \
-  --model-dir ~/ubuntu-wallet/data/models/current \
-  --data-dir ~/ubuntu-wallet/data \
-  --threshold 0.55 \
-  --tp 0.0175 \
-  --sl 0.007 \
-  --fee 0.0004 \
-  --output-csv /tmp/backtest_production.csv
+# 此时 ml-service 加载的是生产模型
+curl -s http://127.0.0.1:9000/healthz | python3 -c "import sys,json; m=json.load(sys.stdin); print('生产模型 (Production model):', m['model_version'])"
 
-# 候选模型回测（同上，使用候选目录）
+source ~/ubuntu-wallet/venv-analyzer/bin/activate
+python scripts/backtest_event_v3_http.py \
+  --data-dir ~/ubuntu-wallet/data \
+  --thresholds "0.55:0.75:0.05" \
+  --tp-grid "0.015:0.025:0.0025" \
+  --sl-grid "0.007:0.012:0.001" \
+  --horizon-bars 6 --fee 0.0004 --position-mode single \
+  | tee /tmp/backtest_production.txt
+deactivate
+```
+
+### 步骤 2：切换 ml-service 至候选模型，对候选模型回测
+
+```bash
+# 修改 MODEL_DIR 指向候选模型目录（如已用 --model-dir 训练到独立目录）
+# 方法一：修改 systemd 服务文件，添加 Environment=MODEL_DIR=...
+# 方法二：直接设置环境变量临时测试（不持久化）
+export MODEL_DIR=~/ubuntu-wallet/models/v20260315
+sudo systemctl restart ml-service
+sleep 5
+curl -s http://127.0.0.1:9000/healthz | python3 -c "import sys,json; m=json.load(sys.stdin); print('候选模型 (Candidate model):', m['model_version'])"
+
+source ~/ubuntu-wallet/venv-analyzer/bin/activate
+python scripts/backtest_event_v3_http.py \
+  --data-dir ~/ubuntu-wallet/data \
+  --thresholds "0.55:0.75:0.05" \
+  --tp-grid "0.015:0.025:0.0025" \
+  --sl-grid "0.007:0.012:0.001" \
+  --horizon-bars 6 --fee 0.0004 --position-mode single \
+  | tee /tmp/backtest_candidate.txt
+deactivate
+```
+
+### 步骤 3：对比两个结果
+
+```bash
+echo "=== 生产模型（Production）===" && grep -E "threshold=|win_rate|avg_ret|MDD" /tmp/backtest_production.txt
+echo "=== 候选模型（Candidate）===" && grep -E "threshold=|win_rate|avg_ret|MDD" /tmp/backtest_candidate.txt
 ```
 
 对比关注点：
@@ -575,12 +683,12 @@ python scripts/backtest_event_v3_http.py \
 候选模型进入生产的最低要求：
 
 - [ ] Walk-Forward Mean Precision ≥ 0.58
-- [ ] 历史回测 Precision ≥ 0.58
-- [ ] 历史回测 Max Drawdown ≤ 8%
-- [ ] feature_schema.json 已生成且字段正确
-- [ ] calibrator.pkl 存在且可加载
-- [ ] model_meta.json 已填写完整
-- [ ] 手工测试 `/predict` 返回正确
+- [ ] 历史回测 win_rate ≥ 0.58
+- [ ] 历史回测 MDD(daily) ≤ 8%
+- [ ] `feature_columns_event_v3.json` 已生成且列数正确
+- [ ] `calibration_event_v3.pkl` 存在且可加载
+- [ ] `model_meta.json` 包含正确的 `model_version`、`threshold_config`、`calibration_info` 字段
+- [ ] 手工测试 `/predict` 返回正确（`signal` 字段为 LONG/FLAT/SHORT，`model_version` 正确）
 
 ---
 
@@ -589,52 +697,47 @@ python scripts/backtest_event_v3_http.py \
 ## 8.1 晋升前必须完成的检查
 
 ```bash
-# 检查候选模型目录完整性
-ls -lh ~/ubuntu-wallet/data/models/event_v3_20260315_120000/
+# 检查新训练的模型目录完整性（默认输出到 models/，若使用 --model-dir 则替换路径）
+ls -lh ~/ubuntu-wallet/models/
 
-# 确认 ml-service 当前模型版本
+# 确认 ml-service 当前模型版本（生产模型）
 curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 # 记录当前生产模型版本（做好回滚准备）
-echo "当前生产模型（Current production model）: $(cat ~/ubuntu-wallet/data/models/current/model_meta.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["model_version"])')"
+echo "当前生产模型（Current production model）: $(curl -s http://127.0.0.1:9000/healthz | python3 -c 'import sys,json; print(json.load(sys.stdin)["model_version"])')"
 ```
 
 ## 8.2 晋升步骤
 
-### 步骤 1：归档当前生产模型
+> **说明**：ml-service 通过 `MODEL_DIR` 环境变量决定加载哪个目录的模型。
+> 默认值是 `<repo_root>/models/`（即 `~/ubuntu-wallet/models/`）。
+> 若训练时使用了 `--model-dir ~/ubuntu-wallet/models/v20260315/`，则需将 `MODEL_DIR` 指向该目录。
+
+### 步骤 1：备份当前生产模型
 
 ```bash
-# 获取当前生产模型版本
-CURRENT_VERSION=$(cat ~/ubuntu-wallet/data/models/current/model_meta.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["model_version"])')
-echo "归档当前模型（Archiving current model）: $CURRENT_VERSION"
-
-# 将当前模型移至 archive
-mkdir -p ~/ubuntu-wallet/data/models/archive
-mv ~/ubuntu-wallet/data/models/current ~/ubuntu-wallet/data/models/archive/$CURRENT_VERSION
+# 将当前生产模型备份到带时间戳的目录
+BACKUP_DIR=~/ubuntu-wallet/models_backup/$(date -u +%Y%m%d_%H%M%S)
+mkdir -p "$BACKUP_DIR"
+cp ~/ubuntu-wallet/models/*.pkl ~/ubuntu-wallet/models/*.json "$BACKUP_DIR/" 2>/dev/null || true
+echo "备份完成（Backup completed）: $BACKUP_DIR"
+ls -lh "$BACKUP_DIR"
 ```
 
-### 步骤 2：晋升候选模型为生产
+### 步骤 2a：若候选模型训练到默认目录（`models/`）
+
+训练脚本默认将模型写入 `models/`，此时候选模型已在正确位置，直接跳到步骤 3。
+
+### 步骤 2b：若候选模型训练到独立版本目录（推荐）
 
 ```bash
-# 新候选模型版本
-NEW_VERSION="event_v3_20260315_120000"
+# 训练时使用: python train_event_stack_v3.py --model-dir ~/ubuntu-wallet/models/v20260315/ ...
+# 晋升时将该目录内容复制到 models/（ml-service 的默认加载目录）
+NEW_MODEL_DIR=~/ubuntu-wallet/models/v20260315
 
-# 复制候选模型到 current 目录
-cp -r ~/ubuntu-wallet/data/models/$NEW_VERSION ~/ubuntu-wallet/data/models/current
-
-# 更新 model_meta.json 中的 status 字段
-python3 -c "
-import json
-meta_path = 'data/models/current/model_meta.json'
-with open(meta_path) as f:
-    meta = json.load(f)
-meta['status'] = 'production'
-meta['promoted_at'] = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
-with open(meta_path, 'w') as f:
-    json.dump(meta, f, indent=2)
-print('model_meta.json 已更新 / updated')
-print(json.dumps(meta, indent=2))
-"
+# 复制所有模型文件到默认目录
+cp "$NEW_MODEL_DIR"/*.pkl "$NEW_MODEL_DIR"/*.json ~/ubuntu-wallet/models/
+echo "已复制到 models/ 目录 (Copied to models/ directory)"
 ```
 
 ### 步骤 3：重启 ml-service 加载新模型
@@ -654,7 +757,7 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 ```json
 {
     "ok": true,
-    "model_version": "event_v3_20260315_120000",
+    "model_version": "event_v3:lightgbm:2026-03-15T12:00:00Z",
     "calibration_available": true,
     "calibration_method": "isotonic"
 }
@@ -662,8 +765,8 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 **验证要点（Verification points）：**
 - `ok` 必须为 `true`
-- `model_version` 应为新版本号
-- `calibration_available` 应为 `true`（除非新模型无校准器）
+- `model_version` 应为新训练的版本（格式：`event_v3:lightgbm:{trained_at}`）
+- `calibration_available` 应为 `true`
 
 ### 步骤 4：发送一条测试预测请求
 
@@ -678,7 +781,7 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 #     "confidence": 0.4823,
 #     "calibrated_confidence": 0.4521,
 #     "calibration_method": "isotonic",
-#     "model_version": "event_v3_20260315_120000",
+#     "model_version": "event_v3:lightgbm:2026-03-15T12:00:00Z",
 #     "reasons": [
 #         "no_signal: p_long=0.3012 p_short=0.2155 p_flat=0.4833 threshold=0.65",
 #         "feature_ts=2026-03-15T09:00:00+00:00",
@@ -690,8 +793,8 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 # signal              : LONG / SHORT / FLAT，当前信号方向
 # confidence          : 模型原始置信度（0~1）
 # calibrated_confidence: 校准后置信度（更可靠）
-# model_version       : 确认是新模型
-# reasons             : 信号决策的具体原因
+# model_version       : 确认是新模型（格式 event_v3:lightgbm:{ISO时间戳}）
+# reasons             : 信号决策的具体原因（含各类概率值和阈值）
 ```
 
 ### 步骤 5：确认 prediction log 正常写入
@@ -711,10 +814,11 @@ tail -3 ~/ubuntu-wallet/data/predictions_log.jsonl | python3 -m json.tool
 #     "signal": "FLAT",
 #     "confidence": 0.4823,
 #     "calibrated_confidence": 0.4521,
-#     "model_version": "event_v3_20260315_120000",
+#     "model_version": "event_v3:lightgbm:2026-03-15T12:00:00Z",
 #     "active_model": "event_v3",
 #     ...
 # }
+# 注意：model_version 格式是 "event_v3:lightgbm:{ISO时间戳}"
 ```
 
 ## 8.3 晋升后观察期
@@ -831,53 +935,34 @@ deactivate
 
 ## 10.2 回滚步骤
 
-### 步骤 1：确认归档中有可用的上一版本
+### 步骤 1：确认有可用的备份
 
 ```bash
-ls -lh ~/ubuntu-wallet/data/models/archive/
-# 应该能看到上一个生产模型版本目录
+ls -lh ~/ubuntu-wallet/models_backup/
+# 应该能看到之前备份的目录，如 20260315_100000/
 ```
 
-### 步骤 2：备份当前问题模型
+### 步骤 2：记录当前问题模型版本
 
 ```bash
-PROBLEM_VERSION=$(cat ~/ubuntu-wallet/data/models/current/model_meta.json | python3 -c 'import sys,json; print(json.load(sys.stdin)["model_version"])')
-echo "问题模型（Problem model）: $PROBLEM_VERSION"
-
-# 将问题模型移至归档（标记状态）
-python3 -c "
-import json
-meta_path = 'data/models/current/model_meta.json'
-with open(meta_path) as f:
-    meta = json.load(f)
-meta['status'] = 'rollback_pending'
-meta['rollback_reason'] = 'manual rollback at $(date -u)'
-with open(meta_path, 'w') as f:
-    json.dump(meta, f, indent=2)
+curl -s http://127.0.0.1:9000/healthz | python3 -c "
+import sys, json
+m = json.load(sys.stdin)
+print(f'问题模型（Problem model）: {m[\"model_version\"]}')
+print(f'已加载目录（Model dir）: {m[\"model_dir\"]}')
 "
-
-mv ~/ubuntu-wallet/data/models/current ~/ubuntu-wallet/data/models/archive/$PROBLEM_VERSION
 ```
 
-### 步骤 3：恢复上一版本
+### 步骤 3：将备份模型文件恢复到 models/ 目录
 
 ```bash
-STABLE_VERSION="event_v3_20260301_120000"   # 替换为实际稳定版本号
+# 替换 BACKUP_TIMESTAMP 为实际备份目录名（见步骤1的 ls 输出）
+BACKUP_TIMESTAMP="20260315_100000"
+BACKUP_DIR=~/ubuntu-wallet/models_backup/$BACKUP_TIMESTAMP
 
-cp -r ~/ubuntu-wallet/data/models/archive/$STABLE_VERSION ~/ubuntu-wallet/data/models/current
-
-# 更新状态
-python3 -c "
-import json
-meta_path = 'data/models/current/model_meta.json'
-with open(meta_path) as f:
-    meta = json.load(f)
-meta['status'] = 'production'
-meta['restored_at'] = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
-with open(meta_path, 'w') as f:
-    json.dump(meta, f, indent=2)
-print('已恢复稳定版本 (Restored stable version):', meta['model_version'])
-"
+echo "恢复备份（Restoring backup from）: $BACKUP_DIR"
+cp "$BACKUP_DIR"/*.pkl "$BACKUP_DIR"/*.json ~/ubuntu-wallet/models/
+echo "文件已复制 (Files copied)"
 ```
 
 ### 步骤 4：重启服务并验证
@@ -886,12 +971,11 @@ print('已恢复稳定版本 (Restored stable version):', meta['model_version'])
 sudo systemctl restart ml-service
 sleep 5
 
-# 验证模型版本
+# 验证版本已恢复
 curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
-# 确认版本是稳定版本
-# 确认 calibration_available: true
-# 确认 ok: true
+# 确认 ok: true、calibration_available: true
+# 确认 model_version 是稳定版本（不是刚才的问题版本）
 ```
 
 ### 步骤 5：发送测试请求确认功能恢复
@@ -911,7 +995,12 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 - 回滚后的模型版本
 - 恢复时间
 
-建议保存到：`~/ubuntu-wallet/data/reports/rollback_history.md`
+建议保存到：`~/ubuntu-wallet/data/reports/rollback_history.md`，记录内容包括：
+- 发生时间（When）
+- 回滚原因（Why）
+- 回滚前的 model_version（格式：`event_v3:lightgbm:{ISO时间戳}`）
+- 回滚后的 model_version
+- 恢复时间（Recovery time）
 
 ---
 
@@ -929,9 +1018,10 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 ## 11.2 退役步骤
 
 ```bash
-# 标记退役状态
-RETIRED_VERSION="event_v3_20250101_120000"
-META_PATH="data/models/archive/${RETIRED_VERSION}/model_meta.json"
+# 退役某个备份版本（仅需记录，不必立即删除）
+BACKUP_TIMESTAMP="20250101_120000"
+BACKUP_DIR=~/ubuntu-wallet/models_backup/$BACKUP_TIMESTAMP
+META_PATH="${BACKUP_DIR}/model_meta.json"
 RETIRED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 python3 - <<EOF
@@ -947,14 +1037,14 @@ try:
     meta['retired_at'] = retired_at
     with open(meta_path, 'w') as f:
         json.dump(meta, f, indent=2)
-    print('模型已退役（Model retired）:', meta['model_version'])
+    print('模型已标记退役（Model marked retired）:', meta.get('model_version', 'unknown'))
 except FileNotFoundError:
     print(f'注意：文件不存在 (Note: file not found): {meta_path}', file=sys.stderr)
     sys.exit(1)
 EOF
 
 # 可选：释放磁盘空间（确认不再需要后再执行）
-# rm -rf ~/ubuntu-wallet/data/models/archive/$RETIRED_VERSION
+# rm -rf "$BACKUP_DIR"
 ```
 
 **安全建议**：退役前确认该模型未被任何服务引用，再执行删除。
@@ -963,39 +1053,58 @@ EOF
 
 # 12. 模型文件与目录规范
 
-## 12.1 推荐目录结构
+## 12.1 模型目录结构
+
+训练脚本默认将所有模型文件写入 `~/ubuntu-wallet/models/`（扁平目录，不分子目录）：
 
 ```
-~/ubuntu-wallet/data/models/
-├── current/                         # 当前生产模型（Production）
-│   ├── model.pkl
-│   ├── calibrator.pkl
-│   ├── feature_schema.json
-│   └── model_meta.json
+~/ubuntu-wallet/models/                    # ml-service 默认加载目录（MODEL_DIR 默认值）
+├── lightgbm_event_v3.pkl                 # LightGBM 基础模型
+├── lightgbm_event_v3_scaler.pkl          # LightGBM 特征缩放器
+├── xgboost_event_v3.json                 # XGBoost 基础模型（原生 JSON）
+├── xgboost_event_v3_scaler.pkl           # XGBoost 特征缩放器
+├── stacking_event_v3.pkl                 # 堆叠元模型（LogisticRegression）
+├── feature_columns_event_v3.json         # 特征列名列表
+├── calibration_event_v3.pkl              # 概率校准器
+├── calibration_event_v3_meta.json        # 校准器元数据
+└── model_meta.json                       # 模型完整元数据
+```
+
+**版本化管理（可选）**：若要保留多个历史版本，建议用 `--model-dir` 指定独立目录：
+
+```
+~/ubuntu-wallet/
+├── models/                               # 当前生产模型（ml-service 默认读此目录）
+│   ├── lightgbm_event_v3.pkl
+│   └── ...（同上）
 │
-├── archive/                         # 历史版本（Archived）
-│   ├── event_v3_20260301_120000/
-│   │   ├── model.pkl
-│   │   ├── calibrator.pkl
-│   │   ├── feature_schema.json
-│   │   └── model_meta.json
-│   └── event_v3_20260215_120000/
+├── models_backup/                        # 按时间戳备份的旧版本
+│   ├── 20260301_100000/                  # 某次备份，可用于回滚
+│   │   ├── lightgbm_event_v3.pkl
+│   │   └── ...
+│   └── 20260215_120000/
 │       └── ...
 │
-└── candidates/                      # 候选模型（Candidates，尚未上线）
-    └── event_v3_20260315_120000/
-        └── ...
+└── models/v20260315/                     # 若训练时指定 --model-dir，可存到此
+    ├── lightgbm_event_v3.pkl
+    └── ...
 ```
 
-## 12.2 命名规范
+## 12.2 模型版本号格式
 
-模型版本号格式：`{active_model}_{YYYYMMDD}_{HHMMSS}`
+`model_meta.json` 中的 `model_version` 字段格式为：
 
-例如：`event_v3_20260315_120000`
+```
+event_v3:lightgbm:{trained_at}
+```
 
-- `event_v3`：模型类型（model type）
-- `20260315`：训练完成日期（training date）
-- `120000`：训练完成时间 UTC（training time UTC）
+例如：`event_v3:lightgbm:2026-03-15T12:00:00Z`
+
+- `event_v3`：模型架构类型（三分类堆叠模型）
+- `lightgbm`：主基础模型
+- `2026-03-15T12:00:00Z`：训练完成时间（UTC ISO 8601）
+
+> **注意**：模型版本号中含 `:` 和 `T`，不适合直接用作目录名。若要用目录名区分版本，建议使用纯日期时间格式，如 `v20260315_120000`。
 
 ## 12.3 环境变量配置
 
@@ -1012,52 +1121,72 @@ DATA_DIR=/home/ubuntu/ubuntu-wallet/data      # 数据根目录
 
 # 13. model_meta.json 字段说明
 
-每个模型目录下的 `model_meta.json` 文件记录模型的完整元数据：
+`~/ubuntu-wallet/models/model_meta.json` 由 `train_event_stack_v3.py` 在训练完成后自动写入。实际内容示例：
 
 ```json
 {
-    "model_version": "event_v3_20260315_120000",
     "active_model": "event_v3",
-    "train_period": {
-        "start": "2025-01-01",
-        "end": "2026-03-15"
-    },
+    "trained_at": "2026-03-15T12:00:00Z",
+    "model_version": "event_v3:lightgbm:2026-03-15T12:00:00Z",
+    "feature_schema_version": "multi_tf_v1",
+    "n_features": 120,
     "label_config": {
         "method": "triple_barrier",
+        "horizon": 12,
+        "up_thresh": 0.015,
+        "down_thresh": 0.015,
         "tp_pct": 0.0175,
-        "sl_pct": 0.009,
-        "horizon": 6
+        "sl_pct": 0.009
     },
     "threshold_config": {
         "p_enter": 0.65,
         "delta": 0.0
     },
-    "calibration_method": "isotonic",
-    "n_features": 120,
-    "walk_forward_summary": {
-        "mean_precision": 0.607,
-        "mean_coverage": 0.183,
-        "mean_avg_return": 0.0079
+    "calibration_info": {
+        "method": "isotonic",
+        "artifact": "calibration_event_v3.pkl"
     },
-    "created_at": "2026-03-15T12:00:00Z",
-    "promoted_at": null,
-    "status": "candidate"
+    "train_periods": {
+        "train_start": "2025-01-01T00:00:00Z",
+        "train_end": "2026-01-01T00:00:00Z",
+        "val_start": "2026-01-01T00:00:00Z",
+        "val_end": "2026-03-15T00:00:00Z"
+    },
+    "event_v3": {
+        "trained_at": "2026-03-15T12:00:00Z",
+        "p_enter": 0.65,
+        "delta": 0.0,
+        "paths": {
+            "lightgbm_model": "lightgbm_event_v3.pkl",
+            "lightgbm_scaler": "lightgbm_event_v3_scaler.pkl",
+            "xgboost_model": "xgboost_event_v3.json",
+            "xgboost_scaler": "xgboost_event_v3_scaler.pkl",
+            "stacking_model": "stacking_event_v3.pkl",
+            "feature_columns": "feature_columns_event_v3.json"
+        }
+    }
 }
 ```
 
 **字段说明（Field explanation）：**
 
-| 字段                   | 说明                                       |
-|------------------------|--------------------------------------------|
-| `model_version`        | 唯一版本标识符                             |
-| `active_model`         | 模型类型：`event_v3` 为三分类堆叠模型      |
-| `train_period`         | 训练数据起止时间                           |
-| `label_config`         | 训练时使用的标签配置                       |
-| `threshold_config`     | 推理时建议使用的阈值配置                   |
-| `calibration_method`   | 校准方法                                   |
-| `n_features`           | 模型期望的特征数量                         |
-| `walk_forward_summary` | Walk-Forward 验证摘要                      |
-| `status`               | 模型状态：candidate / production / archived / retired |
+| 字段                          | 说明                                                          |
+|-------------------------------|---------------------------------------------------------------|
+| `active_model`                | 模型架构类型，固定为 `"event_v3"`                             |
+| `trained_at`                  | 训练完成时间（UTC ISO 8601）                                  |
+| `model_version`               | 唯一版本标识，格式：`event_v3:lightgbm:{trained_at}`          |
+| `feature_schema_version`      | 特征架构版本，固定为 `"multi_tf_v1"`                          |
+| `n_features`                  | 模型期望的输入特征数量                                        |
+| `label_config.method`         | 标签方法：`ternary` 或 `triple_barrier`                       |
+| `label_config.horizon`        | 前瞻 K 线数（用于标签生成）                                   |
+| `label_config.tp_pct`         | triple_barrier 止盈百分比                                    |
+| `label_config.sl_pct`         | triple_barrier 止损百分比                                    |
+| `threshold_config.p_enter`    | ml-service 推理使用的信号触发阈值（来自 `--p-enter` 参数）    |
+| `threshold_config.delta`      | 多空概率差最小要求（来自 `--delta` 参数，默认 0.0）           |
+| `calibration_info.method`     | 校准方法：`isotonic` 或 `sigmoid` 或 `null`（未校准）         |
+| `calibration_info.artifact`   | 校准器文件名，固定为 `"calibration_event_v3.pkl"`             |
+| `train_periods`               | 训练集和验证集时间范围                                        |
+| `event_v3.paths`              | 各模型文件的相对路径（相对于 `MODEL_DIR`）                    |
 
 ---
 
@@ -1072,10 +1201,12 @@ DATA_DIR=/home/ubuntu/ubuntu-wallet/data      # 数据根目录
 
 ## 训练完成后检查
 
-- [ ] model.pkl 已生成
-- [ ] calibrator.pkl 已生成
-- [ ] feature_schema.json 已生成且字段正确
-- [ ] model_meta.json 已填写完整
+- [ ] `lightgbm_event_v3.pkl` 已生成
+- [ ] `xgboost_event_v3.json` 已生成
+- [ ] `stacking_event_v3.pkl` 已生成
+- [ ] `calibration_event_v3.pkl` 已生成（若 `--calibration` 非 `none`）
+- [ ] `feature_columns_event_v3.json` 已生成且列数与 `n_features` 一致
+- [ ] `model_meta.json` 包含正确的 `model_version`、`threshold_config`、`calibration_info`
 
 ## Walk-Forward 完成后检查
 
@@ -1084,15 +1215,15 @@ DATA_DIR=/home/ubuntu/ubuntu-wallet/data      # 数据根目录
 
 ## 上线前检查
 
-- [ ] 候选模型目录完整
-- [ ] 与生产模型回测对比合格
-- [ ] 当前生产模型已备份到 archive
-- [ ] 手工测试 `/predict` 返回正确
+- [ ] `~/ubuntu-wallet/models/` 中所有文件是候选模型（不是旧版本）
+- [ ] `models_backup/` 中已有上一版本的备份
+- [ ] 回测对比完成（win_rate 和 MDD 满足要求）
+- [ ] 手工测试 `/predict` 返回正确（`model_version` 为新值）
 
 ## 上线后检查（前 48 小时）
 
-- [ ] `/healthz` 持续正常
-- [ ] `model_version` 显示为新版本
+- [ ] `/healthz` 持续正常（`ok: true`）
+- [ ] `model_version` 显示为新版本（格式：`event_v3:lightgbm:{ISO时间戳}`）
 - [ ] prediction log 持续写入
 - [ ] evaluate timer 正常执行
 - [ ] precision 未出现急剧下滑
@@ -1141,16 +1272,16 @@ sudo systemctl restart ml-service
 ## Q3: `/healthz` 返回 `calibration_available: false`
 
 **可能原因**：
-- `calibrator.pkl` 文件不存在于模型目录
-- 文件名不符合预期（检查 `model_loader.py`）
+- `calibration_event_v3.pkl` 文件不存在于 `MODEL_DIR` 目录
+- 训练时使用了 `--calibration none`
 
 **解决**：
 ```bash
-# 检查模型目录
-ls -lh ~/ubuntu-wallet/data/models/current/
+# 检查模型目录，确认 calibration_event_v3.pkl 是否存在
+ls -lh ~/ubuntu-wallet/models/ | grep calibration
 
-# 如果 calibrator.pkl 不存在，从训练产物复制
-# 或重新运行校准步骤
+# 若文件缺失，重新训练时加上 --calibration isotonic
+# 或检查训练日志中是否有 calibration 失败警告
 ```
 
 ---
