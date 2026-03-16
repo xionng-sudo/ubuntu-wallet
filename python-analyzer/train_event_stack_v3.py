@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from typing import List, Tuple
@@ -527,23 +528,19 @@ _ARTIFACT_FILES = [
 ]
 
 
-def _write_current_pointer(
-    model_dir: str,
-    model_version: str,
-    trained_at: str,
-    archive_rel: str,
-) -> None:
-    """Write models/current.json so loader can resolve the archived production artifact directory."""
-    current_path = os.path.join(model_dir, "current.json")
-    current = {
-        "model_version": model_version,
-        "trained_at": trained_at,
-        "path": archive_rel,
-        "updated_at": trained_at,
-    }
-    with open(current_path, "w", encoding="utf-8") as f:
-        json.dump(current, f, indent=2)
-    print(f"[train_event_v3] updated {current_path} -> {archive_rel}")
+def _promote_to_current(model_dir: str, archive_abs: str) -> None:
+    """
+    Promote the newly archived model to models/current/.
+
+    Replaces the contents of models/current/ with a fresh copy of the archive,
+    so ml-service can load from models/current/ directly without any JSON
+    pointer resolution.
+    """
+    current_dir = os.path.join(model_dir, "current")
+    if os.path.isdir(current_dir):
+        shutil.rmtree(current_dir)
+    shutil.copytree(archive_abs, current_dir)
+    print(f"[train_event_v3] promoted {archive_abs} -> {current_dir}")
 
 
 def _register_model(
@@ -564,8 +561,6 @@ def _register_model(
     - Marks all previous 'prod' entries as 'archived'
     - Appends a new 'prod' entry for the new model
     """
-    import shutil
-
     # Sanitize version string for use as directory name
     safe_ver = trained_at.replace(":", "").replace("+", "").replace(" ", "T")
     archive_rel = f"archive/event_v3-{safe_ver}"
@@ -623,12 +618,7 @@ def _register_model(
     with open(registry_path, "w", encoding="utf-8") as f:
         json.dump(registry, f, indent=2)
     print(f"[train_event_v3] updated registry.json ({len(entries)} entries, current prod: {model_version})")
-    _write_current_pointer(
-        model_dir=model_dir,
-        model_version=model_version,
-        trained_at=trained_at,
-        archive_rel=archive_rel,
-    )
+    _promote_to_current(model_dir=model_dir, archive_abs=archive_abs)
 
 
 # ---------------------------------------------------------------------------

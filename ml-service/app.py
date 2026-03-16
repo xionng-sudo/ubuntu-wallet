@@ -11,14 +11,12 @@ from feature_builder import build_event_v3_feature_row, build_latest_feature_row
 from model_loader import (
     LoadedModel,
     get_prod_registry_entry,
-    load_current_pointer,
-    load_model_from_registry,
+    load_model,
     predict_proba,
-    resolve_current_model_dir,
 )
 from prediction_logger import log_prediction
 
-MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models")))
+MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "current")))
 DATA_DIR = os.getenv("DATA_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")))
 
 # Thresholds for legacy binary models
@@ -84,7 +82,7 @@ def _apply_calibration(
 
 
 def _active_model_dir() -> str:
-    return resolve_current_model_dir(MODEL_DIR, require_pointer=True)
+    return MODEL_DIR
 
 
 app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v3-event")
@@ -93,7 +91,7 @@ app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v
 @app.on_event("startup")
 def _startup():
     global _loaded
-    _loaded = load_model_from_registry(MODEL_DIR)
+    _loaded = load_model(MODEL_DIR)
 
 
 @app.get("/healthz")
@@ -101,8 +99,7 @@ def healthz():
     if _loaded is None:
         return {"ok": False, "model_dir": MODEL_DIR, "data_dir": DATA_DIR}
 
-    reg_entry = get_prod_registry_entry(MODEL_DIR)
-    pointer = load_current_pointer(MODEL_DIR)
+    reg_entry = get_prod_registry_entry(os.path.dirname(MODEL_DIR.rstrip(os.sep)))
     registry_info = None
     if reg_entry is not None:
         registry_info = {
@@ -115,7 +112,6 @@ def healthz():
     return {
         "ok": True,
         "model_dir": MODEL_DIR,
-        "active_model_dir": _active_model_dir(),
         "loaded_model_dir": os.path.dirname(_loaded.model_path) if _loaded.model_path else None,
         "data_dir": DATA_DIR,
         "model_version": _loaded.model_version,
@@ -124,7 +120,6 @@ def healthz():
         "calibration_available": _loaded.calibration is not None,
         "calibration_method": _loaded.calibration.method if _loaded.calibration is not None else None,
         "registry": registry_info,
-        "current_pointer": pointer,
     }
 
 

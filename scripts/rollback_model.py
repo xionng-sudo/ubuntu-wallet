@@ -7,15 +7,12 @@ Roll back the production model to the most recent archived version.
 
 Registry layout (all paths relative to --model-dir, default: <repo_root>/models):
   models/
-    model_meta.json              # active model metadata
-    lightgbm_event_v3.pkl        # active model artifacts
-    xgboost_event_v3.json
-    stacking_event_v3.pkl
-    feature_columns_event_v3.json
-    calibration_event_v3.pkl
-    registry.json                # NEW: model version history
-    current.json                 # NEW: production model pointer used by loader
-    archive/                     # NEW: versioned backups
+    registry.json                # model version history
+    current/                     # production model pointer directory (ml-service loads from here)
+      model_meta.json
+      lightgbm_event_v3.pkl
+      ...
+    archive/                     # versioned backups
       <version>/
         model_meta.json
         lightgbm_event_v3.pkl
@@ -24,9 +21,8 @@ Registry layout (all paths relative to --model-dir, default: <repo_root>/models)
 Steps performed by this script:
   1. Read models/registry.json
   2. Find the most recent "archived" entry (the one just before current prod)
-  3. Copy all artifact files from archive/<version>/ back to models/
+  3. Replace models/current/ with a fresh copy from archive/<version>/
   4. Update registry.json: set that entry to "prod", set old prod to "archived"
-  5. Update current.json so ml-service loads the restored archived version
 
 Usage
 -----
@@ -67,24 +63,20 @@ def _save_registry(model_dir: str, registry: Dict[str, Any]) -> None:
         json.dump(registry, f, indent=2)
 
 
-def _save_current_pointer(model_dir: str, target: Dict[str, Any]) -> None:
-    model_version = str(target.get("model_version") or "").strip()
-    trained_at = str(target.get("trained_at") or "").strip()
-    archive_dir = str(target.get("archive_dir") or "").strip()
-    if not model_version or not trained_at or not archive_dir:
-        raise ValueError(
-            "rollback target is missing required pointer fields: "
-            f"model_version={model_version!r} trained_at={trained_at!r} archive_dir={archive_dir!r}"
-        )
-    path = os.path.join(model_dir, "current.json")
-    pointer = {
-        "model_version": model_version,
-        "trained_at": trained_at,
-        "path": archive_dir,
-        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    }
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(pointer, f, indent=2)
+def _promote_to_current(model_dir: str, archive_abs: str, dry_run: bool) -> None:
+    """
+    Replace models/current/ with a copy of the given archive directory.
+
+    This is the only write-path that changes what ml-service loads at runtime.
+    """
+    current_dir = os.path.join(model_dir, "current")
+    if not dry_run:
+        if os.path.isdir(current_dir):
+            shutil.rmtree(current_dir)
+        shutil.copytree(archive_abs, current_dir)
+        print(f"Replaced {current_dir} with {archive_abs}", flush=True)
+    else:
+        print(f"[DRY-RUN] Would replace {current_dir} with {archive_abs}", flush=True)
 
 
 def _find_current_prod(entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -101,22 +93,6 @@ def _find_rollback_target(entries: List[Dict[str, Any]]) -> Optional[Dict[str, A
     if not archived:
         return None
     return sorted(archived, key=lambda e: e.get("trained_at", ""), reverse=True)[0]
-
-
-def _copy_artifact_files(src_dir: str, dst_dir: str, dry_run: bool) -> List[str]:
-    """Copy all files from src_dir to dst_dir. Returns list of copied paths."""
-    if not os.path.isdir(src_dir):
-        raise FileNotFoundError(f"Archive directory not found: {src_dir}")
-
-    copied = []
-    for fname in os.listdir(src_dir):
-        src = os.path.join(src_dir, fname)
-        dst = os.path.join(dst_dir, fname)
-        if os.path.isfile(src):
-            if not dry_run:
-                shutil.copy2(src, dst)
-            copied.append(dst)
-    return copied
 
 
 def main() -> int:
@@ -176,21 +152,11 @@ def main() -> int:
 
     archive_abs = os.path.join(model_dir, archive_rel)
 
-    print(f"\n{prefix}Copying artifacts from: {archive_abs}")
-    print(f"{prefix}Copying artifacts  to : {model_dir}")
+    print(f"\n{prefix}Restoring models/current/ from: {archive_abs}")
 
     if not dry and not os.path.isdir(archive_abs):
         print(f"ERROR: archive directory does not exist: {archive_abs}", flush=True)
         return 2
-
-    try:
-        copied = _copy_artifact_files(archive_abs, model_dir, dry_run=dry)
-    except FileNotFoundError as e:
-        print(f"ERROR: {e}", flush=True)
-        return 2
-
-    for p in copied:
-        print(f"  {prefix}restored: {os.path.relpath(p, model_dir)}", flush=True)
 
     # Update registry statuses
     for e in entries:
@@ -207,9 +173,8 @@ def main() -> int:
 
     if not dry:
         _save_registry(model_dir, registry)
-        _save_current_pointer(model_dir, target)
+        _promote_to_current(model_dir, archive_abs, dry_run=False)
         print("\nRegistry updated.", flush=True)
-        print("current.json updated.", flush=True)
         print(f"Rollback complete. Active model is now: {target.get('model_version')}", flush=True)
         print(
             "Restart ml-service to load the restored model:\n"
@@ -217,6 +182,7 @@ def main() -> int:
             flush=True,
         )
     else:
+        _promote_to_current(model_dir, archive_abs, dry_run=True)
         print(
             f"\n[DRY-RUN] Rollback would succeed. "
             f"Run without --dry-run to apply.",

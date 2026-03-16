@@ -25,7 +25,7 @@ for _d in [ML_SERVICE_DIR, PY_ANALYZER_DIR, SCRIPTS_DIR]:
 from export_feature_schema import _rebuild_schema_from_data, _validate_inference_row  # type: ignore
 from feature_builder import build_multi_tf_feature_df, get_feature_columns_like_trainer  # type: ignore
 import app as ml_app  # type: ignore
-from model_loader import LoadedModel, load_model_from_registry  # type: ignore
+from model_loader import LoadedModel, load_model  # type: ignore
 
 
 class _DummyModel:
@@ -98,93 +98,58 @@ class P0PointerAndSchemaTests(unittest.TestCase):
             json.dump(meta, f)
         joblib.dump(_DummyModel(n_features), os.path.join(model_dir, "lightgbm_model.pkl"))
 
-    def test_current_pointer_loads_archive_dir_instead_of_flat_root(self) -> None:
+    def test_current_dir_loads_promoted_archive_artifacts(self) -> None:
+        """Training promotes archive to models/current/; load_model() loads from there directly."""
         model_root = os.path.join(self._tmpdir, "models")
         archive_dir = os.path.join(model_root, "archive", "v1")
-        self._write_legacy_lightgbm_dir(
-            model_root,
-            model_version="root-version",
-            trained_at="2026-03-15T00:00:00Z",
-        )
+        current_dir = os.path.join(model_root, "current")
+
+        # Simulate: training archived to archive/v1, then promoted to current/
         self._write_legacy_lightgbm_dir(
             archive_dir,
             model_version="archive-version",
             trained_at="2026-03-16T00:00:00Z",
         )
+        shutil.copytree(archive_dir, current_dir)
 
-        with open(os.path.join(model_root, "registry.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "entries": [
-                        {
-                            "model_version": "archive-version",
-                            "trained_at": "2026-03-16T00:00:00Z",
-                            "status": "prod",
-                            "archive_dir": "archive/v1",
-                        }
-                    ]
-                },
-                f,
-            )
-        with open(os.path.join(model_root, "current.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "model_version": "archive-version",
-                    "trained_at": "2026-03-16T00:00:00Z",
-                    "path": "archive/v1",
-                },
-                f,
-            )
-
-        loaded = load_model_from_registry(model_root)
-        self.assertEqual(os.path.abspath(loaded.model_path), os.path.abspath(os.path.join(archive_dir, "lightgbm_model.pkl")))
+        loaded = load_model(current_dir)
+        self.assertEqual(
+            os.path.abspath(loaded.model_path),
+            os.path.abspath(os.path.join(current_dir, "lightgbm_model.pkl")),
+        )
         self.assertEqual(loaded.trained_at, "2026-03-16T00:00:00Z")
 
-    def test_loader_rejects_pointer_meta_version_mismatch(self) -> None:
+    def test_rollback_replaces_current_dir_with_archive(self) -> None:
+        """Rollback must overwrite models/current/ with the target archive, not write current.json."""
         model_root = os.path.join(self._tmpdir, "models")
-        archive_dir = os.path.join(model_root, "archive", "v1")
-        self._write_legacy_lightgbm_dir(
-            archive_dir,
-            model_version="actual-archive-version",
-            trained_at="2026-03-16T00:00:00Z",
-        )
-        with open(os.path.join(model_root, "registry.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "entries": [
-                        {
-                            "model_version": "expected-prod-version",
-                            "trained_at": "2026-03-16T00:00:00Z",
-                            "status": "prod",
-                            "archive_dir": "archive/v1",
-                        }
-                    ]
-                },
-                f,
-            )
-        with open(os.path.join(model_root, "current.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "model_version": "expected-prod-version",
-                    "trained_at": "2026-03-16T00:00:00Z",
-                    "path": "archive/v1",
-                },
-                f,
-            )
+        archive_v1 = os.path.join(model_root, "archive", "v1")
+        archive_v2 = os.path.join(model_root, "archive", "v2")
+        current_dir = os.path.join(model_root, "current")
 
-        with self.assertRaisesRegex(RuntimeError, "loaded model_meta.json disagree"):
-            load_model_from_registry(model_root)
+        self._write_legacy_lightgbm_dir(archive_v1, model_version="v1", trained_at="2026-03-15T00:00:00Z")
+        self._write_legacy_lightgbm_dir(archive_v2, model_version="v2", trained_at="2026-03-16T00:00:00Z")
+        # current/ starts as v2 (the latest prod)
+        shutil.copytree(archive_v2, current_dir)
 
-    def test_loader_rejects_flat_root_fallback_without_pointer_state(self) -> None:
-        model_root = os.path.join(self._tmpdir, "models")
-        self._write_legacy_lightgbm_dir(
-            model_root,
-            model_version="root-version",
-            trained_at="2026-03-16T00:00:00Z",
-        )
+        # Simulate rollback: replace current/ with archive v1
+        if os.path.isdir(current_dir):
+            shutil.rmtree(current_dir)
+        shutil.copytree(archive_v1, current_dir)
 
-        with self.assertRaisesRegex(RuntimeError, "requires current.json and registry.json"):
-            load_model_from_registry(model_root)
+        # After rollback, load_model(current_dir) returns v1
+        loaded = load_model(current_dir)
+        meta = json.load(open(os.path.join(current_dir, "model_meta.json")))
+        self.assertEqual(meta["model_version"], "v1")
+        self.assertEqual(loaded.trained_at, "2026-03-15T00:00:00Z")
+
+        # current.json must NOT exist (directory-based pointer only)
+        self.assertFalse(os.path.exists(os.path.join(model_root, "current.json")))
+
+    def test_missing_current_dir_raises_on_load(self) -> None:
+        """load_model() raises if models/current/ does not exist."""
+        current_dir = os.path.join(self._tmpdir, "models", "current")
+        with self.assertRaises((FileNotFoundError, RuntimeError, Exception)):
+            load_model(current_dir)
 
     def test_schema_validation_closes_training_and_inference_loop(self) -> None:
         data_dir = os.path.join(self._tmpdir, "data")
@@ -221,48 +186,25 @@ class P0PointerAndSchemaTests(unittest.TestCase):
         X = merged[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).values.astype(np.float32)
         self.assertEqual(X.shape[1], len(feature_cols))
 
-    def test_predict_uses_active_model_dir_schema_not_flat_root(self) -> None:
+    def test_predict_uses_current_dir_schema(self) -> None:
+        """MODEL_DIR=models/current/ so /predict reads schema from models/current/, not archive/ or flat root."""
         data_dir = os.path.join(self._tmpdir, "data")
         model_root = os.path.join(self._tmpdir, "models")
-        archive_dir = os.path.join(model_root, "archive", "event_v3-20260316T000000Z")
+        current_dir = os.path.join(model_root, "current")
         self._write_synthetic_klines(data_dir)
-        os.makedirs(model_root, exist_ok=True)
-        os.makedirs(archive_dir, exist_ok=True)
+        os.makedirs(current_dir, exist_ok=True)
 
         merged = build_multi_tf_feature_df(data_dir)
         feature_cols = get_feature_columns_like_trainer(merged)
         self.assertGreater(len(feature_cols), 10)
 
-        with open(os.path.join(archive_dir, "feature_columns_event_v3.json"), "w", encoding="utf-8") as f:
+        # current/ has the full schema; flat model_root has a truncated schema
+        with open(os.path.join(current_dir, "feature_columns_event_v3.json"), "w", encoding="utf-8") as f:
             json.dump(feature_cols, f)
         with open(os.path.join(model_root, "feature_columns_event_v3.json"), "w", encoding="utf-8") as f:
             json.dump(feature_cols[:-5], f)
 
-        with open(os.path.join(model_root, "registry.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "entries": [
-                        {
-                            "model_version": "event_v3:test",
-                            "trained_at": "2026-03-16T00:00:00Z",
-                            "status": "prod",
-                            "archive_dir": "archive/event_v3-20260316T000000Z",
-                            "n_features": len(feature_cols),
-                        }
-                    ]
-                },
-                f,
-            )
-        with open(os.path.join(model_root, "current.json"), "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "model_version": "event_v3:test",
-                    "trained_at": "2026-03-16T00:00:00Z",
-                    "path": "archive/event_v3-20260316T000000Z",
-                },
-                f,
-            )
-        with open(os.path.join(archive_dir, "model_meta.json"), "w", encoding="utf-8") as f:
+        with open(os.path.join(current_dir, "model_meta.json"), "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "active_model": "event_v3",
@@ -273,7 +215,7 @@ class P0PointerAndSchemaTests(unittest.TestCase):
                 },
                 f,
             )
-        model_artifact = os.path.join(archive_dir, "lightgbm_event_v3.pkl")
+        model_artifact = os.path.join(current_dir, "lightgbm_event_v3.pkl")
         with open(model_artifact, "wb") as f:
             f.write(b"dummy-model")
 
@@ -293,7 +235,7 @@ class P0PointerAndSchemaTests(unittest.TestCase):
         )
 
         last_ts = merged.index[-1].to_pydatetime().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-        with patch.object(ml_app, "MODEL_DIR", model_root), \
+        with patch.object(ml_app, "MODEL_DIR", current_dir), \
              patch.object(ml_app, "DATA_DIR", data_dir), \
              patch.object(ml_app, "_loaded", loaded), \
              patch.object(ml_app, "predict_proba", return_value=(np.array([[0.1, 0.2, 0.7]], dtype=np.float32), "proba_multiclass")), \
@@ -301,8 +243,9 @@ class P0PointerAndSchemaTests(unittest.TestCase):
             health = ml_app.healthz()
             resp = ml_app.predict(ml_app.PredictRequest(as_of_ts=last_ts))
 
-        self.assertEqual(health["active_model_dir"], os.path.abspath(archive_dir))
-        self.assertEqual(health["loaded_model_dir"], os.path.abspath(archive_dir))
+        self.assertEqual(health["loaded_model_dir"], os.path.abspath(current_dir))
+        # active_model_dir was removed from /healthz (MODEL_DIR IS the current dir now)
+        self.assertNotIn("active_model_dir", health)
         self.assertEqual(resp.signal, "LONG")
         self.assertEqual(resp.model_version, loaded.model_version)
 
