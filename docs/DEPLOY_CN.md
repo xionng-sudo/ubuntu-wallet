@@ -13,6 +13,11 @@
 > - 项目维护者
 > - 准备上线 DRY-RUN / 准实盘环境的操作者
 
+> **准确性说明**：
+> - 文中的 systemd 路径、端口、环境变量文件路径，均以当前仓库 `systemd/` 下服务文件为准；
+> - 文中的训练 / 回测 / 评估命令参数，均以当前脚本源码中的 `argparse` 定义为准；
+> - 模型默认目录以 `python-analyzer/train_event_stack_v3.py` 和 `ml-service` 的当前实现为准，即仓库根目录下的 `models/`，不是 `data/models/`。
+
 ---
 
 # 目录
@@ -141,12 +146,22 @@ sudo apt upgrade -y
 ## 3.2 安装基础工具
 ```bash
 sudo apt install -y \
-  git curl wget unzip jq vim htop tree \
+  ca-certificates git curl wget unzip jq vim htop tree \
   build-essential software-properties-common \
   python3 python3-venv python3-pip
 ```
 
-## 3.3 安装 Go
+## 3.3 验证基础依赖
+```bash
+git --version
+python3 --version
+pip3 --version
+systemctl --version | head -n 1
+```
+
+如果 `python3 --version` 低于 `3.10`，建议先升级 Python 再继续后续步骤。
+
+## 3.4 安装 Go
 如果系统仓库版本过旧，建议安装官方 Go。
 
 示例（版本号请根据实际需要调整）：
@@ -177,6 +192,8 @@ cd ubuntu-wallet
 
 ## 4.2 推荐目录结构
 
+> **注意**：当前仓库默认模型目录在 `~/ubuntu-wallet/models/`。`data/` 目录主要用于原始数据、派生数据、日志和报告，不建议把默认生产模型目录写成 `data/models/`。
+
 建议最终整理为：
 
 ```text
@@ -186,11 +203,11 @@ cd ubuntu-wallet
 │   ├── raw/
 │   ├── derived/
 │   ├── logs/
-│   ├── reports/
-│   └── models/
+│   └── reports/
 ├── docs/
 ├── go-collector/
 ├── ml-service/
+├── models/
 ├── python-analyzer/
 ├── scripts/
 └── systemd/
@@ -203,7 +220,7 @@ mkdir -p ~/ubuntu-wallet/data/raw
 mkdir -p ~/ubuntu-wallet/data/derived
 mkdir -p ~/ubuntu-wallet/data/logs
 mkdir -p ~/ubuntu-wallet/data/reports
-mkdir -p ~/ubuntu-wallet/data/models
+mkdir -p ~/ubuntu-wallet/models
 ```
 
 ---
@@ -335,7 +352,6 @@ mkdir -p ~/ubuntu-wallet/data/raw
 mkdir -p ~/ubuntu-wallet/data/derived
 mkdir -p ~/ubuntu-wallet/data/logs
 mkdir -p ~/ubuntu-wallet/data/reports
-mkdir -p ~/ubuntu-wallet/data/models
 ```
 
 ## 8.2 需要重点关注的文件
@@ -344,13 +360,13 @@ mkdir -p ~/ubuntu-wallet/data/models
 - `klines_4h.json`
 - `klines_1d.json`
 - `predictions_log.jsonl`
-- 模型输出目录
+- `~/ubuntu-wallet/models/`（单独维护，不属于 `data/`）
 
 ## 8.3 权限要求
 确保运行服务的用户对以下目录有写权限：
 - `data/logs`
 - `data/reports`
-- `data/models`（如在线更新模型）
+- `models`（如训练新模型或人工切换模型）
 - 采集器写入目录
 
 ---

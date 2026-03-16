@@ -10,6 +10,17 @@
 > - 模型运维工程师
 > - 系统接手人员
 
+> **阅读前先区分两层含义：**
+> 1. 文中凡标注“当前实现 / Current implementation”的章节，表示当前仓库代码和服务配置里已经存在的实际行为；
+> 2. 文中凡标注“推荐 / Recommended”的目录规范、候选/生产/归档术语，表示团队运维约定或未来可演进方向，**不是仓库当前内建的自动化模型注册/切换能力**。
+>
+> **命令与接口核对范围（本次按当前源码复核）**：
+> - `python-analyzer/train_event_stack_v3.py`
+> - `python-analyzer/walkforward_cv.py`
+> - `scripts/backtest_event_v3_http.py`
+> - `scripts/evaluate_from_logs.py`
+> - `ml-service/app.py` 中的 `PredictRequest`
+
 ---
 
 # 目录
@@ -56,7 +67,9 @@ Walk-Forward 交叉验证（walkforward_cv.py）
 回滚（rollback）或退役（retirement）
 ```
 
-每个模型在文件系统层面有明确的状态：
+在团队运维流程里，可以用下面这些**流程状态标签**描述模型所处阶段：
+
+> **注意**：这些标签用于沟通“候选 / 生产 / 归档 / 退役”流程，**不是当前仓库里自动写入文件系统或 `model_meta.json` 的内建状态字段**。
 
 | 状态        | 英文         | 说明                             |
 |-------------|--------------|----------------------------------|
