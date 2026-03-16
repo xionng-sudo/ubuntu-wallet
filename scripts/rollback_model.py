@@ -68,11 +68,19 @@ def _save_registry(model_dir: str, registry: Dict[str, Any]) -> None:
 
 
 def _save_current_pointer(model_dir: str, target: Dict[str, Any]) -> None:
+    model_version = str(target.get("model_version") or "").strip()
+    trained_at = str(target.get("trained_at") or "").strip()
+    archive_dir = str(target.get("archive_dir") or "").strip()
+    if not model_version or not trained_at or not archive_dir:
+        raise ValueError(
+            "rollback target is missing required pointer fields: "
+            f"model_version={model_version!r} trained_at={trained_at!r} archive_dir={archive_dir!r}"
+        )
     path = os.path.join(model_dir, "current.json")
     pointer = {
-        "model_version": target.get("model_version"),
-        "trained_at": target.get("trained_at"),
-        "path": target.get("archive_dir"),
+        "model_version": model_version,
+        "trained_at": trained_at,
+        "path": archive_dir,
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     with open(path, "w", encoding="utf-8") as f:

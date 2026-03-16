@@ -525,7 +525,7 @@ def _write_current_pointer(
     trained_at: str,
     archive_rel: str,
 ) -> None:
-    """Write models/current.json to the archived production artifact directory."""
+    """Write models/current.json so loader can resolve the archived production artifact directory."""
     current_path = os.path.join(model_dir, "current.json")
     current = {
         "model_version": model_version,

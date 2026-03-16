@@ -354,6 +354,11 @@ def load_model_from_registry(model_dir: str) -> "LoadedModel":
     if pointer is not None and entry is not None:
         pointer_model_version = str(pointer.get("model_version") or "").strip()
         registry_model_version = str(entry.get("model_version") or "").strip()
+        if bool(pointer_model_version) != bool(registry_model_version):
+            raise RuntimeError(
+                "current.json and registry.json have inconsistent production model versions: "
+                f"pointer={pointer_model_version!r} registry={registry_model_version!r}"
+            )
         if pointer_model_version and registry_model_version and pointer_model_version != registry_model_version:
             raise RuntimeError(
                 "current.json and registry.json disagree on production model: "
