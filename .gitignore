@@ -50,3 +50,4 @@ check-go-collector.sh.bak.*
 **/.venv/
 **/venv/
 **/__pycache__/
+/outputs/

@@ -80,6 +80,9 @@ def load_predictions(
                     "proba_long": j.get("proba_long"),
                     "proba_short": j.get("proba_short"),
                     "proba_flat": j.get("proba_flat"),
+                    "cal_proba_long": j.get("cal_proba_long"),
+                    "cal_proba_short": j.get("cal_proba_short"),
+                    "cal_proba_flat": j.get("cal_proba_flat"),
                     "signal": j.get("signal"),
                     "confidence": j.get("confidence"),
                     "calibrated_confidence": j.get("calibrated_confidence"),
@@ -224,6 +227,7 @@ def main() -> int:
 
         # Track confidence of triggered signals
         conf = p.get("confidence") or 0.0
+        cal_conf = p.get("calibrated_confidence")
         triggered_confidences.append(float(conf))
         if cal_conf is not None:
             triggered_cal_confidences.append(float(cal_conf))
@@ -312,13 +316,13 @@ def main() -> int:
     )
     print()
     print("  SIGNAL STATS")
-    print(f"    Total predictions loaded   : {n_predictions_total}")
-    print(f"    Skipped (no kline match)   : {skipped_no_kline}")
-    print(f"    Filtered (MT / threshold)  : {skipped_side_flat}")
-    print(f"    Trades triggered           : {n_trades_triggered}")
-    print(f"    Coverage (trades/preds)    : {coverage:.3f}")
+    print(f"    Total predictions loaded    : {n_predictions_total}")
+    print(f"    Skipped (no kline match)    : {skipped_no_kline}")
+    print(f"    Filtered (MT / threshold)   : {skipped_side_flat}")
+    print(f"    Trades triggered            : {n_trades_triggered}")
+    print(f"    Coverage (trades/preds)     : {coverage:.3f}")
     if not math.isnan(avg_confidence):
-        print(f"    Avg confidence @ trigger   : {avg_confidence:.4f}")
+        print(f"    Avg confidence @ trigger    : {avg_confidence:.4f}")
     if triggered_cal_confidences:
         avg_cal_conf = sum(triggered_cal_confidences) / len(triggered_cal_confidences)
         print(f"    Avg cal_confidence @ trigger: {avg_cal_conf:.4f}")

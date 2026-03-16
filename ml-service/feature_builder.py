@@ -322,6 +322,16 @@ def _load_feature_columns_event_v3(model_dir: str) -> List[str]:
         raise ValueError("feature_columns_event_v3.json invalid/empty")
     return [str(c) for c in cols]
 
+# === 新增/修改部分：明确拼接多周期基础字段 ===
+
+def _prefix_main_fields(src: pd.DataFrame, prefix: str) -> pd.DataFrame:
+    """将某周期的关键K线原始字段加前缀命名返回（如 tf4h_close）。"""
+    # 只选取主要原始K线字段，加前缀，如tf4h_close
+    ohlcv_cols = ["open", "high", "low", "close", "volume"]
+    keep = [c for c in ohlcv_cols if c in src.columns]
+    mapping = {c: f"{prefix}{c}" for c in keep}
+    df = src[keep].rename(columns=mapping)
+    return df
 
 def build_multi_tf_feature_df(
     data_dir: str,
@@ -356,17 +366,41 @@ def build_multi_tf_feature_df(
     df_1d_analyzed = add_technical_indicators_like_system(df_1d_raw)
     df_1d_feat = _add_engineered_features(df_1d_analyzed)
 
-    _base_ohlcv = {"open", "high", "low", "close", "volume"}
+    # 主要原始字段带前缀，后面主表合并
+    tf4h_main = _prefix_main_fields(df_4h_feat, "tf4h_")
+    tf1d_main = _prefix_main_fields(df_1d_feat, "tf1d_")
 
+    # 其余衍生特征也带前缀
     def _prefix_df(src: pd.DataFrame, prefix: str) -> pd.DataFrame:
-        cols = {c: f"{prefix}{c}" for c in src.columns if c not in _base_ohlcv}
+        # 排除基础字段（这些已经由 tf4h_main、tf1d_main 处理）
+        base_ohlcv = {"open", "high", "low", "close", "volume"}
+        cols = {c: f"{prefix}{c}" for c in src.columns if c not in base_ohlcv}
         renamed = src.rename(columns=cols)
         return renamed[[v for v in cols.values() if v in renamed.columns]]
 
     df_4h_pfx = _prefix_df(df_4h_feat, "tf4h_")
     df_1d_pfx = _prefix_df(df_1d_feat, "tf1d_")
 
-    merged = df_1h_feat.copy()
+    # 先合并主1h特征
+    merged = df_1h_feat.copy()  # index: 1h ts
+
+    # 先 merge tf4h/1d 的基础K线字段（如 tf4h_close），用merge_asof实现对齐
+    merged = pd.merge_asof(
+        merged.sort_index(),
+        tf4h_main.sort_index(),
+        left_index=True,
+        right_index=True,
+        direction="backward",
+    )
+    merged = pd.merge_asof(
+        merged.sort_index(),
+        tf1d_main.sort_index(),
+        left_index=True,
+        right_index=True,
+        direction="backward",
+    )
+
+    # 再 merge 其余带前缀的多周期衍生特征
     merged = pd.merge_asof(
         merged.sort_index(),
         df_4h_pfx.sort_index(),
