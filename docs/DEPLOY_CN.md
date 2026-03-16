@@ -226,7 +226,7 @@ mkdir -p ~/ubuntu-wallet/data/models
 
 ## 5.2 部署 ml-service 环境
 
-> **重要**：systemd 服务文件（`systemd/ml-service.service`）使用的 venv 路径是 `ml-service/.venv/`，建议使用此路径保持一致。
+> **重要**：systemd 服务文件（`systemd/ml-service.service`）使用的 venv 路径是 `ml-service/.venv/`，建议使用此路径以保持一致。
 
 ```bash
 cd ~/ubuntu-wallet/ml-service

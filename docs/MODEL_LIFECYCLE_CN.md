@@ -931,20 +931,29 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 ```bash
 # 标记退役状态
 RETIRED_VERSION="event_v3_20250101_120000"
+META_PATH="data/models/archive/${RETIRED_VERSION}/model_meta.json"
+RETIRED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-python3 -c "
-import json
-meta_path = f'data/models/archive/{RETIRED_VERSION}/model_meta.json'
-with open(meta_path) as f:
-    meta = json.load(f)
-meta['status'] = 'retired'
-meta['retired_at'] = '$(date -u +%Y-%m-%dT%H:%M:%SZ)'
-with open(meta_path, 'w') as f:
-    json.dump(meta, f, indent=2)
-print('模型已退役（Model retired）:', meta['model_version'])
-" 2>/dev/null || echo "注意：模型目录不存在或路径有误 (Note: model directory may not exist)"
+python3 - <<EOF
+import json, sys
 
-# 可选：释放磁盘空间
+meta_path = "${META_PATH}"
+retired_at = "${RETIRED_AT}"
+
+try:
+    with open(meta_path) as f:
+        meta = json.load(f)
+    meta['status'] = 'retired'
+    meta['retired_at'] = retired_at
+    with open(meta_path, 'w') as f:
+        json.dump(meta, f, indent=2)
+    print('模型已退役（Model retired）:', meta['model_version'])
+except FileNotFoundError:
+    print(f'注意：文件不存在 (Note: file not found): {meta_path}', file=sys.stderr)
+    sys.exit(1)
+EOF
+
+# 可选：释放磁盘空间（确认不再需要后再执行）
 # rm -rf ~/ubuntu-wallet/data/models/archive/$RETIRED_VERSION
 ```
 
