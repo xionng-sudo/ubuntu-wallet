@@ -13,34 +13,18 @@ to align the feature vector with training.
 
 This script:
   1. Loads the schema from models/feature_columns_event_v3.json
-  2. Optionally rebuilds the schema from klines data using the same training /
+  2. Optionally rebuilds/checks the schema from klines data using the same training /
      walk-forward feature path (--rebuild flag)
   3. Optionally validates the online inference row contract using
      build_event_v3_feature_row() (--validate-inference-row)
   4. Writes a canonical schema copy to --output if specified
 
-Usage
------
-  # Print schema info (validate existing schema file):
-  python scripts/export_feature_schema.py --model-dir models
-
-  # Rebuild schema from klines data and compare to saved schema:
-  python scripts/export_feature_schema.py \
-    --model-dir models \
-    --data-dir data \
-    --rebuild
-
-  # Full offline/online contract validation:
-  python scripts/export_feature_schema.py \
-    --model-dir models \
-    --data-dir data \
-    --rebuild \
-    --validate-inference-row
-
-  # Export schema to a named file for reference:
-  python scripts/export_feature_schema.py \
-    --model-dir models \
-    --output models/feature_schema_export.json
+Rebuild strictness (as requested)
+--------------------------------
+- STRICT on missing: if any column in saved schema is not produced by the rebuild
+  pipeline, exit code is 1.
+- NON-STRICT on extra: columns produced by rebuild but not present in saved schema
+  are reported, but do NOT cause failure. (Online inference will drop them anyway.)
 """
 from __future__ import annotations
 
@@ -49,7 +33,7 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ML_SERVICE_DIR = os.path.join(REPO_ROOT, "ml-service")
@@ -73,15 +57,40 @@ def _load_saved_schema(model_dir: str) -> List[str]:
     return [str(c) for c in cols]
 
 
-def _rebuild_schema_from_data(data_dir: str) -> List[str]:
-    """Build feature columns from klines data using the same pipeline as training."""
-    from feature_builder import build_multi_tf_feature_df, get_feature_columns_like_trainer  # type: ignore
+def _rebuild_schema_from_data(
+    data_dir: str,
+    saved_cols: List[str],
+) -> Tuple[List[str], List[str], List[str], int]:
+    """
+    Rebuild/check schema against the saved trainer schema.
+
+    Returns:
+        rebuilt_cols: columns that exist in BOTH saved schema and rebuilt merged df,
+                      in the same order as saved_cols (canonical).
+        missing_from_rebuilt: columns present in saved schema but not produced by rebuild pipeline.
+        extra_in_rebuilt: columns produced by rebuild pipeline but not present in saved schema.
+        n_merged_cols: total columns in rebuilt merged df.
+    """
+    from feature_builder import build_multi_tf_feature_df  # type: ignore
 
     print("[export_schema] building multi-tf feature matrix from klines ...", flush=True)
     merged = build_multi_tf_feature_df(data_dir)
-    cols = get_feature_columns_like_trainer(merged)
-    print(f"[export_schema] rebuilt schema has {len(cols)} columns", flush=True)
-    return cols
+    if merged is None or merged.empty:
+        raise ValueError("rebuilt merged feature df is empty")
+
+    merged_cols = [str(c) for c in list(merged.columns)]
+    merged_set = set(merged_cols)
+    saved_set = set(saved_cols)
+
+    # Canonical "rebuilt schema" should follow saved schema ordering.
+    rebuilt_cols = [c for c in saved_cols if c in merged_set]
+
+    missing_from_rebuilt = [c for c in saved_cols if c not in merged_set]
+    extra_in_rebuilt = sorted([c for c in merged_cols if c not in saved_set])
+
+    print(f"[export_schema] rebuilt merged df has {len(merged_cols)} columns", flush=True)
+    print(f"[export_schema] rebuilt schema (intersection, saved order) has {len(rebuilt_cols)} columns", flush=True)
+    return rebuilt_cols, missing_from_rebuilt, extra_in_rebuilt, len(merged_cols)
 
 
 def _validate_inference_row(data_dir: str, model_dir: str, saved_cols: List[str]) -> Dict[str, Any]:
@@ -106,9 +115,7 @@ def _validate_inference_row(data_dir: str, model_dir: str, saved_cols: List[str]
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Export and validate event_v3 feature schema"
-    )
+    ap = argparse.ArgumentParser(description="Export and validate event_v3 feature schema")
     ap.add_argument(
         "--model-dir",
         default=os.path.join(REPO_ROOT, "models"),
@@ -122,7 +129,8 @@ def main() -> int:
     ap.add_argument(
         "--rebuild",
         action="store_true",
-        help="Rebuild schema from klines data and compare to saved schema",
+        help="Rebuild/check schema from klines data and compare to saved schema "
+             "(strict on missing; non-strict on extra)",
     )
     ap.add_argument(
         "--validate-inference-row",
@@ -162,37 +170,50 @@ def main() -> int:
     # 2. Rebuild and compare (optional)
     if args.rebuild:
         try:
-            rebuilt_cols = _rebuild_schema_from_data(data_dir)
+            rebuilt_cols, missing_from_rebuilt, extra_in_rebuilt, n_merged_cols = _rebuild_schema_from_data(
+                data_dir,
+                saved_cols,
+            )
         except Exception as e:
             print(f"\nERROR rebuilding schema: {e}", flush=True)
             return 2
 
-        saved_set = set(saved_cols)
-        rebuilt_set = set(rebuilt_cols)
-        missing_from_rebuilt = sorted(saved_set - rebuilt_set)
-        extra_in_rebuilt = sorted(rebuilt_set - saved_set)
-
         print(f"\n{'='*60}")
         print("SCHEMA CONSISTENCY CHECK")
         print(f"  saved schema  : {len(saved_cols)} columns")
-        print(f"  rebuilt schema: {len(rebuilt_cols)} columns")
-        if not missing_from_rebuilt and not extra_in_rebuilt:
-            print("  RESULT: CONSISTENT ✓  (saved schema matches rebuilt schema)")
-        else:
-            print(f"  RESULT: DRIFT DETECTED")
-            if missing_from_rebuilt:
-                print(f"  In saved but NOT in rebuilt ({len(missing_from_rebuilt)}): "
-                      f"{missing_from_rebuilt[:10]}")
+        print(f"  rebuilt merged: {n_merged_cols} columns")
+        print(f"  rebuilt schema: {len(rebuilt_cols)} columns (intersection, saved order)")
+
+        if not missing_from_rebuilt:
             if extra_in_rebuilt:
-                print(f"  In rebuilt but NOT in saved ({len(extra_in_rebuilt)}): "
-                      f"{extra_in_rebuilt[:10]}")
+                print("  RESULT: CONSISTENT ✓  (all saved columns exist in rebuild; extras present but allowed)")
+            else:
+                print("  RESULT: CONSISTENT ✓  (saved schema matches rebuild pipeline output)")
+        else:
+            print("  RESULT: DRIFT DETECTED")
+
+        if missing_from_rebuilt:
+            print(
+                f"  In saved but NOT in rebuilt ({len(missing_from_rebuilt)}): "
+                f"{missing_from_rebuilt[:10]}"
+            )
+        if extra_in_rebuilt:
+            print(
+                f"  In rebuilt but NOT in saved ({len(extra_in_rebuilt)}): "
+                f"{extra_in_rebuilt[:10]}"
+            )
         print(f"{'='*60}")
 
-        if missing_from_rebuilt or extra_in_rebuilt:
+        # Strict on missing only (as requested)
+        if missing_from_rebuilt:
             return 1
+
         validation_summary["train_walkforward_rebuild"] = {
-            "same_columns": True,
-            "n_features": len(rebuilt_cols),
+            "all_saved_columns_present": True,
+            "n_features_saved": len(saved_cols),
+            "n_features_intersection": len(rebuilt_cols),
+            "n_merged_columns": n_merged_cols,
+            "n_extra_columns": len(extra_in_rebuilt),
         }
 
     # 3. Validate inference row contract (optional)

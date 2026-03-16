@@ -96,29 +96,67 @@ def _startup():
 
 @app.get("/healthz")
 def healthz():
+    """
+    Defensive health endpoint:
+    - Ensure registry_info is always initialized to avoid UnboundLocalError
+    - Catch exceptions when reading the registry and include error info in response
+    """
+    import json
+    import traceback
+
     if _loaded is None:
         return {"ok": False, "model_dir": MODEL_DIR, "data_dir": DATA_DIR}
 
+    # Initialize so it's always present
+    registry_info: Dict[str, Any] = {"note": "registry unknown"}
+
     MODELS_ROOT = os.path.abspath(os.path.join(MODEL_DIR, ".."))
-    reg_entry = get_prod_registry_entry(MODELS_ROOT)
-    if reg_entry is not None:
-        registry_info = {
-            "model_version": reg_entry.get("model_version"),
-            "trained_at": reg_entry.get("trained_at"),
-            "status": reg_entry.get("status"),
-            "n_features": reg_entry.get("n_features"),
-        }
+    try:
+        reg_entry = get_prod_registry_entry(MODELS_ROOT)
+        if reg_entry is not None:
+            registry_info = {
+                "model_version": reg_entry.get("model_version"),
+                "trained_at": reg_entry.get("trained_at"),
+                "status": reg_entry.get("status"),
+                "n_features": reg_entry.get("n_features"),
+            }
+        else:
+            registry_info = {"note": "no prod registry entry found", "registry_root": MODELS_ROOT}
+    except Exception as e:
+        # Do not raise — include error info in response for debugging
+        try:
+            # If a logger exists, log the exception
+            logger = globals().get("logger")
+            if logger is not None:
+                logger.exception("healthz: failed to read registry.json")
+        except Exception:
+            pass
+        registry_info = {"error": str(e), "traceback": traceback.format_exc()}
+
+    # Safely extract attributes from _loaded to avoid further exceptions
+    try:
+        loaded_model_dir = os.path.dirname(_loaded.model_path) if getattr(_loaded, "model_path", None) else None
+    except Exception:
+        loaded_model_dir = None
+    try:
+        loaded_model_version = getattr(_loaded, "model_version", None)
+        loaded_trained_at = getattr(_loaded, "trained_at", None)
+        expected_n = getattr(_loaded, "expected_n_features", None)
+        calibration_available = getattr(_loaded, "calibration", None) is not None
+        calibration_method = getattr(_loaded, "calibration", None).method if calibration_available else None
+    except Exception:
+        loaded_model_version = loaded_trained_at = expected_n = calibration_available = calibration_method = None
 
     return {
         "ok": True,
         "model_dir": MODEL_DIR,
-        "loaded_model_dir": os.path.dirname(_loaded.model_path) if _loaded.model_path else None,
+        "loaded_model_dir": loaded_model_dir,
         "data_dir": DATA_DIR,
-        "model_version": _loaded.model_version,
-        "loaded_model_trained_at": _loaded.trained_at,
-        "model_expected_n_features": _loaded.expected_n_features,
-        "calibration_available": _loaded.calibration is not None,
-        "calibration_method": _loaded.calibration.method if _loaded.calibration is not None else None,
+        "model_version": loaded_model_version,
+        "loaded_model_trained_at": loaded_trained_at,
+        "model_expected_n_features": expected_n,
+        "calibration_available": calibration_available,
+        "calibration_method": calibration_method,
         "registry": registry_info,
     }
 
