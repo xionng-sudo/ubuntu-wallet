@@ -555,7 +555,7 @@ def _register_model(
             archived_files.append(fname)
     print(f"[train_event_v3] archived {len(archived_files)} artifacts to {archive_abs}")
 
-    # Load or initialise registry
+    # Load or initialize registry
     registry_path = os.path.join(model_dir, "registry.json")
     if os.path.exists(registry_path):
         try:

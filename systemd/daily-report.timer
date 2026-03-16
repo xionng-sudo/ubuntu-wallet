@@ -1,5 +1,5 @@
 [Unit]
-Description=Run daily evaluation report at 01:00 UTC each day
+Description=Run daily evaluation report at 01:05 UTC each day
 Requires=daily-report.service
 
 [Timer]
