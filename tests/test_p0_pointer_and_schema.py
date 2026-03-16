@@ -175,6 +175,17 @@ class P0PointerAndSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "loaded model_meta.json disagree"):
             load_model_from_registry(model_root)
 
+    def test_loader_rejects_flat_root_fallback_without_pointer_state(self) -> None:
+        model_root = os.path.join(self._tmpdir, "models")
+        self._write_legacy_lightgbm_dir(
+            model_root,
+            model_version="root-version",
+            trained_at="2026-03-16T00:00:00Z",
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "requires current.json and registry.json"):
+            load_model_from_registry(model_root)
+
     def test_schema_validation_closes_training_and_inference_loop(self) -> None:
         data_dir = os.path.join(self._tmpdir, "data")
         model_dir = os.path.join(self._tmpdir, "models")

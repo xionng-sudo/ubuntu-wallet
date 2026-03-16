@@ -315,15 +315,20 @@ def load_current_pointer(model_dir: str) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
-def resolve_current_model_dir(model_dir: str) -> str:
+def resolve_current_model_dir(model_dir: str, *, require_pointer: bool = False) -> str:
     """
     Resolve the actual artifact directory to load.
 
     If models/current.json exists, use its relative/absolute path.
-    Otherwise fall back to the flat model_dir for backward compatibility.
+    Otherwise either raise (when require_pointer=True) or fall back to the
+    flat model_dir for legacy callers.
     """
     pointer = load_current_pointer(model_dir)
     if pointer is None:
+        if require_pointer:
+            raise RuntimeError(
+                "current.json not found; registry-driven loading requires an authoritative production pointer"
+            )
         return model_dir
 
     raw_path = str(pointer.get("path") or "").strip()
@@ -352,21 +357,27 @@ def load_model_from_registry(model_dir: str) -> "LoadedModel":
     """
     Load the production model referenced by current.json / registry.json.
 
-    Falls back to plain load_model(model_dir) if no current pointer exists,
-    which preserves backward compatibility with existing deployments.
+    This loader is intentionally strict: current.json and registry.json must
+    both exist, and the active production model is loaded from the directory
+    referenced by current.json instead of the flat root model_dir.
+
+    Legacy flat-model loading should use load_model(model_dir) directly.
     """
     pointer = load_current_pointer(model_dir)
     entry = get_prod_registry_entry(model_dir)
 
     if pointer is None and entry is None:
-        return load_model(model_dir)
+        raise RuntimeError(
+            "registry-driven loading requires current.json and registry.json; "
+            "use load_model(model_dir) for legacy flat MODEL_DIR loading"
+        )
 
     if pointer is None or entry is None:
         raise RuntimeError(
             "production model state is inconsistent: current.json and registry.json must either both exist or both be absent"
         )
 
-    resolved_model_dir = resolve_current_model_dir(model_dir)
+    resolved_model_dir = resolve_current_model_dir(model_dir, require_pointer=True)
     registry_model_dir = _resolve_entry_archive_dir(model_dir, entry)
     if os.path.abspath(resolved_model_dir) != os.path.abspath(registry_model_dir):
         raise RuntimeError(

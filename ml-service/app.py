@@ -84,7 +84,7 @@ def _apply_calibration(
 
 
 def _active_model_dir() -> str:
-    return resolve_current_model_dir(MODEL_DIR)
+    return resolve_current_model_dir(MODEL_DIR, require_pointer=True)
 
 
 app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v3-event")
