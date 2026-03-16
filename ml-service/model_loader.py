@@ -279,6 +279,32 @@ def load_model(model_dir: str) -> LoadedModel:
     raise RuntimeError("model_meta.json has no supported model keys (lightgbm/xgboost/event_v3)")
 
 
+# ---------------------------------------------------------------------------
+# Registry helpers (P0-2)
+# ---------------------------------------------------------------------------
+
+def load_registry(model_dir: str) -> Dict[str, Any]:
+    """Load models/registry.json. Returns empty dict if not present."""
+    path = os.path.join(model_dir, "registry.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_prod_registry_entry(model_dir: str) -> Optional[Dict[str, Any]]:
+    """
+    Return the 'prod' entry from registry.json, or None if registry is absent
+    or no entry has status='prod'.
+    """
+    reg = load_registry(model_dir)
+    entries = reg.get("entries", [])
+    prods = [e for e in entries if e.get("status") == "prod"]
+    if not prods:
+        return None
+    return sorted(prods, key=lambda e: e.get("trained_at", ""), reverse=True)[0]
+
+
 def _xgb_predict_proba(model: Any, Xs: np.ndarray) -> np.ndarray:
     """
     Predict class probabilities using an XGBoost model.

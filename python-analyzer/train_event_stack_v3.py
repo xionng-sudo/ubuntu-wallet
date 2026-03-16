@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
 from typing import List, Tuple
@@ -134,6 +135,14 @@ def train_event_v3(
     print("[train_event_v3] building multi-tf features ...")
     merged = build_multi_tf_feature_df(data_dir)
     feature_cols = get_feature_columns_like_trainer(merged)
+    n_base = sum(1 for c in feature_cols if not c.startswith(("tf4h_", "tf1d_")))
+    n_tf4h = sum(1 for c in feature_cols if c.startswith("tf4h_"))
+    n_tf1d = sum(1 for c in feature_cols if c.startswith("tf1d_"))
+    print(
+        "[train_event_v3] feature groups: "
+        f"base_1h={n_base} tf4h={n_tf4h} tf1d={n_tf1d}",
+        flush=True,
+    )
 
     # --- create labels ---
     print(f"[train_event_v3] creating labels using method={label_method} ...")
@@ -389,6 +398,30 @@ def train_event_v3(
         test_start=str(merged_valid.index[split]),
         test_end=str(merged_valid.index[-1]),
     )
+
+    _register_model(
+        model_dir=model_dir,
+        model_version=f"event_v3:lightgbm:{trained_at}",
+        trained_at=trained_at,
+        label_config={
+            "method": label_method,
+            "horizon": horizon,
+            "up_thresh": up_thresh,
+            "down_thresh": down_thresh,
+            "tp_pct": tp_pct,
+            "sl_pct": sl_pct,
+        },
+        threshold_config={"p_enter": p_enter, "delta": delta},
+        calibration_method=calibration_method if calibration_method and calibration_method.lower() != "none" else None,
+        summary_metrics=summary_metrics,
+        train_periods={
+            "train_start": str(merged_valid.index[0]),
+            "train_end": str(merged_valid.index[split]),
+            "val_start": str(merged_valid.index[split]),
+            "val_end": str(merged_valid.index[-1]),
+        },
+        n_features=len(feature_cols),
+    )
     print(f"[train_event_v3] training complete. trained_at={trained_at}")
 
 
@@ -476,6 +509,116 @@ def _update_model_meta(
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     print(f"[train_event_v3] updated {meta_path}")
+
+
+# ---------------------------------------------------------------------------
+# Model registry helper
+# ---------------------------------------------------------------------------
+
+# Artifact files to archive (copy from model_dir to archive/<version>/)
+_ARTIFACT_FILES = [
+    "model_meta.json",
+    "lightgbm_event_v3.pkl",
+    "lightgbm_event_v3_scaler.pkl",
+    "xgboost_event_v3.json",
+    "xgboost_event_v3_scaler.pkl",
+    "stacking_event_v3.pkl",
+    "feature_columns_event_v3.json",
+    "calibration_event_v3.pkl",
+]
+
+
+def _promote_to_current(model_dir: str, archive_abs: str) -> None:
+    """
+    Promote the newly archived model to models/current/.
+
+    Replaces the contents of models/current/ with a fresh copy of the archive,
+    so ml-service can load from models/current/ directly without any JSON
+    pointer resolution.
+    """
+    current_dir = os.path.join(model_dir, "current")
+    if os.path.isdir(current_dir):
+        shutil.rmtree(current_dir)
+    shutil.copytree(archive_abs, current_dir)
+    print(f"[train_event_v3] promoted {archive_abs} -> {current_dir}")
+
+
+def _register_model(
+    model_dir: str,
+    model_version: str,
+    trained_at: str,
+    label_config: dict,
+    threshold_config: dict,
+    calibration_method: str | None,
+    summary_metrics: dict | None,
+    train_periods: dict,
+    n_features: int,
+) -> None:
+    """
+    Archive the newly trained model artifacts and update models/registry.json.
+
+    - Copies current model artifacts to models/archive/<sanitized_version>/
+    - Marks all previous 'prod' entries as 'archived'
+    - Appends a new 'prod' entry for the new model
+    """
+    # Sanitize version string for use as directory name
+    safe_ver = trained_at.replace(":", "").replace("+", "").replace(" ", "T")
+    archive_rel = f"archive/event_v3-{safe_ver}"
+    archive_abs = os.path.join(model_dir, archive_rel)
+    os.makedirs(archive_abs, exist_ok=True)
+
+    # Copy artifact files to archive
+    archived_files = []
+    for fname in _ARTIFACT_FILES:
+        src = os.path.join(model_dir, fname)
+        if os.path.exists(src):
+            dst = os.path.join(archive_abs, fname)
+            shutil.copy2(src, dst)
+            archived_files.append(fname)
+    print(f"[train_event_v3] archived {len(archived_files)} artifacts to {archive_abs}")
+
+    # Load or initialize registry
+    registry_path = os.path.join(model_dir, "registry.json")
+    if os.path.exists(registry_path):
+        try:
+            with open(registry_path, "r", encoding="utf-8") as f:
+                registry = json.load(f)
+        except Exception:
+            registry = {}
+    else:
+        registry = {}
+
+    entries: list = registry.get("entries", [])
+
+    # Mark all previous 'prod' entries as 'archived'
+    for entry in entries:
+        if entry.get("status") == "prod":
+            entry["status"] = "archived"
+
+    # Append new prod entry
+    entries.append(
+        {
+            "model_version": model_version,
+            "trained_at": trained_at,
+            "status": "prod",
+            "archive_dir": archive_rel,
+            "label_config": label_config,
+            "threshold_config": threshold_config,
+            "calibration_method": calibration_method,
+            "summary_metrics": summary_metrics,
+            "n_features": n_features,
+            "train_periods": train_periods,
+            "created_at": trained_at,
+        }
+    )
+
+    registry["entries"] = entries
+    registry["updated_at"] = trained_at
+
+    with open(registry_path, "w", encoding="utf-8") as f:
+        json.dump(registry, f, indent=2)
+    print(f"[train_event_v3] updated registry.json ({len(entries)} entries, current prod: {model_version})")
+    _promote_to_current(model_dir=model_dir, archive_abs=archive_abs)
 
 
 # ---------------------------------------------------------------------------

@@ -8,10 +8,15 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from feature_builder import build_event_v3_feature_row, build_latest_feature_row_from_klines
-from model_loader import LoadedModel, load_model, predict_proba
+from model_loader import (
+    LoadedModel,
+    get_prod_registry_entry,
+    load_model,
+    predict_proba,
+)
 from prediction_logger import log_prediction
 
-MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models")))
+MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "current")))
 DATA_DIR = os.getenv("DATA_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")))
 
 # Thresholds for legacy binary models
@@ -76,6 +81,10 @@ def _apply_calibration(
         return None, None
 
 
+def _active_model_dir() -> str:
+    return MODEL_DIR
+
+
 app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v3-event")
 
 
@@ -89,14 +98,28 @@ def _startup():
 def healthz():
     if _loaded is None:
         return {"ok": False, "model_dir": MODEL_DIR, "data_dir": DATA_DIR}
+
+    MODELS_ROOT = os.path.abspath(os.path.join(MODEL_DIR, ".."))
+    reg_entry = get_prod_registry_entry(MODELS_ROOT)
+    if reg_entry is not None:
+        registry_info = {
+            "model_version": reg_entry.get("model_version"),
+            "trained_at": reg_entry.get("trained_at"),
+            "status": reg_entry.get("status"),
+            "n_features": reg_entry.get("n_features"),
+        }
+
     return {
         "ok": True,
         "model_dir": MODEL_DIR,
+        "loaded_model_dir": os.path.dirname(_loaded.model_path) if _loaded.model_path else None,
         "data_dir": DATA_DIR,
         "model_version": _loaded.model_version,
+        "loaded_model_trained_at": _loaded.trained_at,
         "model_expected_n_features": _loaded.expected_n_features,
         "calibration_available": _loaded.calibration is not None,
         "calibration_method": _loaded.calibration.method if _loaded.calibration is not None else None,
+        "registry": registry_info,
     }
 
 
@@ -114,6 +137,7 @@ def predict(req: PredictRequest):
         if _loaded.active_model == "event_v3":
             built = build_event_v3_feature_row(
                 data_dir=DATA_DIR,
+                model_dir=_active_model_dir(),
                 expected_n_features=_loaded.expected_n_features,
                 as_of_ts=as_of_ts,
             )

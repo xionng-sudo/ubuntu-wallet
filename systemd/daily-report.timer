@@ -1,0 +1,13 @@
+[Unit]
+Description=Run daily evaluation report at 01:05 UTC each day
+Requires=daily-report.service
+
+[Timer]
+# Run at 01:05 UTC daily (after midnight UTC, giving log data time to accumulate).
+# RandomizedDelaySec adds up to 2 minutes of jitter.
+OnCalendar=*-*-* 01:05:00
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

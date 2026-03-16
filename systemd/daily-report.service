@@ -1,5 +1,5 @@
 [Unit]
-Description=ubuntu-wallet prediction evaluator (evaluate_from_logs.py)
+Description=ubuntu-wallet daily evaluation report generator
 After=network-online.target
 
 [Service]
@@ -9,17 +9,17 @@ WorkingDirectory=/home/ubuntu/ubuntu-wallet/scripts
 # Activate the ml-service venv; it must install ml-service/requirements.txt
 # (including requests, which is used by shared reporting/backtest utilities).
 ExecStart=/bin/bash -c 'source /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/activate && \
-  python /home/ubuntu/ubuntu-wallet/scripts/evaluate_from_logs.py \
+  python /home/ubuntu/ubuntu-wallet/scripts/generate_daily_report.py \
     --log-path /home/ubuntu/ubuntu-wallet/data/predictions_log.jsonl \
     --data-dir /home/ubuntu/ubuntu-wallet/data \
-    --interval 1h \
     --active-model event_v3 \
     --threshold 0.55 \
     --tp 0.0175 \
     --sl 0.007 \
     --fee 0.0004 \
     --horizon-bars 6 \
-    >> /home/ubuntu/ubuntu-wallet/logs/evaluate_predictions.log 2>&1'
+    --report-dir /home/ubuntu/ubuntu-wallet/data/reports \
+    >> /home/ubuntu/ubuntu-wallet/logs/daily_report.log 2>&1'
 
 [Install]
 WantedBy=multi-user.target

@@ -26,7 +26,7 @@
 > - `scripts/backtest_event_v3_http.py --help` 与 `scripts/evaluate_from_logs.py --help` 已额外执行确认；
 > - `/predict` 最小请求体按 `PredictRequest` 当前字段定义核对为 `{"symbol": "ETHUSDT", "interval": "1h"}`。
 >
-> **再次强调**：第 2~7 章主要对应当前仓库里已有脚本；第 8~11 章描述的是基于这些脚本进行的**人工运维流程**。仓库当前并没有一个“候选 → 生产 → 归档 → 回滚”的内建状态机或模型注册中心。
+> **再次强调**：第 2~7 章主要对应当前仓库里已有脚本；第 8~11 章描述的是基于这些脚本进行的**人工运维流程**，从 P0-2 开始，仓库已有 `scripts/rollback_model.py` + `models/registry.json` + `models/current/`（目录制生产指针） + 训练后自动归档支持。完整的“候选 → 生产”自动审批/切换状态机尚未内建。
 
 ---
 
@@ -206,24 +206,25 @@ cat ~/ubuntu-wallet/models/feature_columns_event_v3.json | python3 -m json.tool 
 
 ## 3.3 特征验证
 
-在训练前，建议用数据验证特征构建：
+在训练前，建议做两层验证：
+- **训练 / walk-forward 路径**：`build_multi_tf_feature_df()` + `get_feature_columns_like_trainer()`
+- **在线推理路径**：`build_event_v3_feature_row()`
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
+source venv-analyzer/bin/activate
 
-python3 -c "
-import sys
-sys.path.insert(0, 'ml-service')
-from feature_builder import build_event_v3_feature_row
-result = build_event_v3_feature_row(data_dir='data', expected_n_features=None)
-print(f'特征数量 (feature count): {result.X_row.shape[1]}')
-print(f'特征时间戳 (feature_ts): {result.feature_ts}')
-print(f'前5个特征值 (first 5 values): {result.X_row[0, :5]}')
-"
-
-deactivate
+python scripts/export_feature_schema.py \
+  --model-dir models \
+  --data-dir data \
+  --rebuild \
+  --validate-inference-row
 ```
+
+该命令会同时验证：
+- 保存的 `feature_columns_event_v3.json`
+- 训练 / walk-forward 重建出的 schema
+- `/predict` 实际使用的单行在线特征契约（列顺序 + `1 x n_features` 形状）
 
 ---
 
@@ -414,6 +415,10 @@ python python-analyzer/walkforward_cv.py \
 
 deactivate
 ```
+
+> `walkforward_cv.py` 与训练脚本共用 `build_multi_tf_feature_df()` + `get_feature_columns_like_trainer()`，
+> 因此进入 Walk-Forward 的正式训练特征集已经包含 1h 基础特征以及 `tf4h_*` / `tf1d_*`
+> 多周期特征；运行时日志会显式打印 `base_1h / tf4h / tf1d` 三组特征数量。
 
 ### 参数说明
 
@@ -739,22 +744,23 @@ echo "=== 候选模型（Candidate）===" && grep -E "threshold=|win_rate|avg_re
   2. 重新放回 `MODEL_DIR`
   3. 重启 `ml-service`
 
-**当前仓库没有内建以下机制：**
-- 没有自动维护 `current / archive / candidates` 目录树
-- 没有模型注册表（model registry）
-- 没有“候选 → 生产”自动切换命令
-- 没有通过 `status=production/candidate/archived` 驱动系统行为的逻辑
+**当前仓库已提供以下模型管理机制（P0-2 已实现）：**
+- `models/registry.json`：记录所有训练过的模型条目及状态（prod / archived）
+- `models/current/`：**目录制生产指针**，`ml-service` 直接从该目录加载当前生产模型（训练后自动生成）
+- `models/archive/event_v3-<timestamp>/`：每次训练后的完整模型文件备份（训练时自动创建）
+- `scripts/rollback_model.py`：基于 registry.json 的一键回滚脚本（支持 `--dry-run`），回滚时将目标 archive 复制为新的 `models/current/`
+
+**当前仓库尚未内建以下机制（后续可演进）：**
+- 没有"候选 → 生产"自动切换命令（晋升仍需手工重启服务）
 
 ### B. 文档里**推荐**的团队运维流程（Recommended operational workflow）
 
-- 用“候选模型 / 生产模型 / 回滚 / 退役”等词，是为了帮助团队建立清晰的运维流程
+- 用"候选模型 / 生产模型 / 回滚 / 退役"等词，是为了帮助团队建立清晰的运维流程
 - 这些词在本文中主要表示**流程概念**，不代表仓库已经实现了完整的模型版本管理系统
 - 如果团队未来要做更规范的版本管理，可以额外引入：
   - 独立版本目录（例如 `models/v20260315/`）
-  - 统一备份目录（例如 `models_backup/`）
-  - 甚至进一步演进到 `current / archive / candidates` 这样的目录约定
 
-> **一句话总结**：下面第 8~11 章里的“晋升 / 回滚 / 退役”，在当前仓库中应理解为**人工运维流程**，而不是仓库已内建的自动化模型管理功能。
+> **一句话总结**：下面第 8~11 章里的"晋升 / 回滚 / 退役"，当前仓库已实现目录制 `models/current/` 生产指针 + registry 注册 + archive 备份 + `rollback_model.py` 脚本，但"候选 → 生产"完整自动切换工作流仍需手工结合脚本完成。
 
 ---
 
@@ -1002,38 +1008,64 @@ deactivate
 - feature schema warning 激增（说明特征不匹配）
 - prediction log 停止写入
 
-## 10.2 当前实现的回滚步骤
+## 10.2 回滚步骤（脚本方式，P0-2 已实现）
 
-> **当前实现说明**：这里的“回滚”指人工把旧备份文件恢复到 `MODEL_DIR` 并重启服务。仓库本身没有“回滚到上一版本”的内建命令。
+> **当前实现**：从 P0-2 开始，每次训练后模型会自动归档至 `models/archive/event_v3-<timestamp>/`，
+> 同时更新 `models/registry.json` 并将归档目录复制为 `models/current/`。
+> `ml-service` 默认从 `models/current/` 直接加载当前生产模型（`MODEL_DIR` 默认指向 `models/current/`）。
+> 可用 `scripts/rollback_model.py` 一键回滚：脚本将目标 archive 目录复制为新的 `models/current/`。
 
-### 步骤 1：确认有可用的备份
+> **补充说明**：`/predict` 在 `event_v3` 模式下从 `MODEL_DIR`（即 `models/current/`）读取
+> `feature_columns_event_v3.json`，不会隐式回退到任何其他目录的 schema。
+
+## 10.7 验收验证入口（P0-1 / P0-2）
 
 ```bash
-ls -lh ~/ubuntu-wallet/models_backup/
-# 应该能看到之前备份的目录，如 20260315_100000/
+# 1) 训练侧 schema ↔ 在线推理 row contract
+python scripts/export_feature_schema.py \
+  --model-dir ~/ubuntu-wallet/models/current \
+  --data-dir ~/ubuntu-wallet/data \
+  --rebuild \
+  --validate-inference-row
+
+# 2) Walk-Forward 验证入口（与训练共用同一 multi-tf 特征路径）
+python python-analyzer/walkforward_cv.py \
+  --data-dir ~/ubuntu-wallet/data \
+  --n-splits 5 \
+  --gap-bars 12 \
+  --label-method ternary \
+  --confidence-threshold 0.65 \
+  --output-csv /tmp/cv_report.csv
+
+# 3) 在线 /predict 验证入口（MODEL_DIR=models/current/ 直接驱动 schema）
+curl -s http://127.0.0.1:8000/healthz | jq .
+curl -s -X POST http://127.0.0.1:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"interval":"1h"}' | jq .
+```
+
+### 步骤 1：确认 registry 里有可用的 archived 版本（Dry run 预览）
+
+```bash
+# 预览哪个版本会被回滚（不做任何更改）
+python scripts/rollback_model.py --model-dir ~/ubuntu-wallet/models --dry-run
 ```
 
 ### 步骤 2：记录当前问题模型版本
 
 ```bash
-curl -s http://127.0.0.1:9000/healthz | python3 -c "
-import sys, json
-m = json.load(sys.stdin)
-print(f'问题模型（Problem model）: {m[\"model_version\"]}')
-print(f'已加载目录（Model dir）: {m[\"model_dir\"]}')
-"
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+# 注意 model_version 和 registry.model_version 字段
 ```
 
-### 步骤 3：将备份模型文件恢复到 models/ 目录
+### 步骤 3：执行回滚
 
 ```bash
-# 替换 BACKUP_TIMESTAMP 为实际备份目录名（见步骤1的 ls 输出）
-BACKUP_TIMESTAMP="20260315_100000"
-BACKUP_DIR=~/ubuntu-wallet/models_backup/$BACKUP_TIMESTAMP
-
-echo "恢复备份（Restoring backup from）: $BACKUP_DIR"
-cp "$BACKUP_DIR"/*.pkl "$BACKUP_DIR"/*.json ~/ubuntu-wallet/models/
-echo "文件已复制 (Files copied)"
+python ~/ubuntu-wallet/scripts/rollback_model.py --model-dir ~/ubuntu-wallet/models
+# 脚本会：
+# 1. 从 registry.json 找到最近一条 archived 条目
+# 2. 将该版本的 archive 目录复制为 models/current/（替换现有内容）
+# 3. 更新 registry.json（旧 prod → archived，被恢复版本 → prod）
 ```
 
 ### 步骤 4：重启服务并验证
@@ -1042,11 +1074,11 @@ echo "文件已复制 (Files copied)"
 sudo systemctl restart ml-service
 sleep 5
 
-# 验证版本已恢复
+# 验证版本已恢复（model_version 应显示回滚后的版本）
 curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 # 确认 ok: true、calibration_available: true
-# 确认 model_version 是稳定版本（不是刚才的问题版本）
+# 确认 model_version 是已知稳定版本
 ```
 
 ### 步骤 5：发送测试请求确认功能恢复
@@ -1056,6 +1088,9 @@ curl -s -X POST http://127.0.0.1:9000/predict \
   -H "Content-Type: application/json" \
   -d '{"symbol": "ETHUSDT", "interval": "1h"}' | python3 -m json.tool
 ```
+
+> **手工回滚备选方案**：若 registry.json 损坏，可手工从 `models/archive/event_v3-<timestamp>/`
+> 复制目录到 `models/current/` 后重启服务，无需修改任何 JSON 文件。
 
 ## 10.3 回滚后记录
 

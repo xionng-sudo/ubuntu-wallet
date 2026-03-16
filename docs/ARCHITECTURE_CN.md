@@ -217,14 +217,23 @@
   - 从 prediction log 评估后验表现
 - `mt_trend_utils.py`
   - 多周期趋势工具
+- `report_threshold_grid.py` *(P0-3 新增)*
+  - 阈值网格分析工具：对 prediction log 的多个 threshold 值批量输出 precision / coverage / avg_return / MDD / LONG/SHORT 分项统计
+  - 支持 JSON / CSV 双格式输出
+- `generate_daily_report.py` *(P0-4 新增)*
+  - 每日评估报告生成器：输出 `daily_eval_YYYY-MM-DD.json` 和 `daily_eval_YYYY-MM-DD.md`
+  - 包含 model_version / precision / coverage / TP/SL/TIMEOUT 分布 / LONG/SHORT 分方向结果
+- `export_feature_schema.py` *(P0-1 新增)*
+  - 从训练模型目录导出 / 验证 `feature_columns_event_v3.json` 特征 schema
+  - 支持 `--rebuild`（训练 / walk-forward 路径重建）与 `--validate-inference-row`（在线推理单行特征契约检查）
+- `rollback_model.py` *(P0-2 新增)*
+  - 基于 `models/registry.json` + `models/current.json` 的一键式模型回滚脚本，支持 `--dry-run` 预览
 - `eth_perp_engine_binance.py`
   - ETH 永续风险与执行引擎外壳
 - `live_trader_eth_perp_binance.py`
   - ETH 实时/准实时交易执行脚本
 - `live_trader_eth_perp_simulated.py`
   - 历史顺序回放模拟交易脚本
-- `run_live_eval_1h.sh`
-  - 评估相关 shell 脚本
 - `install.sh`
   - 安装辅助脚本
 - `run.sh`
@@ -255,9 +264,13 @@
 - `check-go-collector.timer`
   - 采集检查定时器
 - `evaluate-predictions.service`
-  - 评估任务服务
+  - 评估任务服务（使用 `ml-service/.venv`，需安装 `ml-service/requirements.txt`）
 - `evaluate-predictions.timer`
-  - 评估任务定时器
+  - 评估任务定时器（每 6 小时运行一次 evaluate_from_logs.py）
+- `daily-report.service` *(P0-4 新增)*
+  - 每日报告生成任务服务（使用 `ml-service/.venv`，需安装 `ml-service/requirements.txt`）
+- `daily-report.timer` *(P0-4 新增)*
+  - 每日报告定时器（UTC 01:05 每天运行一次 generate_daily_report.py）
 - `DEPLOY-NEW-SERVER.md`
   - 新服务器部署说明
 - `UPGRADE.md`
@@ -809,6 +822,22 @@ python python-analyzer/walkforward_cv.py \
   --output-csv /tmp/cv_report.csv
 ```
 
+## 9.2.1 再做训练 / 推理 schema 一致性检查
+```bash
+source ~/ubuntu-wallet/venv-analyzer/bin/activate
+cd ~/ubuntu-wallet
+
+python scripts/export_feature_schema.py \
+  --model-dir models \
+  --data-dir data \
+  --rebuild \
+  --validate-inference-row
+```
+
+> 说明：
+> - `--rebuild` 使用与训练 / walk-forward 相同的 `build_multi_tf_feature_df()` + `get_feature_columns_like_trainer()` 路径重建 schema；
+> - `--validate-inference-row` 使用 `build_event_v3_feature_row()` 验证 `/predict` 在线推理单行特征是否与保存的 schema 对齐。
+
 ## 9.3 正式训练
 ```bash
 python python-analyzer/train_event_stack_v3.py \
@@ -823,7 +852,9 @@ python python-analyzer/train_event_stack_v3.py \
 - 模型文件
 - calibration artifact
 - model_meta.json
-- feature schema
+- `feature_columns_event_v3.json`
+- `registry.json`
+- `current.json`
 - metrics 输出
 
 ## 9.5 上线前验证
