@@ -99,8 +99,8 @@ def healthz():
     if _loaded is None:
         return {"ok": False, "model_dir": MODEL_DIR, "data_dir": DATA_DIR}
 
-    reg_entry = get_prod_registry_entry(os.path.dirname(MODEL_DIR.rstrip(os.sep)))
-    registry_info = None
+    MODELS_ROOT = os.path.abspath(os.path.join(MODEL_DIR, ".."))
+    reg_entry = get_prod_registry_entry(MODELS_ROOT)
     if reg_entry is not None:
         registry_info = {
             "model_version": reg_entry.get("model_version"),
