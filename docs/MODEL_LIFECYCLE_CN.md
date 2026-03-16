@@ -1010,7 +1010,8 @@ deactivate
 
 > **当前实现**：从 P0-2 开始，每次训练后模型会自动归档至 `models/archive/event_v3-<timestamp>/`，
 > 同时更新 `models/registry.json` 与 `models/current.json`。`ml-service` 启动时优先按 `current.json`
-> 指向的目录加载当前生产模型。可用 `scripts/rollback_model.py` 一键回滚。
+> 指向的目录加载当前生产模型，并对 `current.json` / `registry.json` / 被加载目录内的
+> `model_meta.json` 做一致性校验。可用 `scripts/rollback_model.py` 一键回滚。
 
 ### 步骤 1：确认 registry 里有可用的 archived 版本（Dry run 预览）
 

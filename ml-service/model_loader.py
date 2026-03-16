@@ -337,6 +337,17 @@ def resolve_current_model_dir(model_dir: str) -> str:
     return resolved
 
 
+def _resolve_entry_archive_dir(model_dir: str, entry: Dict[str, Any]) -> str:
+    archive_dir = str(entry.get("archive_dir") or "").strip()
+    if not archive_dir:
+        raise RuntimeError("registry prod entry missing archive_dir")
+    resolved = archive_dir if os.path.isabs(archive_dir) else os.path.join(model_dir, archive_dir)
+    resolved = os.path.abspath(resolved)
+    if not os.path.isdir(resolved):
+        raise RuntimeError(f"registry prod entry points to missing archive dir: {resolved}")
+    return resolved
+
+
 def load_model_from_registry(model_dir: str) -> "LoadedModel":
     """
     Load the production model referenced by current.json / registry.json.
@@ -346,10 +357,22 @@ def load_model_from_registry(model_dir: str) -> "LoadedModel":
     """
     pointer = load_current_pointer(model_dir)
     entry = get_prod_registry_entry(model_dir)
-    resolved_model_dir = resolve_current_model_dir(model_dir)
 
     if pointer is None and entry is None:
         return load_model(model_dir)
+
+    if pointer is None or entry is None:
+        raise RuntimeError(
+            "production model state is inconsistent: current.json and registry.json must either both exist or both be absent"
+        )
+
+    resolved_model_dir = resolve_current_model_dir(model_dir)
+    registry_model_dir = _resolve_entry_archive_dir(model_dir, entry)
+    if os.path.abspath(resolved_model_dir) != os.path.abspath(registry_model_dir):
+        raise RuntimeError(
+            "current.json and registry.json disagree on production model directory: "
+            f"pointer={resolved_model_dir} registry={registry_model_dir}"
+        )
 
     if pointer is not None and entry is not None:
         pointer_model_version = str(pointer.get("model_version") or "").strip()
@@ -363,6 +386,19 @@ def load_model_from_registry(model_dir: str) -> "LoadedModel":
             raise RuntimeError(
                 "current.json and registry.json disagree on production model: "
                 f"pointer={pointer_model_version} registry={registry_model_version}"
+            )
+
+        loaded_meta = load_meta(resolved_model_dir)
+        loaded_meta_model_version = str(loaded_meta.get("model_version") or "").strip()
+        if bool(pointer_model_version) != bool(loaded_meta_model_version):
+            raise RuntimeError(
+                "current.json and loaded model_meta.json have inconsistent production model versions: "
+                f"pointer={pointer_model_version!r} loaded_meta={loaded_meta_model_version!r}"
+            )
+        if pointer_model_version and loaded_meta_model_version and pointer_model_version != loaded_meta_model_version:
+            raise RuntimeError(
+                "current.json and loaded model_meta.json disagree on production model: "
+                f"pointer={pointer_model_version} loaded_meta={loaded_meta_model_version}"
             )
 
     return load_model(resolved_model_dir)

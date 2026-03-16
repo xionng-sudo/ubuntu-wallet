@@ -114,6 +114,7 @@ def healthz():
         "active_model_dir": resolve_current_model_dir(MODEL_DIR),
         "data_dir": DATA_DIR,
         "model_version": _loaded.model_version,
+        "loaded_model_trained_at": _loaded.trained_at,
         "model_expected_n_features": _loaded.expected_n_features,
         "calibration_available": _loaded.calibration is not None,
         "calibration_method": _loaded.calibration.method if _loaded.calibration is not None else None,
