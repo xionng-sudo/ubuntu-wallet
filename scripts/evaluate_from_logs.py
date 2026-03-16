@@ -110,8 +110,8 @@ def main() -> int:
     ap.add_argument("--until", default=None)
 
     ap.add_argument("--threshold", type=float, required=True, help="p_enter threshold, e.g. 0.55")
-    ap.add_argument("--tp", type=float, required=True, help="take profit pct, e.g. 0.0175 for 1.75%")
-    ap.add_argument("--sl", type=float, required=True, help="stop loss pct, e.g. 0.009 for 0.9%")
+    ap.add_argument("--tp", type=float, required=True, help="take profit pct, e.g. 0.0175 for 1.75%%")
+    ap.add_argument("--sl", type=float, required=True, help="stop loss pct, e.g. 0.009 for 0.9%%")
     ap.add_argument("--fee", type=float, default=0.0004)
     ap.add_argument("--slippage", type=float, default=0.0)
     ap.add_argument("--horizon-bars", type=int, default=6)

@@ -21,6 +21,11 @@
 > - `scripts/evaluate_from_logs.py`
 > - `ml-service/app.py` 中的 `PredictRequest`
 >
+> **本次复核方式**：
+> - 逐条对照上述脚本中的 `argparse` / Pydantic 定义核对文档命令与字段；
+> - `scripts/backtest_event_v3_http.py --help` 与 `scripts/evaluate_from_logs.py --help` 已额外执行确认；
+> - `/predict` 最小请求体按 `PredictRequest` 当前字段定义核对为 `{"symbol": "ETHUSDT", "interval": "1h"}`。
+>
 > **再次强调**：第 2~7 章主要对应当前仓库里已有脚本；第 8~11 章描述的是基于这些脚本进行的**人工运维流程**。仓库当前并没有一个“候选 → 生产 → 归档 → 回滚”的内建状态机或模型注册中心。
 
 ---
