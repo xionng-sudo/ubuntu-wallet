@@ -8,8 +8,10 @@ import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import joblib
+import numpy as np
 
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -22,7 +24,8 @@ for _d in [ML_SERVICE_DIR, PY_ANALYZER_DIR, SCRIPTS_DIR]:
 
 from export_feature_schema import _rebuild_schema_from_data, _validate_inference_row  # type: ignore
 from feature_builder import build_multi_tf_feature_df, get_feature_columns_like_trainer  # type: ignore
-from model_loader import load_model_from_registry  # type: ignore
+import app as ml_app  # type: ignore
+from model_loader import LoadedModel, load_model_from_registry  # type: ignore
 
 
 class _DummyModel:
@@ -194,6 +197,103 @@ class P0PointerAndSchemaTests(unittest.TestCase):
         self.assertTrue(schema_validation["is_valid"])
         self.assertEqual(schema_validation["missing_columns"], [])
         self.assertEqual(inference_check["x_shape"], [1, len(feature_cols)])
+
+    def test_training_schema_includes_formal_4h_and_1d_features(self) -> None:
+        data_dir = os.path.join(self._tmpdir, "data")
+        self._write_synthetic_klines(data_dir)
+
+        merged = build_multi_tf_feature_df(data_dir)
+        feature_cols = get_feature_columns_like_trainer(merged)
+
+        self.assertTrue(any(col.startswith("tf4h_") for col in feature_cols))
+        self.assertTrue(any(col.startswith("tf1d_") for col in feature_cols))
+        X = merged[feature_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).values.astype(np.float32)
+        self.assertEqual(X.shape[1], len(feature_cols))
+
+    def test_predict_uses_active_model_dir_schema_not_flat_root(self) -> None:
+        data_dir = os.path.join(self._tmpdir, "data")
+        model_root = os.path.join(self._tmpdir, "models")
+        archive_dir = os.path.join(model_root, "archive", "event_v3-20260316T000000Z")
+        self._write_synthetic_klines(data_dir)
+        os.makedirs(model_root, exist_ok=True)
+        os.makedirs(archive_dir, exist_ok=True)
+
+        merged = build_multi_tf_feature_df(data_dir)
+        feature_cols = get_feature_columns_like_trainer(merged)
+        self.assertGreater(len(feature_cols), 10)
+
+        with open(os.path.join(archive_dir, "feature_columns_event_v3.json"), "w", encoding="utf-8") as f:
+            json.dump(feature_cols, f)
+        with open(os.path.join(model_root, "feature_columns_event_v3.json"), "w", encoding="utf-8") as f:
+            json.dump(feature_cols[:-5], f)
+
+        with open(os.path.join(model_root, "registry.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "entries": [
+                        {
+                            "model_version": "event_v3:test",
+                            "trained_at": "2026-03-16T00:00:00Z",
+                            "status": "prod",
+                            "archive_dir": "archive/event_v3-20260316T000000Z",
+                            "n_features": len(feature_cols),
+                        }
+                    ]
+                },
+                f,
+            )
+        with open(os.path.join(model_root, "current.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "model_version": "event_v3:test",
+                    "trained_at": "2026-03-16T00:00:00Z",
+                    "path": "archive/event_v3-20260316T000000Z",
+                },
+                f,
+            )
+        with open(os.path.join(archive_dir, "model_meta.json"), "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "active_model": "event_v3",
+                    "trained_at": "2026-03-16T00:00:00Z",
+                    "model_version": "event_v3:test",
+                    "event_v3": {"p_enter": 0.65, "delta": 0.0},
+                    "lightgbm": {"trained_at": "2026-03-16T00:00:00Z"},
+                },
+                f,
+            )
+        model_artifact = os.path.join(archive_dir, "lightgbm_event_v3.pkl")
+        with open(model_artifact, "wb") as f:
+            f.write(b"dummy-model")
+
+        loaded = LoadedModel(
+            active_model="event_v3",
+            name="lightgbm",
+            model=object(),
+            scaler=None,
+            feature_columns=feature_cols,
+            trained_at="2026-03-16T00:00:00Z",
+            model_path=model_artifact,
+            scaler_path=None,
+            expected_n_features=len(feature_cols),
+            stacking_model=object(),
+            base_models={},
+            event_v3={"p_enter": 0.65, "delta": 0.0},
+        )
+
+        last_ts = merged.index[-1].to_pydatetime().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        with patch.object(ml_app, "MODEL_DIR", model_root), \
+             patch.object(ml_app, "DATA_DIR", data_dir), \
+             patch.object(ml_app, "_loaded", loaded), \
+             patch.object(ml_app, "predict_proba", return_value=(np.array([[0.1, 0.2, 0.7]], dtype=np.float32), "proba_multiclass")), \
+             patch.object(ml_app, "log_prediction", return_value=None):
+            health = ml_app.healthz()
+            resp = ml_app.predict(ml_app.PredictRequest(as_of_ts=last_ts))
+
+        self.assertEqual(health["active_model_dir"], os.path.abspath(archive_dir))
+        self.assertEqual(health["loaded_model_dir"], os.path.abspath(archive_dir))
+        self.assertEqual(resp.signal, "LONG")
+        self.assertEqual(resp.model_version, loaded.model_version)
 
 
 if __name__ == "__main__":

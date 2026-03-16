@@ -134,6 +134,14 @@ def train_event_v3(
     print("[train_event_v3] building multi-tf features ...")
     merged = build_multi_tf_feature_df(data_dir)
     feature_cols = get_feature_columns_like_trainer(merged)
+    n_base = sum(1 for c in feature_cols if not c.startswith(("tf4h_", "tf1d_")))
+    n_tf4h = sum(1 for c in feature_cols if c.startswith("tf4h_"))
+    n_tf1d = sum(1 for c in feature_cols if c.startswith("tf1d_"))
+    print(
+        "[train_event_v3] feature groups: "
+        f"base_1h={n_base} tf4h={n_tf4h} tf1d={n_tf1d}",
+        flush=True,
+    )
 
     # --- create labels ---
     print(f"[train_event_v3] creating labels using method={label_method} ...")

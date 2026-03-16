@@ -83,6 +83,10 @@ def _apply_calibration(
         return None, None
 
 
+def _active_model_dir() -> str:
+    return resolve_current_model_dir(MODEL_DIR)
+
+
 app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v3-event")
 
 
@@ -111,7 +115,8 @@ def healthz():
     return {
         "ok": True,
         "model_dir": MODEL_DIR,
-        "active_model_dir": resolve_current_model_dir(MODEL_DIR),
+        "active_model_dir": _active_model_dir(),
+        "loaded_model_dir": os.path.dirname(_loaded.model_path) if _loaded.model_path else None,
         "data_dir": DATA_DIR,
         "model_version": _loaded.model_version,
         "loaded_model_trained_at": _loaded.trained_at,
@@ -137,6 +142,7 @@ def predict(req: PredictRequest):
         if _loaded.active_model == "event_v3":
             built = build_event_v3_feature_row(
                 data_dir=DATA_DIR,
+                model_dir=_active_model_dir(),
                 expected_n_features=_loaded.expected_n_features,
                 as_of_ts=as_of_ts,
             )

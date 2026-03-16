@@ -416,6 +416,10 @@ python python-analyzer/walkforward_cv.py \
 deactivate
 ```
 
+> `walkforward_cv.py` 与训练脚本共用 `build_multi_tf_feature_df()` + `get_feature_columns_like_trainer()`，
+> 因此进入 Walk-Forward 的正式训练特征集已经包含 1h 基础特征以及 `tf4h_*` / `tf1d_*`
+> 多周期特征；运行时日志会显式打印 `base_1h / tf4h / tf1d` 三组特征数量。
+
 ### 参数说明
 
 | 参数                    | 含义                                     | 推荐值  |
@@ -1012,6 +1016,35 @@ deactivate
 > 同时更新 `models/registry.json` 与 `models/current.json`。`ml-service` 启动时优先按 `current.json`
 > 指向的目录加载当前生产模型，并对 `current.json` / `registry.json` / 被加载目录内的
 > `model_meta.json` 做一致性校验。可用 `scripts/rollback_model.py` 一键回滚。
+
+> **补充说明**：`/predict` 在 `event_v3` 模式下也会按当前 active production model directory
+> 读取 `feature_columns_event_v3.json`，不会再隐式回退到扁平根目录 schema。
+
+## 10.7 验收验证入口（P0-1 / P0-2）
+
+```bash
+# 1) 训练侧 schema ↔ 在线推理 row contract
+python scripts/export_feature_schema.py \
+  --model-dir ~/ubuntu-wallet/models \
+  --data-dir ~/ubuntu-wallet/data \
+  --rebuild \
+  --validate-inference-row
+
+# 2) Walk-Forward 验证入口（与训练共用同一 multi-tf 特征路径）
+python python-analyzer/walkforward_cv.py \
+  --data-dir ~/ubuntu-wallet/data \
+  --n-splits 5 \
+  --gap-bars 12 \
+  --label-method ternary \
+  --confidence-threshold 0.65 \
+  --output-csv /tmp/cv_report.csv
+
+# 3) 在线 /predict 验证入口（由当前 production pointer 驱动 schema）
+curl -s http://127.0.0.1:8000/healthz | jq .
+curl -s -X POST http://127.0.0.1:8000/predict \
+  -H 'Content-Type: application/json' \
+  -d '{"interval":"1h"}' | jq .
+```
 
 ### 步骤 1：确认 registry 里有可用的 archived 版本（Dry run 预览）
 
