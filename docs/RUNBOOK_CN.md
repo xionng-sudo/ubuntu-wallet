@@ -120,12 +120,39 @@ systemctl status evaluate-predictions.timer
 ---
 
 ## 3.3 ml-service 健康检查
+
+> **注意（Note）**：ml-service 端口为 **9000**，不是 8000。
+
 ```bash
-curl http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+```
+
+预期输出（Expected output）：
+```json
+{
+    "ok": true,
+    "model_dir": "/home/ubuntu/ubuntu-wallet/models",
+    "data_dir": "/home/ubuntu/ubuntu-wallet/data",
+    "model_version": "event_v3_20260315_120000",
+    "model_expected_n_features": 120,
+    "calibration_available": true,
+    "calibration_method": "isotonic"
+}
+```
+
+**字段说明（Field explanation）：**
+- `ok: true`：服务正常 / Service is healthy
+- `model_version`：确认当前加载的模型版本 / Current model version
+- `calibration_available: true`：校准器正常加载 / Calibration artifact is loaded
+- `calibration_method`：当前使用的校准方法 / Calibration method in use
+
+如果 `ok` 为 `false` 或响应为空，先查看 ml-service 日志：
+```bash
+journalctl -u ml-service -n 50 --no-pager
 ```
 
 重点看：
-- 服务状态
+- 服务状态（`ok: true` 表示正常）
 - `model_version`
 - `calibration_available`
 - 若有 feature schema version，也要看
@@ -216,12 +243,47 @@ systemctl status ml-service
 systemctl status evaluate-predictions.timer
 ```
 
+预期输出（go-collector 正常状态）：
+```
+● go-collector.service - ubuntu-wallet go-collector
+     Active: active (running) since Mon 2026-03-15 10:00:00 UTC; 2h 30min ago
+```
+
+预期输出（timer 正常状态）：
+```
+● evaluate-predictions.timer - Run prediction evaluator every 6 hours
+     Active: active (waiting) since Mon 2026-03-15 06:06:08 UTC; 5h ago
+    Trigger: Mon 2026-03-15 18:06:08 UTC; 35min left
+```
+
+**输出说明（Output explanation）：**
+- `active (running)`：服务正在运行 / Service is actively running
+- `active (waiting)`：timer 在等待下次触发 / Timer is waiting for next trigger
+- `Trigger: 18:06:08 UTC`：下次触发时间 / Next trigger time
+
 ## 5.2 查看日志
 ```bash
+# 查看最近 200 行 systemd 日志
 journalctl -u go-collector -n 200 --no-pager
 journalctl -u ml-service -n 200 --no-pager
 journalctl -u evaluate-predictions.service -n 200 --no-pager
+
+# 实时追踪日志（按 Ctrl+C 停止）
+journalctl -u go-collector -f
+journalctl -u ml-service -f
 ```
+
+正常的 go-collector 日志示例（Normal go-collector log example）：
+```
+Mar 15 10:00:01 ubuntu go-collector[1234]: time="2026-03-15T10:00:01Z" level=info msg="fetching klines" symbol=ETHUSDT interval=1h
+Mar 15 10:01:01 ubuntu go-collector[1234]: time="2026-03-15T10:01:01Z" level=info msg="klines saved" count=1 file=klines_1h.json
+Mar 15 10:01:02 ubuntu go-collector[1234]: time="2026-03-15T10:01:02Z" level=info msg="signal request" url=http://127.0.0.1:9000/predict
+```
+
+**日志术语说明（Log term explanation）：**
+- `fetching klines`：正在从交易所拉取 K 线数据 / Fetching candlestick data from exchange
+- `klines saved`：K 线已保存到文件 / Klines saved to file
+- `signal request`：正在调用 ml-service 获取预测信号 / Calling ml-service for prediction
 
 ## 5.3 重启服务
 ```bash
@@ -231,20 +293,25 @@ sudo systemctl restart ml-service
 
 ## 5.4 手工执行评估
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
   --data-dir ~/ubuntu-wallet/data \
+  --interval 1h \
+  --active-model event_v3 \
   --threshold 0.55 \
   --tp 0.0175 \
   --sl 0.007 \
+  --fee 0.0004 \
   --horizon-bars 6
+deactivate
 ```
 
 ## 5.5 跑模拟交易
 ```bash
 source ~/ubuntu-wallet/venv-analyzer/bin/activate
 python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
+deactivate
 ```
 
 ## 5.6 跑 walk-forward
@@ -257,6 +324,7 @@ python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
   --label-method ternary \
   --confidence-threshold 0.65 \
   --output-csv /tmp/cv_report.csv
+deactivate
 ```
 
 ---
@@ -298,8 +366,11 @@ sudo systemctl restart ml-service
 ```
 
 ### 健康检查
+
+> **注意（Note）**：ml-service 端口为 **9000**，不是 8000。
+
 ```bash
-curl http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 ```
 
 ## 注意

@@ -225,16 +225,22 @@ mkdir -p ~/ubuntu-wallet/data/models
 ---
 
 ## 5.2 部署 ml-service 环境
+
+> **重要**：systemd 服务文件（`systemd/ml-service.service`）使用的 venv 路径是 `ml-service/.venv/`，建议使用此路径保持一致。
+
 ```bash
-cd ~/ubuntu-wallet
-python3 -m venv venv-ml-service
-source venv-ml-service/bin/activate
+cd ~/ubuntu-wallet/ml-service
+python3 -m venv .venv
+source .venv/bin/activate
 pip install --upgrade pip setuptools wheel
-pip install -r ml-service/requirements.txt
+pip install -r requirements.txt
 deactivate
 ```
 
 ## 5.3 部署 analyzer 环境
+
+> 训练、回测、评估、模拟交易使用独立的 `venv-analyzer` 环境（与 ml-service 推理环境分开）。
+
 ```bash
 cd ~/ubuntu-wallet
 python3 -m venv venv-analyzer
@@ -246,12 +252,16 @@ deactivate
 
 ## 5.4 验证环境
 ```bash
-source ~/ubuntu-wallet/venv-ml-service/bin/activate
-python --version
+# 验证 ml-service venv
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
+python --version   # 应显示 Python 3.10.x 或以上
+python -c "import fastapi, uvicorn, pydantic; print('ml-service 依赖正常 / ml-service deps OK')"
 deactivate
 
+# 验证 analyzer venv（如已创建）
 source ~/ubuntu-wallet/venv-analyzer/bin/activate
 python --version
+python -c "import lightgbm, xgboost, sklearn; print('analyzer 依赖正常 / analyzer deps OK')"
 deactivate
 ```
 
@@ -373,6 +383,9 @@ mkdir -p ~/ubuntu-wallet/data/models
 # 10. go-collector 部署
 
 ## 10.1 手工启动测试
+
+> **注意**：ml-service 的 venv 在 `ml-service/.venv/`（由 systemd 服务文件使用），训练/分析脚本使用 `venv-analyzer/`（如有）。对于手工测试 go-collector 二进制文件，直接运行即可：
+
 ```bash
 cd ~/ubuntu-wallet
 source .env 2>/dev/null || true
@@ -397,21 +410,67 @@ source .env 2>/dev/null || true
 # 11. ml-service 部署
 
 ## 11.1 手工启动测试
+
+> **注意**：systemd 服务文件中 ml-service 使用的 venv 路径是 `ml-service/.venv/`。手工测试时建议使用相同路径：
+
 ```bash
 cd ~/ubuntu-wallet/ml-service
-source ~/ubuntu-wallet/venv-ml-service/bin/activate
-python app.py
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+# 启动服务（前台运行，Ctrl+C 停止）
+uvicorn app:app --host 127.0.0.1 --port 9000
+# 或：
+python -m uvicorn app:app --host 127.0.0.1 --port 9000
 ```
+
+启动成功时会输出（Successful startup output）：
+```
+INFO:     Started server process [12345]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:9000 (Press CTRL+C to quit)
+```
+
+**输出说明（Output explanation）：**
+- `Application startup complete`：应用启动完成，模型加载成功
+- `Uvicorn running on http://127.0.0.1:9000`：服务正在监听 9000 端口
 
 ## 11.2 健康检查
+
+> **注意（Note）**：ml-service 默认监听端口 **9000**，不是 8000。
+
 ```bash
-curl http://127.0.0.1:8000/healthz
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 ```
 
+预期输出（Expected output）：
+```json
+{
+    "ok": true,
+    "model_dir": "/home/ubuntu/ubuntu-wallet/models",
+    "data_dir": "/home/ubuntu/ubuntu-wallet/data",
+    "model_version": "event_v3_20260315_120000",
+    "model_expected_n_features": 120,
+    "calibration_available": true,
+    "calibration_method": "isotonic"
+}
+```
+
+**字段说明（Field explanation）：**
+- `ok: true`：服务正常，模型已加载 / Service is healthy, model is loaded
+- `model_version`：当前加载的模型版本号 / Current loaded model version
+- `model_expected_n_features`：模型期望的特征数量 / Number of features the model expects
+- `calibration_available: true`：校准器已加载（建议为 true）/ Calibration artifact is loaded
+- `calibration_method`：校准方法（isotonic 或 sigmoid）/ Calibration method used
+
+如果 `ok` 为 `false`，说明模型未加载，需要检查模型目录是否正确。
+
 重点确认：
-- 服务活着
-- 当前模型版本正确
-- calibration_available 是否符合预期
+- 服务活着（`ok: true`）
+- 当前模型版本正确（`model_version` 不为空）
+- `calibration_available` 为 `true`（若为 false，推理仍可运行，但建议检查模型目录）
 
 ## 11.3 推理测试
 如果已知 `/predict` 入参格式，发送最小测试请求。
@@ -426,17 +485,25 @@ curl http://127.0.0.1:8000/healthz
 # 12. 评估任务部署
 
 ## 12.1 手工测试评估脚本
+
+> **注意**：`evaluate-predictions.service` 使用 `ml-service/.venv`（见 systemd 服务文件），手工运行时也建议使用相同 venv。
+
 ```bash
 cd ~/ubuntu-wallet
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 
 python scripts/evaluate_from_logs.py \
   --log-path data/predictions_log.jsonl \
   --data-dir data \
+  --interval 1h \
+  --active-model event_v3 \
   --threshold 0.55 \
   --tp 0.0175 \
   --sl 0.007 \
+  --fee 0.0004 \
   --horizon-bars 6
+
+deactivate
 ```
 
 ## 12.2 验证点
@@ -481,31 +548,75 @@ python scripts/live_trader_eth_perp_binance.py --mode dry-run
 
 # 14. systemd 完整部署
 
-## 14.1 复制 service 文件
+## 14.0 创建敏感配置文件（重要，不进 Git）
+
+systemd 服务文件通过 `EnvironmentFile` 加载环境变量：
+- `go-collector.service` 读取 `/etc/ubuntu-wallet/collector.env`
+- `check-go-collector.service` 读取 `/etc/ubuntu-wallet/telegram.env`
+
+**必须在启动服务前创建这些文件**：
+
+```bash
+# 创建配置目录
+sudo mkdir -p /etc/ubuntu-wallet
+sudo chmod 755 /etc/ubuntu-wallet
+
+# 从模板复制并填写
+sudo cp ~/ubuntu-wallet/systemd/env/collector.env.example /etc/ubuntu-wallet/collector.env
+sudo cp ~/ubuntu-wallet/systemd/env/telegram.env.example /etc/ubuntu-wallet/telegram.env
+
+# 设置安全权限（只有 root 可读）
+sudo chmod 600 /etc/ubuntu-wallet/*.env
+sudo chown root:root /etc/ubuntu-wallet/*.env
+
+# 编辑填写真实值
+sudo nano /etc/ubuntu-wallet/collector.env
+# 填写内容示例（示例值，不要用真实 key）：
+# COLLECTOR_PORT=8080
+# COLLECT_INTERVAL=60s
+# ML_SERVICE_URL=http://127.0.0.1:9000/predict
+# BINANCE_API_KEY=（如需要）
+# BINANCE_API_SECRET=（如需要）
+
+sudo nano /etc/ubuntu-wallet/telegram.env
+# 填写内容：
+# TELEGRAM_BOT_TOKEN=（你的 Telegram Bot Token）
+# TELEGRAM_CHAT_ID=（你的 Telegram Chat ID）
+```
+
+> **安全警告（Security warning）**：`/etc/ubuntu-wallet/*.env` 文件含有 API Key 等敏感信息，**绝对不要**提交到 Git 仓库或复制到公开位置。
+
+## 14.1 配置 sudoers（允许自愈脚本重启 go-collector）
+
+```bash
+sudo tee /etc/sudoers.d/ubuntu-go-collector-restart >/dev/null <<'EOF'
+ubuntu ALL=NOPASSWD: /bin/systemctl restart go-collector
+EOF
+sudo visudo -cf /etc/sudoers.d/ubuntu-go-collector-restart
+```
+
+## 14.2 复制 service 文件
 ```bash
 sudo cp ~/ubuntu-wallet/systemd/go-collector.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/ml-service.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/evaluate-predictions.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/evaluate-predictions.timer /etc/systemd/system/
-```
-
-如果有：
-- `check-go-collector.service`
-- `check-go-collector.timer`
-
-也一并复制：
-
-```bash
 sudo cp ~/ubuntu-wallet/systemd/check-go-collector.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/check-go-collector.timer /etc/systemd/system/
 ```
 
-## 14.2 重新加载
+## 14.3 创建日志目录
+
+```bash
+mkdir -p ~/ubuntu-wallet/logs
+```
+
+## 14.4 重新加载
 ```bash
 sudo systemctl daemon-reload
 ```
 
-## 14.3 启用服务
+## 14.5 启用服务
 ```bash
 sudo systemctl enable go-collector
 sudo systemctl enable ml-service
@@ -513,21 +624,44 @@ sudo systemctl enable evaluate-predictions.timer
 sudo systemctl enable check-go-collector.timer
 ```
 
-## 14.4 启动服务
+## 14.6 启动服务
 ```bash
-sudo systemctl start go-collector
 sudo systemctl start ml-service
+sudo systemctl start go-collector
 sudo systemctl start evaluate-predictions.timer
 sudo systemctl start check-go-collector.timer
 ```
 
-## 14.5 查看状态
+## 14.7 查看状态
+
 ```bash
-systemctl status go-collector
-systemctl status ml-service
-systemctl status evaluate-predictions.timer
-systemctl status check-go-collector.timer
+systemctl status go-collector --no-pager
+systemctl status ml-service --no-pager
+systemctl status evaluate-predictions.timer --no-pager
+systemctl status check-go-collector.timer --no-pager
 ```
+
+预期输出（Expected output for ml-service）：
+```
+● ml-service.service - ubuntu-wallet ml-service (FastAPI)
+     Loaded: loaded (/etc/systemd/system/ml-service.service; enabled; vendor preset: enabled)
+     Active: active (running) since Mon 2026-03-15 10:00:00 UTC; 5s ago
+   Main PID: 12345 (python)
+      Tasks: 2 (limit: 4915)
+     Memory: 512.0M
+        CPU: 3.421s
+     CGroup: /system.slice/ml-service.service
+             └─12345 /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app ...
+
+Mar 15 10:00:00 ubuntu python[12345]: INFO:     Application startup complete.
+Mar 15 10:00:00 ubuntu python[12345]: INFO:     Uvicorn running on http://127.0.0.1:9000
+```
+
+**输出说明（Output explanation）：**
+- `active (running)`：服务正在运行 / Service is running
+- `enabled`：已设置开机自启 / Set to start on boot
+- `Memory: 512.0M`：内存使用约 512MB（模型加载后）/ Memory usage after model load
+- 最后两行日志来自 uvicorn，表示应用启动完成
 
 ---
 
@@ -575,13 +709,16 @@ git pull origin main
 
 ## 16.2 更新 Python 依赖
 ```bash
-source ~/ubuntu-wallet/venv-ml-service/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 pip install -r ~/ubuntu-wallet/ml-service/requirements.txt
 deactivate
 
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
-pip install -r ~/ubuntu-wallet/python-analyzer/requirements.txt
-deactivate
+# 如果有 venv-analyzer（用于训练/分析）
+if [ -d ~/ubuntu-wallet/venv-analyzer ]; then
+  source ~/ubuntu-wallet/venv-analyzer/bin/activate
+  pip install -r ~/ubuntu-wallet/python-analyzer/requirements.txt
+  deactivate
+fi
 ```
 
 ## 16.3 重新编译 Go collector
@@ -756,6 +893,20 @@ systemctl status evaluate-predictions.timer
 ```bash
 journalctl -u go-collector -n 200 --no-pager
 journalctl -u ml-service -n 200 --no-pager
+
+# 实时追踪
+journalctl -u go-collector -f
+```
+
+## ml-service 健康检查
+```bash
+# 注意：ml-service 端口为 9000
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+```
+
+## go-collector 健康检查
+```bash
+curl -s http://127.0.0.1:8080/api/healthz | python3 -m json.tool
 ```
 
 ## 重启服务
@@ -766,20 +917,25 @@ sudo systemctl restart ml-service
 
 ## 手工跑评估
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
   --data-dir ~/ubuntu-wallet/data \
+  --interval 1h \
+  --active-model event_v3 \
   --threshold 0.55 \
   --tp 0.0175 \
   --sl 0.007 \
+  --fee 0.0004 \
   --horizon-bars 6
+deactivate
 ```
 
-## 手工跑模拟
+## 手工模拟
 ```bash
 source ~/ubuntu-wallet/venv-analyzer/bin/activate
 python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
+deactivate
 ```
 
 ## 手工训练
@@ -790,4 +946,5 @@ python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --tp-pct 0.0175 \
   --sl-pct 0.009 \
   --calibration isotonic
+deactivate
 ```

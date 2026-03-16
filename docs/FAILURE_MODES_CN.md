@@ -104,9 +104,30 @@
 
 ## 排查步骤
 ```bash
-systemctl status go-collector
+systemctl status go-collector --no-pager
 journalctl -u go-collector -n 200 --no-pager
+
+# 也可检查 go-collector 的 HTTP healthz 端点（端口 8080）
+curl -s --max-time 3 http://127.0.0.1:8080/api/healthz | python3 -m json.tool
 ```
+
+**go-collector `/api/healthz` 正常响应示例（Normal response example）：**
+```json
+{
+    "ok": true,
+    "staleness_sec": 45,
+    "files": {
+        "klines_1h": {"exists": true, "last_modified": "2026-03-15T10:00:00Z"},
+        "klines_4h": {"exists": true, "last_modified": "2026-03-15T08:00:00Z"},
+        "klines_1d": {"exists": true, "last_modified": "2026-03-15T00:00:00Z"}
+    }
+}
+```
+
+**字段说明（Field explanation）：**
+- `ok: true`：采集器状态正常 / Collector is healthy
+- `staleness_sec: 45`：数据距离现在 45 秒前更新，正常 / Data was updated 45 seconds ago, normal
+- `staleness_sec` 很大（如 > 3600）：数据很久没有更新，需要检查
 
 ## 处理方法
 1. 修复配置或网络问题
@@ -338,16 +359,21 @@ sudo systemctl restart go-collector
 
 ## 排查命令
 ```bash
-systemctl status ml-service
+systemctl status ml-service --no-pager
 journalctl -u ml-service -n 200 --no-pager
-ss -ltnp | grep 8000
+# 检查端口 9000 是否被占用
+ss -ltnp | grep 9000
 ```
 
+**`ss -ltnp | grep 9000` 输出说明（Output explanation）：**
+- 有输出（如 `LISTEN 0 128 127.0.0.1:9000`）：端口已被占用，可能是服务已运行
+- 无输出：端口未监听，ml-service 未成功启动
+
 ## 处理方法
-- 修正 ExecStart 路径
-- 激活正确 venv
+- 修正 ExecStart 路径（查看服务文件 `/etc/systemd/system/ml-service.service`）
+- 激活正确 venv（应使用 `ml-service/.venv/`，不是系统 Python）
 - 修复模型或配置
-- 修改端口冲突
+- 修改端口冲突（杀掉占用 9000 端口的进程）
 
 ---
 
@@ -357,16 +383,34 @@ ss -ltnp | grep 8000
 - 服务在线
 - 但推理失败
 
+## 排查命令
+
+> **注意（Note）**：ml-service 端口为 **9000**，不是 8000。
+
+```bash
+# 确认 /healthz 正常
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+
+# 构造最小测试请求
+curl -s -X POST http://127.0.0.1:9000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "ETHUSDT", "interval": "1h"}' | python3 -m json.tool
+
+# 查看详细错误
+journalctl -u ml-service -n 100 --no-pager
+```
+
 ## 常见原因
 - 输入 payload 错误
 - feature_builder 异常
-- 某些外部数据缺失
+- 某些外部数据缺失（klines 文件不存在）
 - schema 校验未通过
 
 ## 处理方法
 - 构造最小测试请求逐步排除
 - 查看 ml-service 日志中的堆栈信息
-- 检查请求字段和数据源
+- 检查 `data/raw/klines_*.json` 是否存在且内容正常
+- 确认 `MODEL_DIR` 和 `DATA_DIR` 环境变量指向正确目录
 
 ---
 
@@ -669,3 +713,18 @@ systemd 运行用户和手工用户不同。
 5. daily report + anomaly detection
 6. collector 心跳监控
 7. ml-service 基础 metrics 导出
+
+---
+
+# 附录 B：端口与关键路径速查
+
+| 服务           | 端口  | 关键路径                                          |
+|----------------|-------|---------------------------------------------------|
+| ml-service     | 9000  | `http://127.0.0.1:9000/healthz`                  |
+| go-collector   | 8080  | `http://127.0.0.1:8080/api/healthz`              |
+| venv (ml-service) | -  | `~/ubuntu-wallet/ml-service/.venv/`              |
+| venv (analyzer)   | -  | `~/ubuntu-wallet/venv-analyzer/`                 |
+| 敏感配置目录    | -     | `/etc/ubuntu-wallet/`                            |
+| 评估日志        | -     | `~/ubuntu-wallet/logs/evaluate_predictions.log`  |
+| 健康检查日志    | -     | `~/ubuntu-wallet/check-go-collector.log`         |
+| systemd 日志查看 | -   | `journalctl -u <service-name> -n 200 --no-pager` |
