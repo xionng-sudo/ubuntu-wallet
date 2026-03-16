@@ -690,11 +690,45 @@ echo "=== 候选模型（Candidate）===" && grep -E "threshold=|win_rate|avg_re
 - [ ] `model_meta.json` 包含正确的 `model_version`、`threshold_config`、`calibration_info` 字段
 - [ ] 手工测试 `/predict` 返回正确（`signal` 字段为 LONG/FLAT/SHORT，`model_version` 正确）
 
+## 7.5 先区分：当前仓库实现 vs 推荐团队流程
+
+在继续阅读“晋升 / 回滚 / 退役”之前，**请先明确区分以下两层含义**：
+
+### A. 当前仓库里**已经实现**的行为（As implemented today）
+
+- `train_event_stack_v3.py` 默认把模型文件写到 `~/ubuntu-wallet/models/`
+- `ml-service` 只会从一个目录加载模型：`MODEL_DIR`（默认也是 `~/ubuntu-wallet/models/`）
+- 所谓“晋升新模型”在当前实现里，本质上是：
+  1. 准备好一组新的模型文件
+  2. 覆盖或复制到当前 `MODEL_DIR`
+  3. 重启 `ml-service`
+- 所谓“回滚模型”在当前实现里，本质上是：
+  1. 恢复上一份备份文件
+  2. 重新放回 `MODEL_DIR`
+  3. 重启 `ml-service`
+
+**当前仓库没有内建以下机制：**
+- 没有自动维护 `current / archive / candidates` 目录树
+- 没有模型注册表（model registry）
+- 没有“候选 → 生产”自动切换命令
+- 没有通过 `status=production/candidate/archived` 驱动系统行为的逻辑
+
+### B. 文档里**推荐**的团队运维流程（Recommended operational workflow）
+
+- 用“候选模型 / 生产模型 / 回滚 / 退役”等词，是为了帮助团队建立清晰的运维流程
+- 这些词在本文中主要表示**流程概念**，不代表仓库已经实现了完整的模型版本管理系统
+- 如果团队未来要做更规范的版本管理，可以额外引入：
+  - 独立版本目录（例如 `models/v20260315/`）
+  - 统一备份目录（例如 `models_backup/`）
+  - 甚至进一步演进到 `current / archive / candidates` 这样的目录约定
+
+> **一句话总结**：下面第 8~11 章里的“晋升 / 回滚 / 退役”，在当前仓库中应理解为**人工运维流程**，而不是仓库已内建的自动化模型管理功能。
+
 ---
 
-# 8. 阶段七：模型晋升为生产（Promotion）
+# 8. 阶段七：当前实现下的模型上线 / 晋升流程（Current implementation）
 
-## 8.1 晋升前必须完成的检查
+## 8.1 当前实现的上线前检查
 
 ```bash
 # 检查新训练的模型目录完整性（默认输出到 models/，若使用 --model-dir 则替换路径）
@@ -707,13 +741,15 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 echo "当前生产模型（Current production model）: $(curl -s http://127.0.0.1:9000/healthz | python3 -c 'import sys,json; print(json.load(sys.stdin)["model_version"])')"
 ```
 
-## 8.2 晋升步骤
+## 8.2 当前实现的上线步骤
 
-> **说明**：ml-service 通过 `MODEL_DIR` 环境变量决定加载哪个目录的模型。
+> **当前实现说明**：ml-service 通过 `MODEL_DIR` 环境变量决定加载哪个目录的模型。
 > 默认值是 `<repo_root>/models/`（即 `~/ubuntu-wallet/models/`）。
 > 若训练时使用了 `--model-dir ~/ubuntu-wallet/models/v20260315/`，则需将 `MODEL_DIR` 指向该目录。
+>
+> **重要**：这里的“晋升”不是仓库内建的 promotion 机制，而是人工把新模型文件放到活动目录并重启服务。
 
-### 步骤 1：备份当前生产模型
+### 步骤 1：备份当前活动模型（人工操作）
 
 ```bash
 # 将当前生产模型备份到带时间戳的目录
@@ -724,11 +760,11 @@ echo "备份完成（Backup completed）: $BACKUP_DIR"
 ls -lh "$BACKUP_DIR"
 ```
 
-### 步骤 2a：若候选模型训练到默认目录（`models/`）
+### 步骤 2a：若新模型训练到默认目录（`models/`）
 
-训练脚本默认将模型写入 `models/`，此时候选模型已在正确位置，直接跳到步骤 3。
+训练脚本默认将模型写入 `models/`，此时新模型已在活动目录，直接跳到步骤 3。
 
-### 步骤 2b：若候选模型训练到独立版本目录（推荐）
+### 步骤 2b：若新模型训练到独立版本目录（推荐的人工作业方式）
 
 ```bash
 # 训练时使用: python train_event_stack_v3.py --model-dir ~/ubuntu-wallet/models/v20260315/ ...
@@ -821,7 +857,7 @@ tail -3 ~/ubuntu-wallet/data/predictions_log.jsonl | python3 -m json.tool
 # 注意：model_version 格式是 "event_v3:lightgbm:{ISO时间戳}"
 ```
 
-## 8.3 晋升后观察期
+## 8.3 上线后观察期
 
 新模型上线后，建议至少观察 48 小时：
 
@@ -834,7 +870,7 @@ tail -3 ~/ubuntu-wallet/data/predictions_log.jsonl | python3 -m json.tool
 
 ---
 
-# 9. 阶段八：生产期间持续监控
+# 9. 阶段八：生产期间持续监控（当前实现）
 
 ## 9.1 自动化评估
 
@@ -921,9 +957,9 @@ deactivate
 
 ---
 
-# 10. 阶段九：模型回滚
+# 10. 阶段九：当前实现下的模型回滚（Current implementation）
 
-## 10.1 何时需要回滚
+## 10.1 何时需要回滚（人工恢复备份）
 
 出现以下任一情况应立即回滚：
 
@@ -933,7 +969,9 @@ deactivate
 - feature schema warning 激增（说明特征不匹配）
 - prediction log 停止写入
 
-## 10.2 回滚步骤
+## 10.2 当前实现的回滚步骤
+
+> **当前实现说明**：这里的“回滚”指人工把旧备份文件恢复到 `MODEL_DIR` 并重启服务。仓库本身没有“回滚到上一版本”的内建命令。
 
 ### 步骤 1：确认有可用的备份
 
@@ -1004,7 +1042,7 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 
 ---
 
-# 11. 阶段十：模型退役（Retirement）
+# 11. 阶段十：模型退役（以团队流程为主，不是内建机制）
 
 ## 11.1 何时退役模型
 
@@ -1015,7 +1053,7 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 - 对应数据集已被删除
 - 团队确认不再使用
 
-## 11.2 退役步骤
+## 11.2 推荐的退役记录步骤
 
 ```bash
 # 退役某个备份版本（仅需记录，不必立即删除）
@@ -1051,9 +1089,9 @@ EOF
 
 ---
 
-# 12. 模型文件与目录规范
+# 12. 模型文件与目录规范：当前实现 vs 推荐布局
 
-## 12.1 模型目录结构
+## 12.1 当前实现的模型目录结构
 
 训练脚本默认将所有模型文件写入 `~/ubuntu-wallet/models/`（扁平目录，不分子目录）：
 
@@ -1070,7 +1108,9 @@ EOF
 └── model_meta.json                       # 模型完整元数据
 ```
 
-**版本化管理（可选）**：若要保留多个历史版本，建议用 `--model-dir` 指定独立目录：
+## 12.2 推荐的版本化布局（团队约定，不是当前仓库内建结构）
+
+若要保留多个历史版本，建议用 `--model-dir` 指定独立目录：
 
 ```
 ~/ubuntu-wallet/
@@ -1090,7 +1130,9 @@ EOF
     └── ...
 ```
 
-## 12.2 模型版本号格式
+> **再次强调**：上面的 `models_backup/`、`models/v20260315/` 是推荐的人工作业布局，不是代码里自动维护的目录树。
+
+## 12.3 模型版本号格式
 
 `model_meta.json` 中的 `model_version` 字段格式为：
 
@@ -1106,7 +1148,7 @@ event_v3:lightgbm:{trained_at}
 
 > **注意**：模型版本号中含 `:` 和 `T`，不适合直接用作目录名。若要用目录名区分版本，建议使用纯日期时间格式，如 `v20260315_120000`。
 
-## 12.3 环境变量配置
+## 12.4 环境变量配置
 
 ml-service 通过以下环境变量找到模型：
 
