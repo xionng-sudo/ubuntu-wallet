@@ -335,6 +335,14 @@ func computeAndPersistFeaturesAndSignals(dataDir string) {
 		log.Warnf("signal.AppendHistory(ml) failed: %v", err)
 	}
 
+	// NEW: collector health/debug prediction log (optional)
+	// If set, write ML result into the JSONL file (one line per run).
+	if hp := strings.TrimSpace(os.Getenv("COLLECTOR_PREDICT_HEALTH_LOG_PATH")); hp != "" {
+		if _, err := signal.AppendJSONL(hp, &mlRes); err != nil {
+			log.Warnf("signal.AppendJSONL(health) failed: %v", err)
+		}
+	}
+
 	// update in-memory latest
 	store.mu.Lock()
 	store.LatestFeatures1H = snap
@@ -601,7 +609,7 @@ func analyzePriceLevels() {
 		}
 	}
 
-	// IMPORTANT: initialize as empty slice so JSON encodes to [] not null
+	// IMPORTANT: initialize as empty slice so JSON encodes as [] not null
 	levels := make([]models.PriceLevel, 0)
 	for _, level := range levelMap {
 		if len(level.Buyers) > 0 || len(level.Sellers) > 0 {
