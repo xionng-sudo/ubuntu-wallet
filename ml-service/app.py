@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
@@ -30,6 +32,9 @@ EVENT_V3_P_ENTER = float(os.getenv("EVENT_V3_P_ENTER", "0.65"))
 EVENT_V3_DELTA = float(os.getenv("EVENT_V3_DELTA", "0.0"))
 
 _loaded: Optional[LoadedModel] = None
+
+logger = logging.getLogger("ml-service")
+logger.setLevel(logging.INFO)
 
 
 class PredictRequest(BaseModel):
@@ -161,6 +166,15 @@ def healthz():
     }
 
 
+def _parse_iso_to_utc(dt_str: Optional[str]) -> Optional[datetime]:
+    if not dt_str:
+        return None
+    try:
+        return datetime.fromisoformat(dt_str.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
     if _loaded is None:
@@ -170,6 +184,23 @@ def predict(req: PredictRequest):
     as_of_ts = req.as_of_ts
     symbol = req.symbol  # 现在可能是 None，后面可以让 Go 填进来
 
+    # Extract feature_ts if provided either at top-level or inside features object.
+    request_feature_ts = None
+    if getattr(req, "feature_ts", None):
+        request_feature_ts = req.feature_ts
+    else:
+        # req.features may be a dict (from Go) and may contain its own feature_ts
+        try:
+            feats = req.features
+            if isinstance(feats, dict):
+                request_feature_ts = feats.get("feature_ts") or feats.get("feature_ts_utc")
+        except Exception:
+            request_feature_ts = None
+
+    # Fallback order for as_of cutoff for building features:
+    # request_feature_ts (from caller) -> req.as_of_ts -> None (means latest available)
+    effective_as_of = request_feature_ts or as_of_ts
+
     # Use the appropriate feature builder based on the active model type
     try:
         if _loaded.active_model == "event_v3":
@@ -177,14 +208,14 @@ def predict(req: PredictRequest):
                 data_dir=DATA_DIR,
                 model_dir=_active_model_dir(),
                 expected_n_features=_loaded.expected_n_features,
-                as_of_ts=as_of_ts,
+                as_of_ts=effective_as_of,
             )
         else:
             built = build_latest_feature_row_from_klines(
                 data_dir=DATA_DIR,
                 interval=interval,
                 expected_n_features=_loaded.expected_n_features,
-                as_of_ts=as_of_ts,
+                as_of_ts=effective_as_of,
             )
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"feature_build_failed: {e}")
@@ -194,22 +225,30 @@ def predict(req: PredictRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"predict_failed: {e}")
 
-    # Parse feature timestamp for logging
-    from datetime import datetime
-    feat_ts_raw = built.feature_ts
-    try:
-        if feat_ts_raw:
-            feat_ts = datetime.fromisoformat(str(feat_ts_raw).replace("Z", "+00:00"))
-        else:
-            if as_of_ts:
-                feat_ts = datetime.fromisoformat(as_of_ts.replace("Z", "+00:00"))
-            else:
-                feat_ts = datetime.utcnow()
-    except Exception:
-        feat_ts = datetime.utcnow()
+    # Determine feature timestamp used for logging.
+    # Preference order:
+    # 1) request.feature_ts (if provided, top-level or inside features)
+    # 2) built.feature_ts (from feature builder)
+    # 3) request.as_of_ts (if provided)
+    # 4) current UTC time
+    feat_ts = None
+    # priority: request_feature_ts -> built.feature_ts -> as_of_ts -> now
+    if request_feature_ts:
+        feat_ts = _parse_iso_to_utc(request_feature_ts)
+    if feat_ts is None and getattr(built, "feature_ts", None):
+        feat_ts = _parse_iso_to_utc(str(built.feature_ts))
+    if feat_ts is None and as_of_ts:
+        feat_ts = _parse_iso_to_utc(as_of_ts)
+    if feat_ts is None:
+        feat_ts = datetime.utcnow().astimezone(timezone.utc)
 
     # Apply calibration if available
     cal_p, cal_method = _apply_calibration(_loaded, p)
+
+    # Prepare chosen/built ts strings for responses/logging
+    chosen_ts_str = feat_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    built_ts = getattr(built, "feature_ts", None)
+    logger.info(f"predict: req_feature_ts={request_feature_ts} built_feature_ts={built_ts} chosen_ts={chosen_ts_str}")
 
     # --- event_v3: 3-class multiclass output ---
     # Classes: 0=SHORT, 1=FLAT, 2=LONG
@@ -234,7 +273,7 @@ def predict(req: PredictRequest):
         eff_long = cp_long if cp_long is not None else p_long
         eff_short = cp_short if cp_short is not None else p_short
 
-        as_of_str = f"as_of_ts={as_of_ts}" if as_of_ts else "as_of_ts=latest"
+        as_of_str = f"as_of_ts={effective_as_of}" if effective_as_of else "as_of_ts=latest"
 
         signal = "FLAT"
         confidence = max(p_long, p_short, p_flat)
@@ -248,6 +287,9 @@ def predict(req: PredictRequest):
             signal = "SHORT"
             confidence = p_short
             cal_conf = cp_short
+
+        # include both requested fields in extra for traceability
+        extra_meta = {"as_of_ts_requested": as_of_ts, "feature_ts_requested": request_feature_ts, "effective_as_of_used": effective_as_of}
 
         log_prediction(
             ts=feat_ts,
@@ -267,13 +309,13 @@ def predict(req: PredictRequest):
             calibration_method=cal_method,
             threshold_long=p_enter,
             threshold_short=p_enter,
-            extra={"as_of_ts": as_of_ts},
+            extra=extra_meta,
         )
 
         if signal == "LONG":
             reasons = [
                 f"p_long={p_long:.4f}>={p_enter} delta={p_long - p_short:.4f}>={delta}",
-                f"feature_ts={built.feature_ts}",
+                f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
                 as_of_str,
             ]
             if cal_conf is not None:
@@ -281,7 +323,7 @@ def predict(req: PredictRequest):
         elif signal == "SHORT":
             reasons = [
                 f"p_short={p_short:.4f}>={p_enter} delta={p_short - p_long:.4f}>={delta}",
-                f"feature_ts={built.feature_ts}",
+                f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
                 as_of_str,
             ]
             if cal_conf is not None:
@@ -289,7 +331,7 @@ def predict(req: PredictRequest):
         else:
             reasons = [
                 f"no_signal: p_long={p_long:.4f} p_short={p_short:.4f} p_flat={p_flat:.4f} threshold={p_enter}",
-                f"feature_ts={built.feature_ts}",
+                f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
                 as_of_str,
             ]
 
@@ -322,7 +364,9 @@ def predict(req: PredictRequest):
         cp_long_bin = cp_short_bin = None
         eff_proba_up = proba_up
 
-    as_of_str_final = f"as_of_ts={as_of_ts}" if as_of_ts else "as_of_ts=latest"
+    as_of_str_final = f"as_of_ts={effective_as_of}" if effective_as_of else "as_of_ts=latest"
+
+    extra_meta_bin = {"as_of_ts_requested": as_of_ts, "feature_ts_requested": request_feature_ts, "effective_as_of_used": effective_as_of}
 
     if eff_proba_up >= PROBA_LONG:
         signal = "LONG"
@@ -345,7 +389,7 @@ def predict(req: PredictRequest):
             calibration_method=cal_method,
             threshold_long=PROBA_LONG,
             threshold_short=PROBA_SHORT,
-            extra={"as_of_ts": as_of_ts},
+            extra=extra_meta_bin,
         )
         return PredictResponse(
             signal="LONG",
@@ -355,7 +399,7 @@ def predict(req: PredictRequest):
             model_version=_loaded.model_version,
             reasons=[
                 f"proba_up={proba_up:.4f}>= {PROBA_LONG}",
-                f"feature_ts={built.feature_ts}",
+                f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
                 as_of_str_final,
             ],
         )
@@ -381,7 +425,7 @@ def predict(req: PredictRequest):
             calibration_method=cal_method,
             threshold_long=PROBA_LONG,
             threshold_short=PROBA_SHORT,
-            extra={"as_of_ts": as_of_ts},
+            extra=extra_meta_bin,
         )
         return PredictResponse(
             signal="SHORT",
@@ -391,7 +435,7 @@ def predict(req: PredictRequest):
             model_version=_loaded.model_version,
             reasons=[
                 f"proba_up={proba_up:.4f}<= {PROBA_SHORT}",
-                f"feature_ts={built.feature_ts}",
+                f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
                 as_of_str_final,
             ],
         )
@@ -416,7 +460,7 @@ def predict(req: PredictRequest):
         calibration_method=cal_method,
         threshold_long=PROBA_LONG,
         threshold_short=PROBA_SHORT,
-        extra={"as_of_ts": as_of_ts},
+        extra=extra_meta_bin,
     )
     return PredictResponse(
         signal="FLAT",
@@ -426,7 +470,7 @@ def predict(req: PredictRequest):
         model_version=_loaded.model_version,
         reasons=[
             f"dead_zone: {PROBA_SHORT} < {proba_up:.4f} < {PROBA_LONG}",
-            f"feature_ts={built.feature_ts}",
+            f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
             as_of_str_final,
         ],
     )
