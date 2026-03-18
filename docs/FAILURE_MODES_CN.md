@@ -725,8 +725,8 @@ systemd 运行用户和手工用户不同。
 | venv (ml-service) | -  | `~/ubuntu-wallet/ml-service/.venv/`              |
 | venv (analyzer)   | -  | `~/ubuntu-wallet/venv-analyzer/`                 |
 | 敏感配置目录    | -     | `/etc/ubuntu-wallet/`                            |
-| 评估日志        | -     | `~/ubuntu-wallet/logs/evaluate_predictions.log`  |
-| 健康检查日志    | -     | `~/ubuntu-wallet/check-go-collector.log`         |
+| 评估日志        | -     | `~/ubuntu-wallet/data/logs/evaluate_predictions.log`  |
+| 健康检查日志    | -     | `~/ubuntu-wallet/data/logs/check-go-collector.log`    |
 | systemd 日志查看 | -   | `journalctl -u <service-name> -n 200 --no-pager` |
 
 ---

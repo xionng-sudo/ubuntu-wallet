@@ -130,5 +130,5 @@ journalctl -u check-go-collector.service -n 200 --no-pager
 systemctl list-timers --all | grep check-go-collector || true
 
 # 查看自愈脚本日志文件（如果你写入了该文件）
-tail -n 200 /home/ubuntu/ubuntu-wallet/check-go-collector.log || true
+tail -n 200 /home/ubuntu/ubuntu-wallet/data/logs/check-go-collector.log || true
 ```

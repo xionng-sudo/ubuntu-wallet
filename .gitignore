@@ -40,6 +40,10 @@ __pycache__/
 check-go-collector.log
 check-go-collector.log.*
 *.gz
+data/logs/*.log
+data/logs/*.log.*
+data/logs/*.jsonl
+!data/logs/.gitkeep
 
 # --- local ops scripts & backups (machine specific; may include secrets) ---
 /check-go-collector.sh

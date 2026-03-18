@@ -9,12 +9,13 @@ User=ubuntu
 Environment=APP_ROOT=/home/ubuntu/ubuntu-wallet
 EnvironmentFile=-/etc/ubuntu-wallet/ml-service.env
 WorkingDirectory=${APP_ROOT}/scripts
+ExecStartPre=/bin/mkdir -p /home/ubuntu/ubuntu-wallet/data/logs
 ExecStart=/bin/bash -c 'source ${APP_ROOT}/ml-service/.venv/bin/activate && \
   python ${APP_ROOT}/scripts/report_drift.py \
     --train-stats ${APP_ROOT}/data/models/current/train_feature_stats.json \
     --log-path ${APP_ROOT}/data/predictions_log.jsonl \
     --output-dir ${APP_ROOT}/data/reports \
-    >> ${APP_ROOT}/logs/drift_monitor.log 2>&1'
+    >> ${APP_ROOT}/data/logs/drift_monitor.log 2>&1'
 
 [Install]
 WantedBy=multi-user.target
