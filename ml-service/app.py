@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import glob as _glob
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -102,7 +104,6 @@ def _startup():
 
 def _latest_report_path(data_dir: str, pattern: str) -> Optional[str]:
     """Return the path of the most recent file matching pattern under data_dir/reports/."""
-    import glob as _glob
     reports_dir = os.path.join(data_dir, "reports")
     matches = _glob.glob(os.path.join(reports_dir, pattern))
     if not matches:
@@ -112,7 +113,6 @@ def _latest_report_path(data_dir: str, pattern: str) -> Optional[str]:
 
 def _latest_exog_ts(data_dir: str, symbol: str = "ETHUSDT") -> Optional[str]:
     """Return the timestamp of the latest exog snapshot for symbol, or None."""
-    import json as _json
     path = os.path.join(data_dir, "raw", f"exog_{symbol}.jsonl")
     if not os.path.exists(path):
         return None
@@ -128,7 +128,7 @@ def _latest_exog_ts(data_dir: str, symbol: str = "ETHUSDT") -> Optional[str]:
     if last_line is None:
         return None
     try:
-        row = _json.loads(last_line)
+        row = json.loads(last_line)
         return row.get("timestamp")
     except Exception:
         return None

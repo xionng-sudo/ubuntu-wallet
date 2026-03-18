@@ -17,6 +17,7 @@ import argparse
 import json
 import math
 import os
+import random
 import sys
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -125,7 +126,6 @@ def run_drift_report(
         std_drift = abs(live_std - train_std) / denom_std
 
         # PSI: reconstruct approximate training distribution from mean/std (Gaussian approximation)
-        import random
         rng = random.Random(42)
         if train_std > 0:
             synthetic_train = [rng.gauss(train_mean, train_std) for _ in range(max(len(live_vals), 50))]

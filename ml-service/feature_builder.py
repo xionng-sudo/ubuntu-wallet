@@ -61,8 +61,6 @@ def load_exog_features(
         logger.warning("load_exog_features: file not found: %s", path)
         return zero
 
-    import json as _json
-
     rows: List[Any] = []
     try:
         with open(path, "r", encoding="utf-8") as f:
@@ -71,7 +69,7 @@ def load_exog_features(
                 if not line:
                     continue
                 try:
-                    rows.append(_json.loads(line))
+                    rows.append(json.loads(line))
                 except Exception:
                     continue
     except Exception as exc:
