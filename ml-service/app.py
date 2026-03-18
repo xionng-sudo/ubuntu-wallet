@@ -1,14 +1,23 @@
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
+import sys
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
+
+# Add repo root (one level up from ml-service/) so the `common` package is importable
+# whether this file is run directly or imported in tests.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from common.settings import get_settings
 from feature_builder import build_event_v3_feature_row, build_latest_feature_row_from_klines
 from model_loader import (
     LoadedModel,
@@ -164,6 +173,16 @@ def healthz():
     except Exception:
         loaded_model_version = loaded_trained_at = expected_n = calibration_available = calibration_method = None
 
+    # Stage + feature flags
+    try:
+        _s = get_settings()
+        stage_info: Dict[str, Any] = {
+            "stage": _s.STAGE.value,
+            "flags": {f.name: getattr(_s.flags, f.name) for f in dataclasses.fields(_s.flags)},
+        }
+    except Exception:
+        stage_info = {"stage": "unknown", "flags": {}}
+
     return {
         "ok": True,
         "model_dir": MODEL_DIR,
@@ -175,6 +194,7 @@ def healthz():
         "calibration_available": calibration_available,
         "calibration_method": calibration_method,
         "registry": registry_info,
+        **stage_info,
     }
 
 
