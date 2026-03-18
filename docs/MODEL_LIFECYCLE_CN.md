@@ -946,7 +946,7 @@ journalctl -u evaluate-predictions.service -n 50 --no-pager
 
 ```bash
 # 评估日志存储在固定位置
-tail -100 ~/ubuntu-wallet/logs/evaluate_predictions.log
+tail -100 ~/ubuntu-wallet/data/logs/evaluate_predictions.log
 
 # 预期输出（Expected output）示例：
 # [2026-03-15 06:06:25] Running evaluation...

@@ -9,4 +9,5 @@ User=ubuntu
 Group=ubuntu
 
 EnvironmentFile=/etc/ubuntu-wallet/telegram.env
-ExecStart=/usr/bin/env bash -lc '/home/ubuntu/ubuntu-wallet/scripts/ops/check-go-collector.sh >> /home/ubuntu/ubuntu-wallet/check-go-collector.log 2>&1'
+ExecStartPre=/bin/mkdir -p /home/ubuntu/ubuntu-wallet/data/logs
+ExecStart=/usr/bin/env bash -lc '/home/ubuntu/ubuntu-wallet/scripts/ops/check-go-collector.sh >> /home/ubuntu/ubuntu-wallet/data/logs/check-go-collector.log 2>&1'

@@ -625,7 +625,7 @@ sudo cp ~/ubuntu-wallet/systemd/check-go-collector.timer /etc/systemd/system/
 ## 14.3 创建日志目录
 
 ```bash
-mkdir -p ~/ubuntu-wallet/logs
+mkdir -p ~/ubuntu-wallet/data/logs
 ```
 
 ## 14.4 重新加载

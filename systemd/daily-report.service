@@ -8,6 +8,7 @@ User=ubuntu
 WorkingDirectory=/home/ubuntu/ubuntu-wallet/scripts
 # Activate the ml-service venv; it must install ml-service/requirements.txt
 # (including requests, which is used by shared reporting/backtest utilities).
+ExecStartPre=/bin/mkdir -p /home/ubuntu/ubuntu-wallet/data/logs
 ExecStart=/bin/bash -c 'source /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/activate && \
   python /home/ubuntu/ubuntu-wallet/scripts/generate_daily_report.py \
     --log-path /home/ubuntu/ubuntu-wallet/data/predictions_log.jsonl \
@@ -19,7 +20,7 @@ ExecStart=/bin/bash -c 'source /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/a
     --fee 0.0004 \
     --horizon-bars 6 \
     --report-dir /home/ubuntu/ubuntu-wallet/data/reports \
-    >> /home/ubuntu/ubuntu-wallet/logs/daily_report.log 2>&1'
+    >> /home/ubuntu/ubuntu-wallet/data/logs/daily_report.log 2>&1'
 
 [Install]
 WantedBy=multi-user.target

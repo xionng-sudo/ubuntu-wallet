@@ -255,8 +255,8 @@ deactivate
 | `~/ubuntu-wallet/data/raw/klines_1d.json`     | 日线 K 线数据（采集后生成）            |
 | `~/ubuntu-wallet/models/`                     | 模型文件目录（训练默认输出，服务加载源）|
 | `~/ubuntu-wallet/models_backup/`              | 模型备份目录（建议人工维护）           |
-| `~/ubuntu-wallet/logs/evaluate_predictions.log` | 评估任务日志（部署后写入）          |
-| `~/ubuntu-wallet/check-go-collector.log`      | 健康检查日志（部署后写入）             |
+| `~/ubuntu-wallet/data/logs/evaluate_predictions.log` | 评估任务日志（部署后写入）       |
+| `~/ubuntu-wallet/data/logs/check-go-collector.log`   | 健康检查日志（部署后写入）       |
 | `/etc/ubuntu-wallet/collector.env`            | 交易所 API Key 配置（服务器本地）      |
 | `/etc/ubuntu-wallet/telegram.env`             | Telegram 通知配置（服务器本地）        |
 | `~/ubuntu-wallet/bin/go-collector`            | go-collector 编译产物（构建后生成）    |

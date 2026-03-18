@@ -161,7 +161,7 @@ curl -fsS --max-time 3 http://127.0.0.1:8080/api/healthz | jq .
 ```bash
 systemctl list-timers --all | grep check-go-collector || true
 journalctl -u check-go-collector.service -n 80 --no-pager
-tail -n 200 /home/ubuntu/ubuntu-wallet/check-go-collector.log || true
+tail -n 200 /home/ubuntu/ubuntu-wallet/data/logs/check-go-collector.log || true
 ```
 
 ---
