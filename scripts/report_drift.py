@@ -8,8 +8,15 @@ Usage:
 
 Controlled by ENABLE_DRIFT_MONITOR env var. If set to "false", exits 0 with no-op message.
 
-Train stats JSON format:
-  {"feature_name": {"mean": float, "std": float, "missing_rate": float}, ...}
+Train stats JSON format (two variants are supported):
+  Bootstrap baseline (preferred):
+    {"feature_name": {"mean": float, "std": float, "missing_rate": float,
+                      "values": [float, ...]}, ...}
+  Summary-only (Gaussian CDF fallback):
+    {"feature_name": {"mean": float, "std": float, "missing_rate": float}, ...}
+
+When "values" is present PSI is computed against the actual training histogram.
+When absent the Gaussian CDF derived from mean/std is used as the expected baseline.
 """
 from __future__ import annotations
 
@@ -47,17 +54,63 @@ def _normal_cdf(x: float, mean: float, std: float) -> float:
     return 0.5 * (1.0 + math.erf((x - mean) / (std * math.sqrt(2.0))))
 
 
-def _compute_psi_histogram(
+def _psi_from_bins(
+    train_pct: List[float],
+    live_pct: List[float],
+) -> float:
+    """Compute PSI given two lists of per-bin proportions (same length, same bins)."""
+    eps = 1e-6
+    psi = 0.0
+    for tp, lp in zip(train_pct, live_pct):
+        tp = max(tp, eps)
+        lp = max(lp, eps)
+        psi += (lp - tp) * math.log(lp / tp)
+    return round(psi, 6)
+
+
+def _compute_psi_bootstrap(
+    train_vals: List[float],
+    live_vals: List[float],
+    n_bins: int = 10,
+) -> Optional[float]:
+    """PSI using actual training sample values as the baseline histogram.
+
+    Bin edges are computed from the union of both distributions so the same
+    bins are used for expected and observed proportions.
+    """
+    if not train_vals or not live_vals:
+        return None
+
+    all_vals = train_vals + live_vals
+    min_v, max_v = min(all_vals), max(all_vals)
+    if max_v == min_v:
+        return 0.0
+
+    bin_width = (max_v - min_v) / n_bins
+    eps = 1e-6
+
+    def _proportions(vals: List[float]) -> List[float]:
+        counts = [0.0] * n_bins
+        for v in vals:
+            idx = int((v - min_v) / bin_width)
+            idx = min(idx, n_bins - 1)
+            counts[idx] += 1.0
+        total = float(len(vals))
+        return [max(c / total, eps) for c in counts]
+
+    return _psi_from_bins(_proportions(train_vals), _proportions(live_vals))
+
+
+def _compute_psi_cdf_baseline(
     train_mean: float,
     train_std: float,
     live_vals: List[float],
     n_bins: int = 10,
 ) -> Optional[float]:
-    """Compute PSI using Gaussian CDF as training histogram baseline.
+    """PSI using Gaussian CDF as training baseline (fallback when values unavailable).
 
-    Bin edges are derived from the live-data range.  For each bin the expected
-    training proportion is computed from the Gaussian CDF so that the result
-    is deterministic and does not depend on random sampling.
+    Bin edges are derived from the live-data range.  Expected training proportions
+    are computed analytically from the Gaussian CDF so the result is deterministic.
     """
     if not live_vals:
         return None
@@ -87,15 +140,11 @@ def _compute_psi_histogram(
         p = _normal_cdf(high, train_mean, train_std) - _normal_cdf(low, train_mean, train_std)
         train_pct_raw.append(max(p, eps))
 
-    # Normalize to sum to 1 (CDF endpoints may not be exactly 0 and 1)
+    # Normalise so proportions sum to 1 (CDF endpoints may not span exactly [0,1])
     total_train = sum(train_pct_raw)
     train_pct = [p / total_train for p in train_pct_raw]
 
-    psi = 0.0
-    for tp, lp in zip(train_pct, live_pct):
-        psi += (lp - tp) * math.log(lp / tp)
-
-    return round(psi, 6)
+    return _psi_from_bins(train_pct, live_pct)
 
 
 # ---------------------------------------------------------------------------
@@ -148,8 +197,20 @@ def run_drift_report(
         mean_drift = abs(live_mean - train_mean) / denom_std
         std_drift = abs(live_std - train_std) / denom_std
 
-        # PSI: use Gaussian CDF histogram baseline derived from train_mean/train_std
-        psi = _compute_psi_histogram(train_mean, train_std, live_vals) if live_vals else None
+        # PSI: use actual training values when available (bootstrap baseline),
+        # otherwise fall back to Gaussian CDF derived from mean/std.
+        train_values: Optional[List[float]] = None
+        raw_vals = stats.get("values")
+        if raw_vals and isinstance(raw_vals, list):
+            try:
+                train_values = [float(v) for v in raw_vals if v is not None]
+            except (TypeError, ValueError):
+                train_values = None
+
+        if train_values:
+            psi = _compute_psi_bootstrap(train_values, live_vals) if live_vals else None
+        else:
+            psi = _compute_psi_cdf_baseline(train_mean, train_std, live_vals) if live_vals else None
 
         results[feat] = {
             "train_mean": round(train_mean, 6),
@@ -161,6 +222,7 @@ def run_drift_report(
             "mean_drift": round(mean_drift, 4),
             "std_drift": round(std_drift, 4),
             "psi": psi,
+            "psi_baseline": "bootstrap" if train_values else "gaussian_cdf",
             "n_live_vals": len(live_vals),
         }
 
