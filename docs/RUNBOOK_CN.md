@@ -621,3 +621,68 @@ DRY-RUN 是进入真仓前的最后演练。
 - prediction log 失真
 - 风控异常
 - 连续系统错误
+
+---
+
+# 16. Feature Flags 运维说明
+
+## 16.1 Flag 一览
+
+| 环境变量                | 默认  | 功能                            |
+|------------------------|-------|---------------------------------|
+| `ENABLE_EXOG_FEATURES` | false | 外生特征（资金费率/持仓量/买卖比）|
+| `ENABLE_DRIFT_MONITOR` | false | 特征漂移监控（每6h）             |
+| `ENABLE_CALIB_REPORT`  | false | 校准质量报告（每周）             |
+
+## 16.2 查看当前 Flag 状态
+
+```bash
+# 通过 healthz 端点查看
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool | grep -A5 '"flags"'
+```
+
+## 16.3 临时启用 Flag
+
+```bash
+# 编辑 EnvironmentFile
+sudo nano /etc/ubuntu-wallet/ml-service.env
+# 修改 ENABLE_DRIFT_MONITOR=true
+sudo systemctl restart ml-service
+```
+
+## 16.4 手工运行 Drift Monitor
+
+```bash
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
+ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+  --train-stats ~/ubuntu-wallet/data/models/current/train_feature_stats.json \
+  --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
+  --output-dir ~/ubuntu-wallet/data/reports \
+  --dry-run
+```
+
+## 16.5 手工运行 Calibration Report
+
+```bash
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
+ENABLE_CALIB_REPORT=true python ~/ubuntu-wallet/python-analyzer/calibration_report.py \
+  --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
+  --output-dir ~/ubuntu-wallet/data/reports \
+  --dry-run
+```
+
+## 16.6 查看报告文件
+
+```bash
+ls -lh ~/ubuntu-wallet/data/reports/
+# drift_YYYY-MM-DD.{json,md}
+# calib_report_YYYY-MM-DD.{json,md,png}
+```
+
+## 16.7 Drift Monitor Timer 状态
+
+```bash
+sudo systemctl status drift-monitor.timer
+sudo systemctl list-timers drift-monitor.timer
+journalctl -u drift-monitor.service -n 50 --no-pager
+```

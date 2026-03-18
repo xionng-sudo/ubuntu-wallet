@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import glob as _glob
+import json
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -100,6 +102,38 @@ def _startup():
     _loaded = load_model(MODEL_DIR)
 
 
+def _latest_report_path(data_dir: str, pattern: str) -> Optional[str]:
+    """Return the path of the most recently modified file matching pattern under data_dir/reports/."""
+    reports_dir = os.path.join(data_dir, "reports")
+    matches = _glob.glob(os.path.join(reports_dir, pattern))
+    if not matches:
+        return None
+    return max(matches, key=os.path.getmtime)
+
+
+def _latest_exog_ts(data_dir: str, symbol: str = "ETHUSDT") -> Optional[str]:
+    """Return the timestamp of the latest exog snapshot for symbol, or None."""
+    path = os.path.join(data_dir, "raw", f"exog_{symbol}.jsonl")
+    if not os.path.exists(path):
+        return None
+    last_line = None
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    last_line = line
+    except Exception:
+        return None
+    if last_line is None:
+        return None
+    try:
+        row = json.loads(last_line)
+        return row.get("timestamp")
+    except Exception:
+        return None
+
+
 @app.get("/healthz")
 def healthz():
     """
@@ -175,6 +209,14 @@ def healthz():
         "calibration_available": calibration_available,
         "calibration_method": calibration_method,
         "registry": registry_info,
+        "flags": {
+            "ENABLE_EXOG_FEATURES": os.environ.get("ENABLE_EXOG_FEATURES", "false"),
+            "ENABLE_DRIFT_MONITOR": os.environ.get("ENABLE_DRIFT_MONITOR", "false"),
+            "ENABLE_CALIB_REPORT": os.environ.get("ENABLE_CALIB_REPORT", "false"),
+        },
+        "latest_drift_report": _latest_report_path(DATA_DIR, "drift_*.json"),
+        "latest_calib_report": _latest_report_path(DATA_DIR, "calib_report_*.json"),
+        "exog_data_ts": _latest_exog_ts(DATA_DIR),
     }
 
 

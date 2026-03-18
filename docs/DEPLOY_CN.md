@@ -972,3 +972,62 @@ python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --calibration isotonic
 deactivate
 ```
+
+---
+
+## 21. Feature Flags / Stage 控制说明
+
+系统通过环境变量控制可选功能的开启与关闭。所有 flag 默认为 `false`（关闭），需要显式启用。
+
+### 21.1 Flag 一览
+
+| 环境变量                | 默认值  | 功能说明                                    | 建议启用阶段        |
+|------------------------|---------|---------------------------------------------|---------------------|
+| `ENABLE_EXOG_FEATURES` | `false` | 外生特征采集（资金费率/持仓量/买卖比）       | DRY-RUN 验证后启用  |
+| `ENABLE_DRIFT_MONITOR` | `false` | 特征漂移监控（每6小时运行，生成报告）        | 上线后建议开启      |
+| `ENABLE_CALIB_REPORT`  | `false` | 校准质量报告（每周生成可靠性曲线+Brier分数） | 上线后建议开启      |
+
+### 21.2 设置方式
+
+在 `/etc/ubuntu-wallet/ml-service.env` 中添加（参考 `systemd/env/ml-service.env.example`）：
+
+```ini
+ENABLE_EXOG_FEATURES=true
+ENABLE_DRIFT_MONITOR=true
+ENABLE_CALIB_REPORT=true
+```
+
+systemd 服务通过 `EnvironmentFile` 加载：
+
+```ini
+EnvironmentFile=-/etc/ubuntu-wallet/ml-service.env
+```
+
+修改后需要重启相关服务：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl restart ml-service go-collector
+```
+
+### 21.3 各阶段建议配置
+
+| Stage         | EXOG_FEATURES | DRIFT_MONITOR | CALIB_REPORT |
+|---------------|---------------|---------------|--------------|
+| 离线研究       | false         | false         | false        |
+| DRY-RUN       | false         | true          | false        |
+| 生产上线初期   | false         | true          | true         |
+| 生产稳定后     | true          | true          | true         |
+
+### 21.4 Drift Monitor 相关文件
+
+- 脚本：`scripts/report_drift.py`
+- systemd：`systemd/drift-monitor.service` / `systemd/drift-monitor.timer`
+- 输出：`data/reports/drift_YYYY-MM-DD.{json,md}`
+- 训练统计：`data/models/current/train_feature_stats.json`（由训练脚本生成）
+
+### 21.5 Calibration Report 相关文件
+
+- 脚本：`python-analyzer/calibration_report.py`
+- systemd：`systemd/calibration-report.service` / `systemd/calibration-report.timer`
+- 输出：`data/reports/calib_report_YYYY-MM-DD.{json,md,png}`

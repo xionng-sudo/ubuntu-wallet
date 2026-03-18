@@ -33,6 +33,79 @@ SUPPORTED_INTERVALS = {"1h", "4h", "1d"}
 
 
 # ---------------------------------------------------------------------------
+# Exogenous features
+# ---------------------------------------------------------------------------
+
+def load_exog_features(
+    data_dir: str,
+    symbol: str = "ETHUSDT",
+    as_of_ts: Optional[str] = None,
+) -> Dict[str, float]:
+    """Load latest exogenous features from data/raw/exog_{symbol}.jsonl.
+
+    Returns a dict with keys exog_funding_rate, exog_open_interest,
+    exog_taker_buy_ratio, all zero if the feature flag is off or the file
+    does not exist.
+    """
+    zero: Dict[str, float] = {
+        "exog_funding_rate": 0.0,
+        "exog_open_interest": 0.0,
+        "exog_taker_buy_ratio": 0.0,
+    }
+
+    if os.environ.get("ENABLE_EXOG_FEATURES", "false").strip().lower() != "true":
+        return zero
+
+    path = os.path.join(data_dir, "raw", f"exog_{symbol}.jsonl")
+    if not os.path.exists(path):
+        logger.warning("load_exog_features: file not found: %s", path)
+        return zero
+
+    rows: List[Any] = []
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except Exception:
+                    continue
+    except Exception as exc:
+        logger.warning("load_exog_features: failed to read %s: %s", path, exc)
+        return zero
+
+    if not rows:
+        return zero
+
+    if as_of_ts is not None:
+        try:
+            cutoff = _to_utc_dt(as_of_ts)
+            filtered = []
+            for r in rows:
+                ts_raw = r.get("timestamp")
+                if ts_raw is None:
+                    continue
+                try:
+                    row_ts = _to_utc_dt(ts_raw)
+                    if row_ts <= cutoff:
+                        filtered.append(r)
+                except Exception:
+                    continue
+            rows = filtered if filtered else rows
+        except Exception:
+            pass
+
+    latest = rows[-1]
+    return {
+        "exog_funding_rate": float(latest.get("funding_rate", 0.0)),
+        "exog_open_interest": float(latest.get("open_interest", 0.0)),
+        "exog_taker_buy_ratio": float(latest.get("taker_buy_ratio", 0.0)),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Schema validation
 # ---------------------------------------------------------------------------
 
@@ -449,6 +522,20 @@ def build_event_v3_feature_row(
         raise ValueError("event_v3 merged feature df empty")
 
     feature_columns = _load_feature_columns_event_v3(model_dir)
+
+    # Inject exogenous features into the last row if the flag is enabled.
+    # Only write into columns that are already in the model's feature_columns schema;
+    # this avoids adding spurious extra columns that the reindex would drop anyway
+    # and keeps schema validation noise-free.
+    if os.environ.get("ENABLE_EXOG_FEATURES", "false").strip().lower() == "true":
+        exog = load_exog_features(data_dir=data_dir, as_of_ts=as_of_ts)
+        schema_set = set(feature_columns)
+        for col, val in exog.items():
+            if col not in schema_set:
+                continue  # skip features not in the current model schema
+            if col not in merged.columns:
+                merged[col] = 0.0
+            merged.iloc[-1, merged.columns.get_loc(col)] = val
 
     # Run schema validation BEFORE reindex to detect drift
     schema_result = validate_feature_schema(merged, feature_columns, warn_on_missing=True)
