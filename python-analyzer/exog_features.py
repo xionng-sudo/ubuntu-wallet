@@ -17,7 +17,12 @@ import sys
 from datetime import datetime, timezone
 from typing import Optional
 
-import pandas as pd
+try:
+    import pandas as pd
+    _PANDAS_AVAILABLE = True
+except ImportError:
+    pd = None  # type: ignore
+    _PANDAS_AVAILABLE = False
 
 
 def load_exog_jsonl(path: str, as_of_ts: Optional[str] = None) -> pd.DataFrame:
@@ -54,7 +59,8 @@ def load_exog_jsonl(path: str, as_of_ts: Optional[str] = None) -> pd.DataFrame:
         df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
 
     if as_of_ts is not None and "timestamp" in df.columns:
-        cutoff = pd.Timestamp(as_of_ts, tz="UTC") if not as_of_ts.endswith("Z") else pd.Timestamp(as_of_ts)
+        # pandas handles both 'Z' suffix and '+HH:MM' offset correctly
+        cutoff = pd.Timestamp(as_of_ts).tz_localize("UTC") if pd.Timestamp(as_of_ts).tzinfo is None else pd.Timestamp(as_of_ts).tz_convert("UTC")
         df = df[df["timestamp"] <= cutoff].reset_index(drop=True)
 
     return df

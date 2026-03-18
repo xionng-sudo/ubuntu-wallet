@@ -529,7 +529,8 @@ def build_event_v3_feature_row(
     if os.environ.get("ENABLE_EXOG_FEATURES", "false").strip().lower() == "true":
         exog = load_exog_features(data_dir=data_dir, as_of_ts=as_of_ts)
         for col, val in exog.items():
-            merged[col] = 0.0
+            if col not in merged.columns:
+                merged[col] = 0.0
             merged.iloc[-1, merged.columns.get_loc(col)] = val
 
     # Run schema validation BEFORE reindex to detect drift

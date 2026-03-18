@@ -229,11 +229,11 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    args = _parse_args()
+
     if os.environ.get("ENABLE_DRIFT_MONITOR", "false").strip().lower() == "false":
         print("ENABLE_DRIFT_MONITOR=false, skipping.")
         sys.exit(0)
-
-    args = _parse_args()
 
     if not os.path.exists(args.train_stats):
         print(f"ERROR: train-stats file not found: {args.train_stats}", file=sys.stderr)

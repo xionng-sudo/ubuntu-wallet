@@ -207,8 +207,9 @@ def _try_save_plot(rel_curve: List[Dict[str, Any]], output_dir: str, today: str)
         matplotlib.use("Agg")
         import matplotlib.pyplot as plt
 
-        xs = [b["mean_confidence"] for b in rel_curve if b["mean_confidence"] is not None and b["fraction_positive"] is not None]
-        ys = [b["fraction_positive"] for b in rel_curve if b["mean_confidence"] is not None and b["fraction_positive"] is not None]
+        valid_bins = [b for b in rel_curve if b["mean_confidence"] is not None and b["fraction_positive"] is not None]
+        xs = [b["mean_confidence"] for b in valid_bins]
+        ys = [b["fraction_positive"] for b in valid_bins]
 
         fig, ax = plt.subplots(figsize=(6, 5))
         ax.plot([0, 1], [0, 1], "k--", label="Perfect calibration")
@@ -272,11 +273,11 @@ def _parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    args = _parse_args()
+
     if os.environ.get("ENABLE_CALIB_REPORT", "false").strip().lower() == "false":
         print("ENABLE_CALIB_REPORT=false, skipping.")
         sys.exit(0)
-
-    args = _parse_args()
 
     if not os.path.exists(args.log_path):
         print(f"ERROR: log-path not found: {args.log_path}", file=sys.stderr)
