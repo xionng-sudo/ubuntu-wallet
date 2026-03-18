@@ -524,11 +524,15 @@ def build_event_v3_feature_row(
     feature_columns = _load_feature_columns_event_v3(model_dir)
 
     # Inject exogenous features into the last row if the flag is enabled.
-    # They are added as new columns so schema validation sees them as "extra"
-    # unless the training schema already includes them.
+    # Only write into columns that are already in the model's feature_columns schema;
+    # this avoids adding spurious extra columns that the reindex would drop anyway
+    # and keeps schema validation noise-free.
     if os.environ.get("ENABLE_EXOG_FEATURES", "false").strip().lower() == "true":
         exog = load_exog_features(data_dir=data_dir, as_of_ts=as_of_ts)
+        schema_set = set(feature_columns)
         for col, val in exog.items():
+            if col not in schema_set:
+                continue  # skip features not in the current model schema
             if col not in merged.columns:
                 merged[col] = 0.0
             merged.iloc[-1, merged.columns.get_loc(col)] = val

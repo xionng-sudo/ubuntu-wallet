@@ -103,12 +103,12 @@ def _startup():
 
 
 def _latest_report_path(data_dir: str, pattern: str) -> Optional[str]:
-    """Return the path of the most recent file matching pattern under data_dir/reports/."""
+    """Return the path of the most recently modified file matching pattern under data_dir/reports/."""
     reports_dir = os.path.join(data_dir, "reports")
     matches = _glob.glob(os.path.join(reports_dir, pattern))
     if not matches:
         return None
-    return max(matches)
+    return max(matches, key=os.path.getmtime)
 
 
 def _latest_exog_ts(data_dir: str, symbol: str = "ETHUSDT") -> Optional[str]:

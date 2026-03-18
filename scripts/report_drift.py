@@ -17,7 +17,6 @@ import argparse
 import json
 import math
 import os
-import random
 import sys
 from datetime import date
 from typing import Any, Dict, List, Optional
@@ -41,35 +40,59 @@ def _load_jsonl(path: str, last_n: int) -> List[dict]:
     return rows[-last_n:] if last_n > 0 else rows
 
 
-def _compute_psi(train_vals: List[float], live_vals: List[float], n_bins: int = 10) -> Optional[float]:
-    """Compute Population Stability Index between two distributions."""
-    if not train_vals or not live_vals:
+def _normal_cdf(x: float, mean: float, std: float) -> float:
+    """Cumulative distribution function of the normal distribution."""
+    if std <= 0:
+        return 1.0 if x >= mean else 0.0
+    return 0.5 * (1.0 + math.erf((x - mean) / (std * math.sqrt(2.0))))
+
+
+def _compute_psi_histogram(
+    train_mean: float,
+    train_std: float,
+    live_vals: List[float],
+    n_bins: int = 10,
+) -> Optional[float]:
+    """Compute PSI using Gaussian CDF as training histogram baseline.
+
+    Bin edges are derived from the live-data range.  For each bin the expected
+    training proportion is computed from the Gaussian CDF so that the result
+    is deterministic and does not depend on random sampling.
+    """
+    if not live_vals:
         return None
 
-    all_vals = train_vals + live_vals
-    min_v, max_v = min(all_vals), max(all_vals)
+    min_v = min(live_vals)
+    max_v = max(live_vals)
     if max_v == min_v:
         return 0.0
 
     bin_width = (max_v - min_v) / n_bins
     eps = 1e-6
 
-    def _bin_counts(vals: List[float]) -> List[float]:
-        counts = [0.0] * n_bins
-        for v in vals:
-            idx = int((v - min_v) / bin_width)
-            idx = min(idx, n_bins - 1)
-            counts[idx] += 1
-        total = sum(counts) or 1.0
-        return [c / total for c in counts]
+    # Observed (live) proportions
+    live_counts = [0.0] * n_bins
+    for v in live_vals:
+        idx = int((v - min_v) / bin_width)
+        idx = min(idx, n_bins - 1)
+        live_counts[idx] += 1.0
+    total_live = float(len(live_vals))
+    live_pct = [max(c / total_live, eps) for c in live_counts]
 
-    train_pct = _bin_counts(train_vals)
-    live_pct = _bin_counts(live_vals)
+    # Expected (training) proportions from Gaussian CDF
+    train_pct_raw: List[float] = []
+    for i in range(n_bins):
+        low = min_v + i * bin_width
+        high = min_v + (i + 1) * bin_width
+        p = _normal_cdf(high, train_mean, train_std) - _normal_cdf(low, train_mean, train_std)
+        train_pct_raw.append(max(p, eps))
+
+    # Normalize to sum to 1 (CDF endpoints may not be exactly 0 and 1)
+    total_train = sum(train_pct_raw)
+    train_pct = [p / total_train for p in train_pct_raw]
 
     psi = 0.0
     for tp, lp in zip(train_pct, live_pct):
-        tp = max(tp, eps)
-        lp = max(lp, eps)
         psi += (lp - tp) * math.log(lp / tp)
 
     return round(psi, 6)
@@ -125,14 +148,8 @@ def run_drift_report(
         mean_drift = abs(live_mean - train_mean) / denom_std
         std_drift = abs(live_std - train_std) / denom_std
 
-        # PSI: reconstruct approximate training distribution from mean/std (Gaussian approximation)
-        rng = random.Random(42)
-        if train_std > 0:
-            synthetic_train = [rng.gauss(train_mean, train_std) for _ in range(max(len(live_vals), 50))]
-        else:
-            synthetic_train = [train_mean] * max(len(live_vals), 50)
-
-        psi = _compute_psi(synthetic_train, live_vals) if live_vals else None
+        # PSI: use Gaussian CDF histogram baseline derived from train_mean/train_std
+        psi = _compute_psi_histogram(train_mean, train_std, live_vals) if live_vals else None
 
         results[feat] = {
             "train_mean": round(train_mean, 6),
