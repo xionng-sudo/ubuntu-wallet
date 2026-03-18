@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -283,26 +286,76 @@ def load_model(model_dir: str) -> LoadedModel:
 # Registry helpers (P0-2)
 # ---------------------------------------------------------------------------
 
+
+def find_registry_path(model_dir: str) -> Optional[str]:
+    """
+    Return the first registry.json path found among sensible locations.
+    Candidate order (first match wins):
+      - model_dir/registry.json
+      - parent of model_dir (MODELS_ROOT)/registry.json
+      - repository root (one level above this package)/registry.json
+      - absolute model_dir/registry.json as fallback
+    """
+    candidates: List[str] = []
+    candidates.append(os.path.join(model_dir, "registry.json"))
+    parent = os.path.abspath(os.path.join(model_dir, ".."))
+    candidates.append(os.path.join(parent, "registry.json"))
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    candidates.append(os.path.join(repo_root, "registry.json"))
+    candidates.append(os.path.join(os.path.abspath(model_dir), "registry.json"))
+
+    for p in candidates:
+        try:
+            if os.path.isfile(p):
+                logger.debug("find_registry_path: selected %s", p)
+                return p
+        except Exception:
+            continue
+    logger.debug("find_registry_path: no registry.json found among candidates: %s", candidates)
+    return None
+
+
 def load_registry(model_dir: str) -> Dict[str, Any]:
-    """Load models/registry.json. Returns empty dict if not present."""
-    path = os.path.join(model_dir, "registry.json")
-    if not os.path.exists(path):
+    """Load registry.json from an appropriate location. Returns {} on not found or error."""
+    path = find_registry_path(model_dir)
+    if not path:
         return {}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                data.setdefault("_registry_path", path)
+            return data
+    except Exception:
+        logger.exception("load_registry: failed to read registry.json at %s", path)
+        return {}
+
+
+def _choose_latest_entry(entries: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Choose the entry with the latest trained_at if available."""
+    if not entries:
+        return None
+    try:
+        entries_sorted = sorted(entries, key=lambda e: e.get("trained_at") or "", reverse=True)
+        return entries_sorted[0]
+    except Exception:
+        return entries[0]
 
 
 def get_prod_registry_entry(model_dir: str) -> Optional[Dict[str, Any]]:
     """
-    Return the 'prod' entry from registry.json, or None if registry is absent
-    or no entry has status='prod'.
+    Return the prod registry entry for model_dir, or None if absent.
+    - Prefer entries where status == "prod"; if multiple, return the latest by trained_at.
+    - Fallback: return the latest entry from all entries if no prod.
     """
     reg = load_registry(model_dir)
-    entries = reg.get("entries", [])
-    prods = [e for e in entries if e.get("status") == "prod"]
-    if not prods:
+    if not reg:
         return None
-    return sorted(prods, key=lambda e: e.get("trained_at", ""), reverse=True)[0]
+    entries = reg.get("entries") or []
+    prod_entries = [e for e in entries if (e.get("status") or "").lower() == "prod"]
+    if prod_entries:
+        return _choose_latest_entry(prod_entries)
+    return _choose_latest_entry(entries)
 
 
 def _xgb_predict_proba(model: Any, Xs: np.ndarray) -> np.ndarray:

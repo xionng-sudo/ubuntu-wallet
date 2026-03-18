@@ -15,6 +15,7 @@ from model_loader import (
     get_prod_registry_entry,
     load_model,
     predict_proba,
+    find_registry_path,
 )
 from prediction_logger import log_prediction
 
@@ -117,18 +118,29 @@ def healthz():
 
     MODELS_ROOT = os.path.abspath(os.path.join(MODEL_DIR, ".."))
     try:
-        reg_entry = get_prod_registry_entry(MODELS_ROOT)
-        if reg_entry is not None:
-            registry_info = {
-                "model_version": reg_entry.get("model_version"),
-                "trained_at": reg_entry.get("trained_at"),
-                "status": reg_entry.get("status"),
-                "n_features": reg_entry.get("n_features"),
-            }
+        # Use the model_loader helpers to find registry.json and prod entry robustly.
+        registry_path = find_registry_path(MODEL_DIR)
+        if registry_path:
+            prod_entry = get_prod_registry_entry(MODEL_DIR)
+            if prod_entry:
+                registry_info = {
+                    "note": "prod registry entry found",
+                    "registry_path": registry_path,
+                    "model_version": prod_entry.get("model_version"),
+                    "trained_at": prod_entry.get("trained_at"),
+                    "status": prod_entry.get("status"),
+                    "n_features": prod_entry.get("n_features"),
+                }
+            else:
+                registry_info = {
+                    "note": "registry.json found but no prod entry",
+                    "registry_path": registry_path,
+                    "registry_root": MODELS_ROOT,
+                }
         else:
             registry_info = {"note": "no prod registry entry found", "registry_root": MODELS_ROOT}
     except Exception as e:
-        # Do not raise — include error info in response for debugging
+        # Do not raise ? include error info in response for debugging
         try:
             # If a logger exists, log the exception
             logger = globals().get("logger")
