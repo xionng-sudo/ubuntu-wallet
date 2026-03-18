@@ -1,0 +1,18 @@
+[Unit]
+Description=ubuntu-wallet feature drift monitor
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ubuntu-wallet/scripts
+EnvironmentFile=-/etc/ubuntu-wallet/ml-service.env
+ExecStart=/bin/bash -c 'source /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/activate && \
+  python /home/ubuntu/ubuntu-wallet/scripts/report_drift.py \
+    --train-stats /home/ubuntu/ubuntu-wallet/data/models/current/train_feature_stats.json \
+    --log-path /home/ubuntu/ubuntu-wallet/data/predictions_log.jsonl \
+    --output-dir /home/ubuntu/ubuntu-wallet/data/reports \
+    >> /home/ubuntu/ubuntu-wallet/logs/drift_monitor.log 2>&1'
+
+[Install]
+WantedBy=multi-user.target

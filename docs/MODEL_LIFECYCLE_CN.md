@@ -1435,3 +1435,59 @@ sudo chmod 600 /swapfile
 sudo mkswap /swapfile
 sudo swapon /swapfile
 ```
+
+---
+
+# 16. 漂移监控与校准质量报告
+
+## 16.1 特征漂移监控（Drift Monitor）
+
+特征漂移监控比较线上预测数据与训练时特征分布的差异，帮助早期发现 covariate shift。
+
+**触发方式**：
+- 自动：`systemd/drift-monitor.timer`（每6小时，00:05/06:05/12:05/18:05）
+- 手动：`ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py --help`
+
+**所需文件**：
+- `data/models/current/train_feature_stats.json`：训练时各特征 mean/std/missing_rate（由训练脚本生成）
+- `data/predictions_log.jsonl`：线上预测日志
+
+**输出**：
+- `data/reports/drift_YYYY-MM-DD.json`：结构化漂移统计
+- `data/reports/drift_YYYY-MM-DD.md`：人类可读摘要，高漂移特征列表
+
+**关键指标**：
+| 指标 | 说明 | 阈值参考 |
+|------|------|---------|
+| `mean_drift` | |live_mean - train_mean| / train_std | >1σ 需关注，>3σ 需调查 |
+| `psi` | Population Stability Index | <0.1 稳定，0.1-0.2 轻微漂移，>0.2 显著漂移 |
+| `live_missing_rate` | 线上缺失率 vs 训练缺失率 | 差值 >0.1 需关注 |
+
+## 16.2 校准质量报告（Calibration Report）
+
+评估模型 confidence 的可靠性：预测概率是否与实际频率一致。
+
+**触发方式**：
+- 自动：`systemd/calibration-report.timer`（每周一 02:00）
+- 手动：`ENABLE_CALIB_REPORT=true python python-analyzer/calibration_report.py --help`
+
+**输出**：
+- `data/reports/calib_report_YYYY-MM-DD.json`：Brier分数、可靠性曲线数据
+- `data/reports/calib_report_YYYY-MM-DD.md`：可读报告
+- `data/reports/calib_report_YYYY-MM-DD.png`：可靠性曲线图（需 matplotlib）
+
+**关键指标**：
+| 指标 | 说明 | 参考 |
+|------|------|------|
+| Brier score | 越低越好，完美校准=0 | <0.25 合格，<0.15 良好 |
+| Reliability curve | 曲线越接近对角线越好 | 偏上=过于自信，偏下=过于保守 |
+
+## 16.3 Flag 控制
+
+```ini
+# /etc/ubuntu-wallet/ml-service.env
+ENABLE_DRIFT_MONITOR=true   # 启用漂移监控
+ENABLE_CALIB_REPORT=true    # 启用校准报告
+```
+
+上线后建议同时启用这两个 flag 以持续监测模型健康。

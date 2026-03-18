@@ -1,0 +1,17 @@
+[Unit]
+Description=ubuntu-wallet calibration quality report generator
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+WorkingDirectory=/home/ubuntu/ubuntu-wallet/python-analyzer
+EnvironmentFile=-/etc/ubuntu-wallet/ml-service.env
+ExecStart=/bin/bash -c 'source /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/activate && \
+  python /home/ubuntu/ubuntu-wallet/python-analyzer/calibration_report.py \
+    --log-path /home/ubuntu/ubuntu-wallet/data/predictions_log.jsonl \
+    --output-dir /home/ubuntu/ubuntu-wallet/data/reports \
+    >> /home/ubuntu/ubuntu-wallet/logs/calib_report.log 2>&1'
+
+[Install]
+WantedBy=multi-user.target

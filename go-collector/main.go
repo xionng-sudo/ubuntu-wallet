@@ -15,6 +15,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/ubuntu-wallet/go-collector/collector"
+	"github.com/ubuntu-wallet/go-collector/exog"
 	"github.com/ubuntu-wallet/go-collector/features"
 	"github.com/ubuntu-wallet/go-collector/models"
 	"github.com/ubuntu-wallet/go-collector/signal"
@@ -274,6 +275,22 @@ func collectSlowAll(dataDir string, binance *collector.BinanceCollector, okx *co
 
 	analyzePriceLevels()
 	saveSlowDataToFiles(dataDir)
+
+	// Exogenous features (ENABLE_EXOG_FEATURES=true to activate)
+	if envBoolOrDefault("ENABLE_EXOG_FEATURES", false) {
+		ec := exog.NewExogCollector()
+		snap, err := ec.Collect("ETHUSDT")
+		if err != nil {
+			log.Warnf("exog: collect failed (non-fatal): %v", err)
+		} else {
+			if saveErr := exog.SaveExogSnapshot(dataDir, snap); saveErr != nil {
+				log.Warnf("exog: save failed (non-fatal): %v", saveErr)
+			} else {
+				log.Infof("exog: saved snapshot for %s funding=%.6f oi=%.2f taker_buy=%.4f",
+					snap.Symbol, snap.FundingRate, snap.OpenInterest, snap.TakerBuyRatio)
+			}
+		}
+	}
 
 	log.Info("SLOW data collection completed successfully!")
 }

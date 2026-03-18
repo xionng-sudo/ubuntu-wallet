@@ -5,6 +5,27 @@
 
 ---
 
+## 实现状态总览
+
+| Issue | 优先级 | 状态 | 关键文件 | Flag |
+|-------|--------|------|----------|------|
+| Issue 1 | P0 | ✅ 已实现 | `ml-service/feature_builder.py` (multi-tf) | — |
+| Issue 2 | P0 | ✅ 已实现 | `go-collector/models/`, `model_loader.py` | — |
+| Issue 3 | P0 | ✅ 已实现 | `ml-service/calibration.py` | — |
+| Issue 4 | P0 | ✅ 已实现 | `scripts/export_feature_schema.py` | — |
+| Issue 5 | P1 | ✅ 已实现 | `go-collector/exog/collector.go`, `python-analyzer/exog_features.py`, `ml-service/feature_builder.py` | `ENABLE_EXOG_FEATURES` |
+| Issue 6 | P1 | ✅ 已实现 | `scripts/report_drift.py`, `systemd/drift-monitor.service` | `ENABLE_DRIFT_MONITOR` |
+| Issue 7 | P1 | ✅ 已实现 | `python-analyzer/calibration_report.py`, `systemd/calibration-report.service` | `ENABLE_CALIB_REPORT` |
+| Issue 8 | P2 | ✅ 已存在+更新 | `docs/DEPLOY_CN.md` (章节21已加) | — |
+| Issue 9 | P2 | ✅ 已存在+更新 | `docs/RUNBOOK_CN.md` (章节16已加) | — |
+| Issue 10 | P2 | ✅ 已存在+更新 | `docs/MODEL_LIFECYCLE_CN.md` (章节16已加) | — |
+| Issue 11 | P2 | ✅ 已存在+更新 | `docs/FAILURE_MODES_CN.md` (章节13已加) | — |
+| Issue 12 | P3 | ❌ 待实现 | — | — |
+| Issue 13 | P3 | ❌ 待实现 | — | — |
+| Issue 14 | P3 | ❌ 待实现 | — | — |
+
+---
+
 # 一、P0：必须优先完成
 
 ## Issue 1：将 4h / 1d 多周期特征正式并入训练特征
@@ -132,6 +153,10 @@
 - 在线推理可读取相同因子
 - schema 一致
 
+### 实现状态
+✅ 已实现 — `go-collector/exog/collector.go`, `python-analyzer/exog_features.py`, `ml-service/feature_builder.py`  
+Flag: `ENABLE_EXOG_FEATURES` (default: false)
+
 ---
 
 ## Issue 6：增加 feature drift / data drift 监控
@@ -174,6 +199,10 @@
 
 ### 验收标准
 - 能清晰看到 0.6 / 0.7 / 0.8 置信度区间是否可靠
+
+### 实现状态
+✅ 已实现 — `python-analyzer/calibration_report.py`, `systemd/calibration-report.service`, `systemd/calibration-report.timer`  
+Flag: `ENABLE_CALIB_REPORT` (default: false)
 
 ---
 

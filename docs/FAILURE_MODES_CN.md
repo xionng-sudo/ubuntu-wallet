@@ -728,3 +728,93 @@ systemd 运行用户和手工用户不同。
 | 评估日志        | -     | `~/ubuntu-wallet/logs/evaluate_predictions.log`  |
 | 健康检查日志    | -     | `~/ubuntu-wallet/check-go-collector.log`         |
 | systemd 日志查看 | -   | `journalctl -u <service-name> -n 200 --no-pager` |
+
+---
+
+# 13. 外生特征 / 漂移监控 / 校准报告 故障模式
+
+## 13.1 外生特征采集失败（ENABLE_EXOG_FEATURES=true）
+
+### 故障现象
+- go-collector 日志：`exog: collect failed (non-fatal): ...`
+- `data/raw/exog_ETHUSDT.jsonl` 不更新或不存在
+
+### 可能原因
+| 原因 | 说明 |
+|------|------|
+| Binance Futures API 不可用 | fapi.binance.com 连接超时或返回非200 |
+| IP 被限频（429） | 请求过于频繁 |
+| 网络问题 | 服务器出口 IP 无法访问 Binance |
+
+### 处理步骤
+1. 检查日志：`journalctl -u go-collector -n 100 --no-pager | grep exog`
+2. 手动测试 API：`curl "https://fapi.binance.com/fapi/v1/openInterest?symbol=ETHUSDT"`
+3. 外生特征失败为**非致命错误**，不影响主流程。若持续失败可将 `ENABLE_EXOG_FEATURES=false` 关闭。
+4. 若 `exog_ETHUSDT.jsonl` 文件存在但太旧，`load_exog_features` 仍会返回最后一条数据（非0）。
+
+### 降级策略
+- 关闭 `ENABLE_EXOG_FEATURES`：外生特征返回全0，不影响推理
+- 外生特征在训练 schema 缺失时也会被 zero-fill，安全降级
+
+---
+
+## 13.2 漂移监控报错或无法运行
+
+### 故障现象
+- `journalctl -u drift-monitor.service -n 50` 显示错误
+- `data/reports/drift_*.json` 未生成
+
+### 可能原因
+| 原因 | 诊断 |
+|------|------|
+| `ENABLE_DRIFT_MONITOR=false` | 脚本会打印 "skipping." 并退出0 |
+| `train_feature_stats.json` 不存在 | 未运行训练或文件未生成 |
+| `predictions_log.jsonl` 不存在 | 尚无预测记录 |
+| venv 未激活 / 依赖缺失 | 检查 ExecStart 路径 |
+
+### 处理步骤
+1. 手动验证：
+   ```bash
+   ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py \
+     --train-stats data/models/current/train_feature_stats.json \
+     --log-path data/predictions_log.jsonl \
+     --output-dir data/reports \
+     --dry-run
+   ```
+2. 确认 `train_feature_stats.json` 存在（由训练脚本生成）
+3. 若 predictions_log 为空，drift monitor 运行但没有有意义的结果，属正常
+
+### 影响评估
+- Drift monitor 为**辅助监控**，不影响推理服务
+- 可以安全设置 `ENABLE_DRIFT_MONITOR=false` 跳过
+
+---
+
+## 13.3 校准报告故障
+
+### 故障现象
+- `journalctl -u calibration-report.service -n 50` 显示错误
+- `data/reports/calib_report_*.json` 未生成
+
+### 可能原因
+| 原因 | 诊断 |
+|------|------|
+| `ENABLE_CALIB_REPORT=false` | 脚本打印 "skipping." 并退出0 |
+| `predictions_log.jsonl` 为空 | 无预测记录 |
+| 无 `outcome` 字段 | 缺少实际结果数据，reliability curve 无法绘制（仍会输出置信度分布报告）|
+| matplotlib 未安装 | PNG 图不生成，JSON/MD 仍正常输出 |
+
+### 处理步骤
+1. 手动测试：
+   ```bash
+   ENABLE_CALIB_REPORT=true python python-analyzer/calibration_report.py \
+     --log-path data/predictions_log.jsonl \
+     --output-dir data/reports \
+     --dry-run
+   ```
+2. 无 `outcome` 字段属预期情况（实盘日志不包含已知结果）；报告会输出置信度分布统计
+3. 如不需要 PNG 图，添加 `--no-plot` 参数
+
+### 影响评估
+- 校准报告为**分析工具**，不影响推理服务
+- 可安全设置 `ENABLE_CALIB_REPORT=false`
