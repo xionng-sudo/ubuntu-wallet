@@ -145,10 +145,8 @@ klines_1d: 365 条记录 / 365 records      # 约1年的日线数据
 ```bash
 python3 -c "
 import json
-from datetime import datetime
-
-data = json.load(open('data/raw/klines_1h.json'))
-timestamps = [item['time'] if isinstance(item, dict) else item[0] for item in data]
+data = json.load(open('data/klines_1h.json'))
+timestamps = [item['timestamp'] for item in data]
 print(f'最早时间 (oldest): {timestamps[0]}')
 print(f'最新时间 (latest): {timestamps[-1]}')
 print(f'总条数 (total records): {len(timestamps)}')
