@@ -26,14 +26,14 @@ Usage
   python scripts/generate_daily_report.py \
     --log-path data/predictions_log.jsonl \
     --data-dir data \
-    --tp 0.0175 --sl 0.007
+    --tp 0.0175 --sl 0.007 --threshold 0.55
 
   # Evaluate a specific date
   python scripts/generate_daily_report.py \
     --log-path data/predictions_log.jsonl \
     --data-dir data \
     --date 2026-03-01 \
-    --tp 0.0175 --sl 0.007
+    --tp 0.0175 --sl 0.007 --threshold 0.55
 """
 from __future__ import annotations
 
@@ -42,6 +42,7 @@ import json
 import os
 import sys
 from bisect import bisect_right
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -50,7 +51,7 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
 
-from backtest_event_v3_http import (
+from backtest_event_v3_http import (  # noqa: E402
     load_klines_1h,
     simulate_trade,
     compute_metrics,
@@ -159,14 +160,24 @@ def _build_report(
     elif len(model_versions) == 1:
         model_version = model_versions[0]
     elif model_versions:
-        model_version = model_versions[-1]  # most recent
+        model_version = model_versions[-1]  # most recent (arbitrary order, but ok)
     else:
         model_version = "unknown"
 
     n_total = len(preds)
     trades = []
-    skipped_flat = 0
+
+    # clearer counters
     skipped_no_kline = 0
+    skipped_flat_model = 0          # decide_side produced FLAT
+    filtered_mt = 0                 # MT filter turned LONG/SHORT -> FLAT
+    passed_mt = 0                   # LONG/SHORT that survived MT filter
+
+    initial_side_counts = Counter()
+    final_side_counts = Counter()
+    trend_4h_counts = Counter()
+    trend_1d_counts = Counter()
+    mt_reject_reasons = Counter()
 
     for p in preds:
         ts = p["ts"]
@@ -187,28 +198,49 @@ def _build_report(
             eff_p_long = float(p_long_raw) if p_long_raw is not None else 0.0
             eff_p_short = float(p_short_raw) if p_short_raw is not None else 0.0
 
-        side = decide_side(eff_p_long, eff_p_short, threshold)
+        side_initial = decide_side(eff_p_long, eff_p_short, threshold)
+        initial_side_counts[side_initial] += 1
 
-        if mt_filter and side != "FLAT":
-            if side == "LONG":
-                if trend_4h_at(ts) != "UP":
-                    side = "FLAT"
-                elif trend_1d_at(ts) == "DOWN":
-                    side = "FLAT"
-            elif side == "SHORT":
-                if trend_4h_at(ts) != "DOWN":
-                    side = "FLAT"
-                elif trend_1d_at(ts) == "UP":
-                    side = "FLAT"
-
-        if side == "FLAT":
-            skipped_flat += 1
+        if side_initial == "FLAT":
+            skipped_flat_model += 1
+            final_side_counts["FLAT"] += 1
             continue
+
+        side_final = side_initial
+
+        if mt_filter:
+            t4 = trend_4h_at(ts)
+            t1 = trend_1d_at(ts)
+            trend_4h_counts[t4] += 1
+            trend_1d_counts[t1] += 1
+
+            if side_final == "LONG":
+                if t4 != "UP":
+                    side_final = "FLAT"
+                    mt_reject_reasons["long_4h_not_up"] += 1
+                elif t1 == "DOWN":
+                    side_final = "FLAT"
+                    mt_reject_reasons["long_1d_is_down"] += 1
+            elif side_final == "SHORT":
+                if t4 != "DOWN":
+                    side_final = "FLAT"
+                    mt_reject_reasons["short_4h_not_down"] += 1
+                elif t1 == "UP":
+                    side_final = "FLAT"
+                    mt_reject_reasons["short_1d_is_up"] += 1
+
+        final_side_counts[side_final] += 1
+
+        if side_final == "FLAT":
+            filtered_mt += 1
+            continue
+
+        passed_mt += 1
 
         tr = simulate_trade(
             klines=klines,
             i=i,
-            side=side,
+            side=side_final,
             tp_pct=tp_pct,
             sl_pct=sl_pct,
             fee_per_side=fee,
@@ -218,6 +250,7 @@ def _build_report(
             timeout_exit=timeout_exit,
         )
         if tr.outcome == "NO_TRADE":
+            # rare: simulation found no trade; keep counts as passed_mt though
             continue
         trades.append(tr)
 
@@ -240,9 +273,18 @@ def _build_report(
         "signal_stats": {
             "total_predictions": n_total,
             "skipped_no_kline": skipped_no_kline,
-            "filtered_mt": skipped_flat,
+            "skipped_flat_model": skipped_flat_model,
+            "filtered_mt": filtered_mt,
+            "passed_mt": passed_mt,
             "n_trades": n_trades,
             "coverage": round(coverage, 4),
+        },
+        "debug_mt": {
+            "initial_side_counts": dict(initial_side_counts),
+            "final_side_counts": dict(final_side_counts),
+            "trend_4h_counts": dict(trend_4h_counts),
+            "trend_1d_counts": dict(trend_1d_counts),
+            "mt_reject_reasons": dict(mt_reject_reasons),
         },
     }
 
@@ -311,6 +353,9 @@ def _render_markdown(report: Dict[str, Any]) -> str:
     sm = report.get("strategy_metrics")
     db = report.get("direction_breakdown", {})
 
+    # Backward compatible rendering: show new fields if present.
+    has_new = "skipped_flat_model" in ss and "passed_mt" in ss
+
     lines = [
         f"# Daily Evaluation Report: {date}",
         "",
@@ -335,7 +380,20 @@ def _render_markdown(report: Dict[str, Any]) -> str:
         f"| --- | --- |",
         f"| total_predictions | {ss['total_predictions']} |",
         f"| skipped_no_kline  | {ss['skipped_no_kline']} |",
-        f"| filtered_mt       | {ss['filtered_mt']} |",
+    ]
+
+    if has_new:
+        lines += [
+            f"| skipped_flat_model | {ss['skipped_flat_model']} |",
+            f"| filtered_mt        | {ss['filtered_mt']} |",
+            f"| passed_mt          | {ss['passed_mt']} |",
+        ]
+    else:
+        lines += [
+            f"| filtered_mt       | {ss['filtered_mt']} |",
+        ]
+
+    lines += [
         f"| n_trades          | {ss['n_trades']} |",
         f"| coverage          | {ss['coverage']:.4f} |",
         "",
@@ -391,6 +449,20 @@ def _render_markdown(report: Dict[str, Any]) -> str:
             ]
         lines.append("")
 
+    # Optional debug section (kept short)
+    dbg = report.get("debug_mt")
+    if dbg:
+        lines += [
+            "## Debug (MT Filter)",
+            "",
+            f"- initial_side_counts: `{dbg.get('initial_side_counts')}`",
+            f"- final_side_counts: `{dbg.get('final_side_counts')}`",
+            f"- trend_4h_counts: `{dbg.get('trend_4h_counts')}`",
+            f"- trend_1d_counts: `{dbg.get('trend_1d_counts')}`",
+            f"- mt_reject_reasons: `{dbg.get('mt_reject_reasons')}`",
+            "",
+        ]
+
     return "\n".join(lines)
 
 
@@ -398,33 +470,34 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description="Generate daily evaluation reports (JSON + Markdown) from prediction logs"
     )
-    ap.add_argument("--log-path", default="data/predictions_log.jsonl",
-                    help="Path to predictions_log.jsonl (default: data/predictions_log.jsonl)")
-    ap.add_argument("--data-dir", default="data",
-                    help="Directory with klines json files (default: data)")
-    ap.add_argument("--date", default=None,
-                    help="Date to evaluate in YYYY-MM-DD format (UTC). Default: yesterday.")
+    ap.add_argument(
+        "--log-path",
+        default="data/predictions_log.jsonl",
+        help="Path to predictions_log.jsonl (default: data/predictions_log.jsonl)",
+    )
+    ap.add_argument("--data-dir", default="data", help="Directory with klines json files (default: data)")
+    ap.add_argument(
+        "--date",
+        default=None,
+        help="Date to evaluate in YYYY-MM-DD format (UTC). Default: yesterday.",
+    )
     ap.add_argument("--symbol", default=None)
     ap.add_argument("--interval", default="1h")
     ap.add_argument("--active-model", default="event_v3")
-    ap.add_argument("--model-version", default=None,
-                    help="Override model_version in report (default: derived from log)")
+    ap.add_argument("--model-version", default=None, help="Override model_version in report (default: derived from log)")
 
     ap.add_argument("--tp", type=float, required=True, help="Take-profit fraction, e.g. 0.0175")
     ap.add_argument("--sl", type=float, required=True, help="Stop-loss fraction, e.g. 0.007")
-    ap.add_argument("--threshold", type=float, required=True,
-                    help="Probability threshold for signal generation, e.g. 0.55")
+    ap.add_argument("--threshold", type=float, required=True, help="Probability threshold for signal generation, e.g. 0.55")
     ap.add_argument("--fee", type=float, default=0.0004)
     ap.add_argument("--slippage", type=float, default=0.0)
     ap.add_argument("--horizon-bars", type=int, default=6)
     ap.add_argument("--tie-breaker", choices=["SL", "TP"], default="SL")
     ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
 
-    ap.add_argument("--no-mt-filter", action="store_true",
-                    help="Disable 4h/1d multi-timeframe filter")
+    ap.add_argument("--no-mt-filter", action="store_true", help="Disable 4h/1d multi-timeframe filter")
 
-    ap.add_argument("--report-dir", default="data/reports",
-                    help="Directory to write report files (default: data/reports)")
+    ap.add_argument("--report-dir", default="data/reports", help="Directory to write report files (default: data/reports)")
 
     args = ap.parse_args()
 
@@ -444,8 +517,10 @@ def main() -> int:
     day_start = report_date
     day_end = report_date + timedelta(days=1)
 
-    print(f"Generating daily report for {date_str} ({day_start.isoformat()} → {day_end.isoformat()})",
-          flush=True)
+    print(
+        f"Generating daily report for {date_str} ({day_start.isoformat()} → {day_end.isoformat()})",
+        flush=True,
+    )
 
     # Load klines
     klines_1h_path = os.path.join(args.data_dir, "klines_1h.json")
@@ -539,6 +614,10 @@ def main() -> int:
     print(f"  predictions   : {ss['total_predictions']}", flush=True)
     print(f"  trades        : {ss['n_trades']}", flush=True)
     print(f"  coverage      : {ss['coverage']:.4f}", flush=True)
+    if "skipped_flat_model" in ss:
+        print(f"  flat(model)   : {ss['skipped_flat_model']}", flush=True)
+        print(f"  filtered_mt   : {ss['filtered_mt']}", flush=True)
+        print(f"  passed_mt     : {ss['passed_mt']}", flush=True)
     sm = report.get("strategy_metrics")
     if sm:
         print(f"  win_rate      : {sm['win_rate']:.4f}", flush=True)

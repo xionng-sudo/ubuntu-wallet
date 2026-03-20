@@ -2,7 +2,7 @@
 
 # 环境
 .env
-venv/
+venv-analyzer/
 __pycache__/
 *.pyc
 *.pyo

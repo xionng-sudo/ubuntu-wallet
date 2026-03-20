@@ -5,11 +5,17 @@
 ETHUSDT 永续合约实盘骨架（event_v3 1h，DRY-RUN 版，不依赖 binance SDK）
 
 当前版本：
-- 每小时在 K 线收盘时调用 ml-service /predict 获取 event_v3 概率
-- 用 threshold=0.55 决策 LONG/SHORT/FLAT
-- 使用 4h/1d 多周期过滤（与 backtest 完全一致）
+- 每小时在 K 线收盘时调用 ml-service /predict 获取 event_v3 signal
+- 直接使用服务端返回的 signal（LONG / SHORT / FLAT）
+- 使用 4h/1d 多周期过滤：
+  - 4h 硬过滤
+  - 1d 软过滤
+- 1d 中性：weight=0.85
+- 1d 反向：weight=0.70
+- 最多 2 仓
+- 只允许同方向加仓
 - 价格先用 0.0 占位（不真下单，仅用于日志）
-- 调用 EthPerpStrategyEngineBinance（单仓 + 5x + 连续 3 亏损熔断），但其内部也是 DRY-RUN，只打印不下单
+- 调用 EthPerpStrategyEngineBinance（最多 2 仓 + 5x + 连续 3 亏损熔断），但其内部也是 DRY-RUN，只打印不下单
 
 等你确认整个决策 + 风控流程都符合预期后，再接入真实 Binance API。
 """
@@ -34,6 +40,10 @@ load_dotenv()
 ML_SERVICE_URL = "http://127.0.0.1:9000/predict"
 SYMBOL = "ETHUSDT"
 
+# 软过滤权重
+WEIGHT_NEUTRAL = 0.85
+WEIGHT_REVERSE = 0.70
+
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
@@ -52,39 +62,37 @@ def call_ml_service(as_of_ts: str) -> dict:
     return r.json()
 
 
-def parse_probs(j: dict) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    p_long = j.get("proba_long")
-    p_short = j.get("proba_short")
-    p_flat = j.get("proba_flat")
-    return p_long, p_short, p_flat
-
-
-def decide_side(p_long: Optional[float], p_short: Optional[float], threshold: float) -> str:
-    """与 backtest_event_v3_http.py 中的 decide_side 保持一致。"""
-    if p_long is None or p_short is None:
-        return "FLAT"
-    if p_long >= threshold and p_long >= p_short:
-        return "LONG"
-    if p_short >= threshold and p_short > p_long:
-        return "SHORT"
-    return "FLAT"
-
-
-def apply_multi_timeframe_filter(side_str: str, ts: datetime, mt_ctx: MTTrendContext) -> str:
+def apply_multi_timeframe_filter(side_str: str, ts: datetime, mt_ctx: MTTrendContext) -> tuple[str, float]:
     """
-    多周期过滤（方案 B）：
-    - 若 side == LONG：
-        - 若 4h != UP → FLAT
-        - 或 1d == DOWN → FLAT
+    过滤规则：
+    - 4h 必须同向（硬过滤）
+    - 1d 作为软过滤
+    - 返回 (side, weight)
     """
+    t4 = mt_ctx.trend_4h_at(ts)
+    t1d = mt_ctx.trend_1d_at(ts)
+
     if side_str == "LONG":
-        t4 = mt_ctx.trend_4h_at(ts)
-        t1d = mt_ctx.trend_1d_at(ts)
         if t4 != "UP":
-            return "FLAT"
+            return "FLAT", 0.0
+        if t1d == "UP":
+            return "LONG", 1.0
+        if t1d == "NEUTRAL":
+            return "LONG", WEIGHT_NEUTRAL
         if t1d == "DOWN":
-            return "FLAT"
-    return side_str
+            return "LONG", WEIGHT_REVERSE
+
+    if side_str == "SHORT":
+        if t4 != "DOWN":
+            return "FLAT", 0.0
+        if t1d == "DOWN":
+            return "SHORT", 1.0
+        if t1d == "NEUTRAL":
+            return "SHORT", WEIGHT_NEUTRAL
+        if t1d == "UP":
+            return "SHORT", WEIGHT_REVERSE
+
+    return "FLAT", 0.0
 
 
 def main():
@@ -100,20 +108,19 @@ def main():
     klines_1d = load_klines_1h(os.path.join(data_dir, "klines_1d.json"))
     mt_ctx = MTTrendContext(klines_4h=klines_4h, klines_1d=klines_1d)
 
-    # 初始化风控引擎：策略资金 10,000 USDT，5x 杠杆，单笔 30%，最多连续 3 亏损
+    # 初始化风控引擎
     engine = EthPerpStrategyEngineBinance(
         strategy_funds_usdt=10_000.0,
         leverage=5.0,
         position_fraction=0.3,
         max_consec_losses=3,
+        max_positions=2,
         symbol=SYMBOL,
     )
 
-    THRESHOLD = 0.55
-
     last_bar_close: Optional[datetime] = None
 
-    print("Starting DRY-RUN ETHUSDT perp trader (event_v3, 1h, no real Binance calls)...")
+    print("Starting DRY-RUN ETHUSDT perp trader (event_v3, 1h, max 2 positions, same direction only)...")
 
     while True:
         try:
@@ -134,16 +141,17 @@ def main():
             as_of_ts = bar_close.isoformat().replace("+00:00", "Z")
             print(f"[{_now_utc().isoformat()}] Processing bar_close={as_of_ts}")
 
-            # 1) 价格：DRY-RUN 下直接用 0.0 占位（不用于真实下单）
-            price = 0.0
-
-            # 2) 调用 ml-service 获取预测
+            # 1) 调用 ml-service 获取���测
             j = call_ml_service(as_of_ts)
-            p_long, p_short, p_flat = parse_probs(j)
 
-            # 3) threshold 决策 + 多周期过滤
-            side_str = decide_side(p_long, p_short, THRESHOLD)
-            side_str = apply_multi_timeframe_filter(side_str, bar_close, mt_ctx)
+            # 2) 直接使用服务端 signal
+            side_str = str(j.get("signal", "FLAT"))
+            model_version = j.get("model_version")
+            confidence = j.get("confidence")
+            cal_conf = j.get("calibrated_confidence")
+
+            # 3) 多周期过滤 + 软权重
+            side_str, weight = apply_multi_timeframe_filter(side_str, bar_close, mt_ctx)
 
             if side_str == "LONG":
                 side = Side.LONG
@@ -152,10 +160,14 @@ def main():
             else:
                 side = Side.FLAT
 
-            print(f"  signal side={side_str} p_long={p_long} p_short={p_short} price={price}")
+            print(
+                f"  signal side={side_str} weight={weight:.2f} "
+                f"confidence={confidence} cal_conf={cal_conf} "
+                f"model_version={model_version} price=0.0"
+            )
 
-            # 4) 交给风控引擎，让它依据单仓 + 熔断决定是否“开仓”（当前 DRY-RUN，只打印）
-            engine.on_new_signal(bar_close, side, price)
+            # 4) 交给风控引擎，让它依据最多2仓 + 同方向加仓 + 熔断决定是否开仓
+            engine.on_new_signal(bar_close, side, 0.0, weight=weight)
 
             # 平仓逻辑暂不实现，避免误操作；将来参考 backtest_event_v3_http.py 的 simulate_trade 来做 TP/SL/horizon 监控
 

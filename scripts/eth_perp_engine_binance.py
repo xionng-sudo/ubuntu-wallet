@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 
 from dotenv import load_dotenv
@@ -48,7 +48,8 @@ class EthPerpStrategyEngineBinance:
     """
     ETHUSDT 永续合约策略风控引擎（DRY-RUN 版，不真实下单）：
 
-    - 单仓：任意时刻只允许一笔 ETH 仓位
+    - 最多 2 仓
+    - 只允许同方向加仓
     - 连续 3 笔亏损熔断
     - 5x 杠杆 / 固定仓位比例（这里只用于日志，不乘到 PnL 上）
     """
@@ -59,12 +60,14 @@ class EthPerpStrategyEngineBinance:
         leverage: float = 5.0,
         position_fraction: float = 0.3,
         max_consec_losses: int = 3,
+        max_positions: int = 2,
         symbol: str = "ETHUSDT",
     ):
         self.F_strategy = float(strategy_funds_usdt)
         self.leverage = float(leverage)
         self.position_fraction = float(position_fraction)
         self.max_consec_losses = int(max_consec_losses)
+        self.max_positions = int(max_positions)
 
         self.symbol = symbol
 
@@ -74,10 +77,15 @@ class EthPerpStrategyEngineBinance:
         if not api_key or not api_secret:
             print("[WARN] BINANCE_API_KEY / BINANCE_API_SECRET not set（DRY-RUN 模式下无所谓）")
 
-        self.position = PositionState()
+        self.positions: List[PositionState] = []
         self.risk = RiskState()
 
     # --- 工具 ---
+
+    def _current_side(self) -> Optional[Side]:
+        if not self.positions:
+            return None
+        return self.positions[0].side
 
     def _get_qty_from_notional(self, notional_usdt: float, price: float) -> float:
         """
@@ -104,46 +112,59 @@ class EthPerpStrategyEngineBinance:
 
     def _exchange_close_position(self, side: Side) -> Optional[str]:
         """
-        DRY-RUN 版本：只打印平仓意图，��真实下单。
+        DRY-RUN 版本：只打印平仓意图，不真实下单。
         """
         print(f"[DRY-RUN CLOSE] symbol={self.symbol} side={side}")
         return f"DRYRUN-CLOSE-{datetime.utcnow().isoformat()}"
 
     # --- 风控 / 状态 ---
 
-    def can_open_new_position(self) -> bool:
+    def can_open_new_position(self, side: Side) -> bool:
         """
-        单仓 + 熔断：只有在
-        - 没有持仓
-        - 没有被 trading_paused
-        的情况下才允许开新仓。
+        允许开新仓的条件：
+        - 未熔断
+        - 未超过最大仓位数
+        - 若已有仓位，必须同方向
         """
         if self.risk.trading_paused:
             return False
-        if self.position.side != Side.FLAT:
+        if side == Side.FLAT:
             return False
-        return True
+        if len(self.positions) >= self.max_positions:
+            return False
+        if not self.positions:
+            return True
+        return self._current_side() == side
 
-    def on_new_signal(self, ts: datetime, side: Side, price: float) -> None:
+    def on_new_signal(self, ts: datetime, side: Side, price: float, weight: float = 1.0) -> None:
         """
         收到最终方向信号（LONG/SHORT/FLAT）后，依据风控决定是否“开仓”（DRY-RUN）。
+        weight 用于弱信号减仓，范围建议 0~1。
         """
         if side == Side.FLAT:
             return
 
-        if not self.can_open_new_position():
+        if not self.can_open_new_position(side):
             return
 
-        notional = self.position_fraction * self.F_strategy
+        weight = max(0.0, min(float(weight), 1.0))
+        notional = self.position_fraction * self.F_strategy * weight
 
         order_id = self._exchange_open_position(side, notional, price)
 
-        self.position = PositionState(
-            side=side,
-            notional_usdt=notional,
-            entry_price=price,
-            open_time=ts,
-            position_id=order_id,
+        self.positions.append(
+            PositionState(
+                side=side,
+                notional_usdt=notional,
+                entry_price=price,
+                open_time=ts,
+                position_id=order_id,
+            )
+        )
+
+        print(
+            f"[OPENED] side={side} positions={len(self.positions)}/{self.max_positions} "
+            f"notional={notional:.2f} weight={weight:.2f}"
         )
 
     def on_position_closed(self, pnl_usdt: float) -> None:
@@ -151,7 +172,8 @@ class EthPerpStrategyEngineBinance:
         平仓后更新连续亏损统计与熔断状态。
         DRY-RUN 下你可以手动调用这个函数来模拟平仓结果。
         """
-        self.position = PositionState()
+        if self.positions:
+            self.positions.pop(0)
 
         if pnl_usdt < 0:
             self.risk.consec_losses += 1

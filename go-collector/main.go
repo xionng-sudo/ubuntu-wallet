@@ -484,22 +484,9 @@ func shouldUseLookbackThisRun(isStartup bool) bool {
 	case klinesLookbackModeOff:
 		return false
 	case klinesLookbackModeOnStartup:
-		if !isStartup {
-			return false
-		}
-		allowed := false
-		lookbackOnce.Do(func() {
-			allowed = true
-		})
-		return allowed
+		return isStartup
 	default:
-		// safe fallback: behave like on_startup
-		if !isStartup {
-			return false
-		}
-		allowed := false
-		lookbackOnce.Do(func() { allowed = true })
-		return allowed
+		return true
 	}
 }
 
