@@ -127,8 +127,8 @@ ls -lh ~/ubuntu-wallet/data/raw/klines_*.json
 # 检查文件内容是否可以被正常解析（JSON格式）
 python3 -c "
 import json
-for f in ['klines_1h', 'klines_4h', 'klines_1d']:
-    data = json.load(open(f'data/raw/{f}.json'))
+for f in ['klines_15m', 'klines_1h', 'klines_4h', 'klines_1d']:
+    data = json.load(open(f'data/{f}.json'))
     print(f'{f}: {len(data)} 条记录 / {len(data)} records')
 "
 ```
