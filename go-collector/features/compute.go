@@ -29,93 +29,345 @@ func pctChange(curr, prev float64) float64 {
 	return (curr - prev) / prev
 }
 
-func ComputeSnapshot(symbol string, interval string, klines1h []models.OHLCV, klines4h []models.OHLCV, now time.Time) (*FeatureSnapshot, error) {
+func safe(v float64) float64 {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0
+	}
+	return v
+}
+
+func closesHighsLowsVolumes(series []models.OHLCV) (closes, highs, lows, vols []float64) {
+	closes = make([]float64, 0, len(series))
+	highs = make([]float64, 0, len(series))
+	lows = make([]float64, 0, len(series))
+	vols = make([]float64, 0, len(series))
+	for _, k := range series {
+		closes = append(closes, k.Close)
+		highs = append(highs, k.High)
+		lows = append(lows, k.Low)
+		vols = append(vols, k.Volume)
+	}
+	return
+}
+
+func rollingVolatility(closes []float64, n int) float64 {
+	if len(closes) < n+1 {
+		return 0
+	}
+	rets := make([]float64, 0, n)
+	for i := len(closes) - n; i < len(closes); i++ {
+		rets = append(rets, safe(pctChange(closes[i], closes[i-1])))
+	}
+	return safe(stddev(rets))
+}
+
+func lagReturn(closes []float64, lag int) float64 {
+	if lag <= 0 || len(closes) < lag+1 {
+		return 0
+	}
+	return safe(pctChange(closes[len(closes)-1], closes[len(closes)-1-lag]))
+}
+
+func lagVolume(vols []float64, lag int) float64 {
+	if lag <= 0 || len(vols) < lag+1 {
+		return 0
+	}
+	prev := vols[len(vols)-1-lag]
+	if prev == 0 {
+		return 0
+	}
+	return safe((vols[len(vols)-1] - prev) / prev)
+}
+
+func meanLast(vals []float64, n int) float64 {
+	if n <= 0 || len(vals) < n {
+		return 0
+	}
+	sum := 0.0
+	for _, v := range vals[len(vals)-n:] {
+		sum += safe(v)
+	}
+	return safe(sum / float64(n))
+}
+
+func stdLast(vals []float64, n int) float64 {
+	if n <= 0 || len(vals) < n {
+		return 0
+	}
+	return safe(stddev(vals[len(vals)-n:]))
+}
+
+func priceToMA(closes []float64, n int) float64 {
+	if len(closes) < n || n <= 0 {
+		return 0
+	}
+	ma := sma(closes, n)
+	if ma == 0 {
+		return 0
+	}
+	return safe((closes[len(closes)-1] - ma) / ma)
+}
+
+func itoa(i int) string {
+	switch i {
+	case 1:
+		return "1"
+	case 2:
+		return "2"
+	case 3:
+		return "3"
+	case 5:
+		return "5"
+	case 10:
+		return "10"
+	case 20:
+		return "20"
+	case 50:
+		return "50"
+	default:
+		return "0"
+	}
+}
+
+func mapBaseAndCore(raw map[string]float64, closes, highs, lows, vols []float64, open, high, low, close, volume float64, ts time.Time) {
+	m, sig, hist := macd(closes, 12, 26, 9)
+
+	raw["sma_7"] = safe(sma(closes, 7))
+	raw["sma_25"] = safe(sma(closes, 25))
+	raw["sma_99"] = safe(sma(closes, 99))
+	raw["sma_200"] = safe(sma(closes, 200))
+	raw["ema_12"] = safe(ema(closes, 12))
+	raw["ema_26"] = safe(ema(closes, 26))
+	raw["ema_50"] = safe(ema(closes, 50))
+	raw["ema_200"] = safe(ema(closes, 200))
+	raw["macd"] = safe(m)
+	raw["macd_signal"] = safe(sig)
+	raw["macd_hist"] = safe(hist)
+
+	raw["rsi"] = safe(rsi(closes, 14))
+	raw["atr"] = safe(atr(highs, lows, closes, 14))
+
+	raw["returns"] = safe(lagReturn(closes, 1))
+	if len(closes) >= 2 && closes[len(closes)-2] > 0 && closes[len(closes)-1] > 0 {
+		raw["log_returns"] = safe(math.Log(closes[len(closes)-1] / closes[len(closes)-2]))
+	} else {
+		raw["log_returns"] = 0
+	}
+
+	raw["price_range"] = safe((high - low) / math.Max(close, 1e-12))
+	raw["body_size"] = safe((close - open) / math.Max(open, 1e-12))
+	raw["upper_shadow"] = safe((high - math.Max(open, close)) / math.Max(close, 1e-12))
+	raw["lower_shadow"] = safe((math.Min(open, close) - low) / math.Max(close, 1e-12))
+
+	raw["volume_sma_20"] = safe(sma(vols, 20))
+	if raw["volume_sma_20"] != 0 {
+		raw["volume_ratio"] = safe(volume / raw["volume_sma_20"])
+	} else {
+		raw["volume_ratio"] = 0
+	}
+
+	n := 20
+	if len(closes) < n {
+		n = len(closes)
+	}
+	if n > 0 {
+		num, den := 0.0, 0.0
+		for i := len(closes) - n; i < len(closes); i++ {
+			typ := (highs[i] + lows[i] + closes[i]) / 3.0
+			v := vols[i]
+			num += typ * v
+			den += v
+		}
+		if den != 0 {
+			raw["vwap"] = safe(num / den)
+		}
+	}
+
+	obv := 0.0
+	for i := 1; i < len(closes); i++ {
+		if closes[i] > closes[i-1] {
+			obv += vols[i]
+		} else if closes[i] < closes[i-1] {
+			obv -= vols[i]
+		}
+	}
+	raw["obv"] = safe(obv)
+
+	for _, l := range []int{1, 2, 3, 5, 10, 20} {
+		raw["return_lag_"+itoa(l)] = safe(lagReturn(closes, l))
+		raw["volume_lag_"+itoa(l)] = safe(lagVolume(vols, l))
+	}
+	for _, w := range []int{5, 10, 20, 50} {
+		raw["rolling_mean_"+itoa(w)] = safe(meanLast(closes, w))
+		raw["rolling_std_"+itoa(w)] = safe(stdLast(closes, w))
+		raw["rolling_vol_mean_"+itoa(w)] = safe(meanLast(vols, w))
+		raw["price_to_ma_"+itoa(w)] = safe(priceToMA(closes, w))
+	}
+	raw["volatility_5"] = safe(rollingVolatility(closes, 5))
+	raw["volatility_20"] = safe(rollingVolatility(closes, 20))
+	if raw["volatility_20"] != 0 {
+		raw["volatility_ratio"] = safe(raw["volatility_5"] / raw["volatility_20"])
+	}
+
+	raw["hour"] = float64(ts.UTC().Hour())
+	raw["day_of_week"] = float64(ts.UTC().Weekday())
+	if ts.UTC().Weekday() == time.Saturday || ts.UTC().Weekday() == time.Sunday {
+		raw["is_weekend"] = 1
+	} else {
+		raw["is_weekend"] = 0
+	}
+}
+
+func mapTF(prefix string, raw map[string]float64, series []models.OHLCV, ts time.Time) {
+	if len(series) < 2 {
+		return
+	}
+	closes, highs, lows, vols := closesHighsLowsVolumes(series)
+	last := series[len(series)-1]
+
+	raw[prefix+"close"] = safe(last.Close)
+	raw[prefix+"open"] = safe(last.Open)
+	raw[prefix+"high"] = safe(last.High)
+	raw[prefix+"low"] = safe(last.Low)
+	raw[prefix+"volume"] = safe(last.Volume)
+
+	raw[prefix+"sma_7"] = safe(sma(closes, 7))
+	raw[prefix+"sma_25"] = safe(sma(closes, 25))
+	raw[prefix+"sma_99"] = safe(sma(closes, 99))
+	raw[prefix+"sma_200"] = safe(sma(closes, 200))
+	raw[prefix+"ema_12"] = safe(ema(closes, 12))
+	raw[prefix+"ema_26"] = safe(ema(closes, 26))
+	raw[prefix+"ema_50"] = safe(ema(closes, 50))
+	raw[prefix+"ema_200"] = safe(ema(closes, 200))
+
+	m, sig, hist := macd(closes, 12, 26, 9)
+	raw[prefix+"macd"] = safe(m)
+	raw[prefix+"macd_signal"] = safe(sig)
+	raw[prefix+"macd_hist"] = safe(hist)
+	raw[prefix+"rsi"] = safe(rsi(closes, 14))
+	raw[prefix+"atr"] = safe(atr(highs, lows, closes, 14))
+
+	raw[prefix+"returns"] = safe(lagReturn(closes, 1))
+	raw[prefix+"price_range"] = safe((last.High - last.Low) / math.Max(last.Close, 1e-12))
+	raw[prefix+"body_size"] = safe((last.Close - last.Open) / math.Max(last.Open, 1e-12))
+	raw[prefix+"upper_shadow"] = safe((last.High - math.Max(last.Open, last.Close)) / math.Max(last.Close, 1e-12))
+	raw[prefix+"lower_shadow"] = safe((math.Min(last.Open, last.Close) - last.Low) / math.Max(last.Close, 1e-12))
+
+	for _, l := range []int{1, 2, 3, 5, 10, 20} {
+		raw[prefix+"return_lag_"+itoa(l)] = safe(lagReturn(closes, l))
+		raw[prefix+"volume_lag_"+itoa(l)] = safe(lagVolume(vols, l))
+	}
+	for _, w := range []int{5, 10, 20, 50} {
+		raw[prefix+"rolling_mean_"+itoa(w)] = safe(meanLast(closes, w))
+		raw[prefix+"rolling_std_"+itoa(w)] = safe(stdLast(closes, w))
+		raw[prefix+"rolling_vol_mean_"+itoa(w)] = safe(meanLast(vols, w))
+		raw[prefix+"price_to_ma_"+itoa(w)] = safe(priceToMA(closes, w))
+	}
+	raw[prefix+"volatility_5"] = safe(rollingVolatility(closes, 5))
+	raw[prefix+"volatility_20"] = safe(rollingVolatility(closes, 20))
+	if raw[prefix+"volatility_20"] != 0 {
+		raw[prefix+"volatility_ratio"] = safe(raw[prefix+"volatility_5"] / raw[prefix+"volatility_20"])
+	}
+
+	raw[prefix+"hour"] = float64(ts.UTC().Hour())
+	raw[prefix+"day_of_week"] = float64(ts.UTC().Weekday())
+	if ts.UTC().Weekday() == time.Saturday || ts.UTC().Weekday() == time.Sunday {
+		raw[prefix+"is_weekend"] = 1
+	} else {
+		raw[prefix+"is_weekend"] = 0
+	}
+
+	raw[prefix+"trader_buy_ratio"] = 0
+	raw[prefix+"trader_sell_ratio"] = 0
+	raw[prefix+"trader_net_flow"] = 0
+}
+
+func ComputeSnapshot(
+	symbol string,
+	interval string,
+	klines1h []models.OHLCV,
+	klines4h []models.OHLCV,
+	klines1d []models.OHLCV,
+	featureCols []string,
+	now time.Time,
+) (*FeatureSnapshot, error) {
 	closed1h, series1h, err := PickClosedCandle(klines1h, time.Hour, now)
 	if err != nil {
 		return nil, err
 	}
 
-	closes := make([]float64, 0, len(series1h))
-	highs := make([]float64, 0, len(series1h))
-	lows := make([]float64, 0, len(series1h))
-	for _, k := range series1h {
-		closes = append(closes, k.Close)
-		highs = append(highs, k.High)
-		lows = append(lows, k.Low)
-	}
+	closes1h, highs1h, lows1h, vols1h := closesHighsLowsVolumes(series1h)
+	raw := make(map[string]float64, 512)
+	mapBaseAndCore(raw, closes1h, highs1h, lows1h, vols1h, closed1h.Open, closed1h.High, closed1h.Low, closed1h.Close, closed1h.Volume, closed1h.Timestamp.UTC())
 
-	ret1h := 0.0
-	if len(closes) >= 2 {
-		ret1h = pctChange(closes[len(closes)-1], closes[len(closes)-2])
-	}
-
-	ret4h := 0.0
-	if len(closes) >= 5 {
-		ret4h = pctChange(closes[len(closes)-1], closes[len(closes)-5])
-	}
-
-	vol20 := 0.0
-	if len(closes) >= 21 {
-		rets := make([]float64, 0, 20)
-		for i := len(closes) - 20; i < len(closes); i++ {
-			r := pctChange(closes[i], closes[i-1])
-			if math.IsNaN(r) || math.IsInf(r, 0) {
-				r = 0
-			}
-			rets = append(rets, r)
+	if len(klines4h) >= 2 {
+		if closed4h, series4h, e := PickClosedCandle(klines4h, 4*time.Hour, now); e == nil {
+			mapTF("tf4h_", raw, series4h, closed4h.Timestamp.UTC())
 		}
-		vol20 = stddev(rets)
+	}
+	if len(klines1d) >= 2 {
+		if closed1d, series1d, e := PickClosedCandle(klines1d, 24*time.Hour, now); e == nil {
+			mapTF("tf1d_", raw, series1d, closed1d.Timestamp.UTC())
+		}
 	}
 
-	m, sig, hist := macd(closes, 12, 26, 9)
+	aligned, computed, missing := AlignToSchema(raw, featureCols)
+
+	// legacy fields populated from aligned/raw for signal compatibility
+	m := aligned["macd"]
+	ms := aligned["macd_signal"]
+	mh := aligned["macd_hist"]
+	rsiVal := aligned["rsi"]
+	atrVal := aligned["atr"]
+	vol20 := aligned["volatility_20"]
 
 	snap := &FeatureSnapshot{
 		Symbol:    symbol,
 		Interval:  interval,
 		FeatureTS: closed1h.Timestamp.UTC(),
 
-		Open:   closed1h.Open,
-		High:   closed1h.High,
-		Low:    closed1h.Low,
-		Close:  closed1h.Close,
-		Volume: closed1h.Volume,
+		Open:   safe(closed1h.Open),
+		High:   safe(closed1h.High),
+		Low:    safe(closed1h.Low),
+		Close:  safe(closed1h.Close),
+		Volume: safe(closed1h.Volume),
 
-		Ret1H: ret1h,
-		Ret4H: ret4h,
+		Ret1H: safe(lagReturn(closes1h, 1)),
+		Ret4H: safe(lagReturn(closes1h, 4)),
 
-		// meta-compatible
-		SMA7:   sma(closes, 7),
-		SMA25:  sma(closes, 25),
-		SMA99:  sma(closes, 99),
-		SMA200: sma(closes, 200),
+		SMA7:   aligned["sma_7"],
+		SMA25:  aligned["sma_25"],
+		SMA99:  aligned["sma_99"],
+		SMA200: aligned["sma_200"],
 
-		EMA12:  ema(closes, 12),
-		EMA26:  ema(closes, 26),
-		EMA50:  ema(closes, 50),
-		EMA200: ema(closes, 200),
+		EMA12:  aligned["ema_12"],
+		EMA26:  aligned["ema_26"],
+		EMA50:  aligned["ema_50"],
+		EMA200: aligned["ema_200"],
 
 		MACD:       m,
-		MACDSignal: sig,
+		MACDSignal: ms,
+		MACDHist:   mh,
 
-		// extras
-		RSI14:        rsi(closes, 14),
-		MACDHist:     hist,
+		RSI14:        rsiVal,
+		ATR14:        atrVal,
 		Volatility20: vol20,
-		ATR14:        atr(highs, lows, closes, 14),
+
+		Features:      aligned,
+		SchemaColumns: len(featureCols),
+		ComputedCols:  computed,
+		MissingCols:   missing,
 	}
 
-	// 4h filter
+	// legacy filter_4h
 	if len(klines4h) >= 2 {
 		closed4h, series4h, e := PickClosedCandle(klines4h, 4*time.Hour, now)
 		if e == nil {
-			cl4 := make([]float64, 0, len(series4h))
-			for _, k := range series4h {
-				cl4 = append(cl4, k.Close)
-			}
+			cl4, _, _, _ := closesHighsLowsVolumes(series4h)
 			snap.Filter4H.FeatureTS = closed4h.Timestamp.UTC()
-			snap.Filter4H.Close = closed4h.Close
-			snap.Filter4H.EMA200 = ema(cl4, 200)
-			snap.Filter4H.RSI14 = rsi(cl4, 14)
+			snap.Filter4H.Close = safe(closed4h.Close)
+			snap.Filter4H.EMA200 = safe(ema(cl4, 200))
+			snap.Filter4H.RSI14 = safe(rsi(cl4, 14))
 		}
 	}
 

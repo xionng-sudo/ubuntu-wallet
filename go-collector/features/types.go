@@ -9,18 +9,17 @@ type FeatureSnapshot struct {
 	Interval  string    `json:"interval"` // "1h"
 	FeatureTS time.Time `json:"feature_ts"`
 
-	// Candle (from the closed candle)
+	// Backward-compatible candle fields
 	Close  float64 `json:"close"`
 	Open   float64 `json:"open"`
 	High   float64 `json:"high"`
 	Low    float64 `json:"low"`
 	Volume float64 `json:"volume"`
 
-	// Returns
+	// Legacy fields kept for signal package compatibility
 	Ret1H float64 `json:"ret_1h"`
 	Ret4H float64 `json:"ret_4h"`
 
-	// === Model-compatible features (from model_meta.json) ===
 	SMA7   float64 `json:"sma_7"`
 	SMA25  float64 `json:"sma_25"`
 	SMA99  float64 `json:"sma_99"`
@@ -33,14 +32,21 @@ type FeatureSnapshot struct {
 
 	MACD       float64 `json:"macd"`
 	MACDSignal float64 `json:"macd_signal"`
+	MACDHist   float64 `json:"macd_hist"`
 
-	// Extra features (not used by current meta but useful)
 	RSI14        float64 `json:"rsi_14"`
-	MACDHist     float64 `json:"macd_hist"`
 	Volatility20 float64 `json:"volatility_20"`
 	ATR14        float64 `json:"atr_14"`
 
-	// Multi-timeframe filter (from 4h closed candle)
+	// Full model input vector aligned to feature_columns_event_v3.json
+	Features map[string]float64 `json:"features"`
+
+	// Optional debug info
+	SchemaColumns int `json:"schema_columns"`
+	ComputedCols  int `json:"computed_cols"`
+	MissingCols   int `json:"missing_cols"`
+
+	// Legacy 4h block
 	Filter4H struct {
 		FeatureTS time.Time `json:"feature_ts"`
 		Close     float64   `json:"close"`

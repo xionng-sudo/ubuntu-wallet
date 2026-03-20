@@ -74,6 +74,7 @@ var (
 	runtimeDataDir   string
 	runtimeFastEvery time.Duration
 	runtimeSlowEvery time.Duration
+	runtimeFeatureColumns []string
 )
 
 func envOrDefault(key, def string) string {
@@ -173,6 +174,13 @@ func fileFreshOK(path string, now time.Time, maxAge time.Duration) (bool, map[st
 func main() {
 	log.SetFormatter(&log.TextFormatter{FullTimestamp: true})
 	log.SetLevel(log.InfoLevel)
+	schemaPath := envOrDefault("FEATURE_SCHEMA_PATH", "../models/current/feature_columns_event_v3.json")
+	cols, err := features.LoadFeatureColumns(schemaPath)
+	if err != nil {
+		log.Fatalf("Failed to load feature schema columns from %s: %v", schemaPath, err)
+	}
+	runtimeFeatureColumns = cols
+	log.Infof("Loaded feature schema columns: %d from %s", len(runtimeFeatureColumns), schemaPath)
 
 	mode := strings.TrimSpace(strings.ToLower(os.Getenv("KLINES_LOOKBACK_MODE")))
 	if mode == "" {
@@ -300,6 +308,7 @@ func computeAndPersistFeaturesAndSignals(dataDir string) {
 	store.mu.RLock()
 	kl1h := append([]models.OHLCV(nil), store.Klines["1h"]...)
 	kl4h := append([]models.OHLCV(nil), store.Klines["4h"]...)
+	kl1d := append([]models.OHLCV(nil), store.Klines["1d"]...)
 	store.mu.RUnlock()
 
 	if len(kl1h) < 2 {
@@ -308,7 +317,11 @@ func computeAndPersistFeaturesAndSignals(dataDir string) {
 	}
 
 	now := time.Now().UTC()
-	snap, err := features.ComputeSnapshot("ETHUSDT", "1h", kl1h, kl4h, now)
+	if len(runtimeFeatureColumns) == 0 {
+		log.Warn("Feature schema columns not loaded; skip feature compute")
+		return
+	}
+	snap, err := features.ComputeSnapshot("ETHUSDT", "1h", kl1h, kl4h, kl1d, runtimeFeatureColumns, now)
 	if err != nil {
 		log.Warnf("ComputeSnapshot failed: %v", err)
 		return
@@ -320,6 +333,8 @@ func computeAndPersistFeaturesAndSignals(dataDir string) {
 	if _, err := features.AppendHistory(dataDir, snap); err != nil {
 		log.Warnf("features.AppendHistory failed: %v", err)
 	}
+	log.Infof("Feature snapshot aligned: schema=%d computed=%d missing=%d",
+		snap.SchemaColumns, snap.ComputedCols, snap.MissingCols)
 
 	// === RULES ===
 	rulesRes := signal.RulesEngine(snap)
