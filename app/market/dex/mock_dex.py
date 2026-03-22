@@ -40,11 +40,13 @@ class MockDEXQuote(BaseDEXQuote):
         reference_prices: Optional[dict[str, float]] = None,
         spread_range: tuple[float, float] = (0.003, 0.010),
         noise_pct: float = 0.005,
+        bias_pct: float = 0.0,
         seed: Optional[int] = None,
     ) -> None:
         self._reference_prices = reference_prices or {}
         self._spread_min, self._spread_max = spread_range
         self._noise_pct = noise_pct
+        self._bias_pct = bias_pct
         self._rng = random.Random(seed)
 
     # ------------------------------------------------------------------
@@ -62,7 +64,7 @@ class MockDEXQuote(BaseDEXQuote):
                 symbol, _DEFAULT_PRICES.get(symbol, 100.0)
             )
             noise = self._rng.uniform(-self._noise_pct, self._noise_pct)
-            mid = ref * (1.0 + noise)
+            mid = ref * (1.0 + noise + self._bias_pct)
 
             half_spread = self._rng.uniform(self._spread_min, self._spread_max) / 2.0
             bid = mid * (1.0 - half_spread)

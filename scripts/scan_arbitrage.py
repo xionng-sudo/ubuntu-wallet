@@ -4,7 +4,8 @@ DEX/CEX Arbitrage Scanner CLI
 Usage:
     python scripts/scan_arbitrage.py --help
     python scripts/scan_arbitrage.py --symbols ETH/USDT,BTC/USDT --amount 10000
-    python scripts/scan_arbitrage.py --dex mock --output json --show-all
+    python scripts/scan_arbitrage.py --cex mock --dex mock --output json --show-all
+    python scripts/scan_arbitrage.py --dex mock --output table --show-all
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from app.market.cex.binance import BinanceCEXQuote
+from app.market.cex.mock_cex import MockCEXQuote
 from app.market.dex.mock_dex import MockDEXQuote
 from app.market.dex.uniswap_v3 import UniswapV3Quote
 from app.arbitrage.engine import ArbitrageEngine, ArbitrageOpportunity
@@ -77,6 +79,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Comma-separated trading pairs")
     p.add_argument("--amount", type=float, default=10_000.0,
                    help="Trade amount in USD")
+    p.add_argument("--cex", choices=["binance", "mock"], default="binance",
+                   help="CEX source to use (use 'mock' for offline demo)")
     p.add_argument("--dex", choices=["mock", "uniswap_v3"], default="mock",
                    help="DEX source to use")
     p.add_argument("--output", choices=["table", "json"], default="table",
@@ -91,6 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Minimum liquidity USD")
     p.add_argument("--show-all", action="store_true", default=False,
                    help="Show blocked opportunities too")
+    p.add_argument("--demo", action="store_true", default=False,
+                   help="Use demo mode with exaggerated mock spreads to show PASS results")
     return p
 
 
@@ -106,24 +112,44 @@ def main() -> int:
     # ------------------------------------------------------------------
     # Fetch CEX quotes
     # ------------------------------------------------------------------
-    print(f"Fetching Binance quotes for: {', '.join(symbols)} …", file=sys.stderr)
-    cex_fetcher = BinanceCEXQuote()
-    try:
+    if args.cex == "mock":
+        print("NOTE: using mock CEX (offline demo mode)", file=sys.stderr)
+        cex_fetcher = MockCEXQuote()
         cex_quotes = cex_fetcher.fetch_quotes(symbols, args.amount)
-    except Exception as exc:
-        print(f"ERROR: failed to fetch CEX quotes: {exc}", file=sys.stderr)
-        return 1
+    else:
+        print(f"Fetching Binance quotes for: {', '.join(symbols)} …", file=sys.stderr)
+        cex_fetcher = BinanceCEXQuote()
+        try:
+            cex_quotes = cex_fetcher.fetch_quotes(symbols, args.amount)
+        except Exception as exc:
+            print(f"ERROR: failed to fetch CEX quotes: {exc}", file=sys.stderr)
+            return 1
 
-    if not cex_quotes:
-        print("ERROR: no CEX quotes returned — check symbols or network", file=sys.stderr)
-        return 1
+        if not cex_quotes:
+            print(
+                "ERROR: no CEX quotes returned — check symbols or network.\n"
+                "TIP: run with --cex mock for offline demo mode.",
+                file=sys.stderr,
+            )
+            return 1
 
     # ------------------------------------------------------------------
     # Fetch DEX quotes
     # ------------------------------------------------------------------
     if args.dex == "mock":
         ref_prices = {q.symbol: q.mid for q in cex_quotes}
-        dex_fetcher = MockDEXQuote(reference_prices=ref_prices)
+        if args.demo:
+            # Demo mode: apply a positive bias so DEX prices are ~1.5% above CEX.
+            # BUY_CEX_SELL_DEX becomes profitable, illustrating a PASS result.
+            dex_fetcher = MockDEXQuote(
+                reference_prices=ref_prices,
+                spread_range=(0.001, 0.002),
+                noise_pct=0.002,
+                bias_pct=0.015,  # DEX is ~1.5% higher → buy CEX, sell DEX
+                seed=42,
+            )
+        else:
+            dex_fetcher = MockDEXQuote(reference_prices=ref_prices)
     else:
         dex_fetcher = UniswapV3Quote()  # type: ignore[assignment]
 
