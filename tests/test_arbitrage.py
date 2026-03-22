@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import os
 import time
@@ -740,6 +741,353 @@ class TestSwapExecutor(unittest.TestCase):
 
         self.assertTrue(result.success)
         self.assertEqual(result.gas_used, 120_000)
+
+
+# ---------------------------------------------------------------------------
+class TestBinanceCEXExecutor(unittest.TestCase):
+    """Tests for BinanceCEXExecutor — no real network calls."""
+
+    def _make_pass_opp(
+        self, direction: str = "BUY_CEX_SELL_DEX"
+    ) -> ArbitrageOpportunity:
+        return ArbitrageOpportunity(
+            symbol="ETH/USDT",
+            direction=direction,
+            cex_exchange="binance",
+            dex_exchange="uniswap_v3",
+            cex_price=3001.0,
+            dex_price=3060.0,
+            trade_amount_usd=10_000.0,
+            gross_profit_usd=200.0,
+            gross_profit_pct=2.0,
+            cex_fee_usd=10.0,
+            dex_fee_usd=30.0,
+            gas_cost_usd=13.5,
+            slippage_usd=5.0,
+            total_cost_usd=58.5,
+            net_profit_usd=141.5,
+            net_profit_pct=1.415,
+            liquidity_usd=500_000.0,
+            status="PASS",
+        )
+
+    def test_non_pass_opportunity_raises(self):
+        from app.execution.cex_executor import BinanceCEXExecutor
+        opp = self._make_pass_opp()
+        opp.status = "BLOCKED_LOW_PROFIT"
+        with self.assertRaises(ValueError):
+            BinanceCEXExecutor().execute_cex_leg(opp, "key", "secret")
+
+    def test_unknown_direction_raises(self):
+        from app.execution.cex_executor import BinanceCEXExecutor
+        opp = self._make_pass_opp()
+        opp.direction = "UNKNOWN"
+        with self.assertRaises(ValueError):
+            BinanceCEXExecutor().execute_cex_leg(opp, "key", "secret")
+
+    def test_missing_api_credentials_returns_error_result(self):
+        """Empty API key/secret should return an error CEXOrderResult (no raise)."""
+        from app.execution.cex_executor import BinanceCEXExecutor
+        opp = self._make_pass_opp()
+        # Missing keys → _ccxt_exchange raises ValueError which is caught
+        result = BinanceCEXExecutor().execute_cex_leg(opp, "", "")
+        self.assertFalse(result.success)
+        self.assertIsNotNone(result.error)
+
+    def test_buy_direction_maps_to_buy_side(self):
+        """BUY_CEX_SELL_DEX should place a buy order."""
+        from app.execution.cex_executor import BinanceCEXExecutor
+
+        mock_exchange = MagicMock()
+        mock_exchange.create_market_order.return_value = {"id": "order123"}
+        mock_exchange.fetch_order.return_value = {
+            "id": "order123", "status": "closed",
+            "filled": 3.33, "cost": 10_000.0, "average": 3003.0,
+        }
+
+        executor = BinanceCEXExecutor()
+        opp      = self._make_pass_opp("BUY_CEX_SELL_DEX")
+
+        with patch.object(executor, "_ccxt_exchange", return_value=mock_exchange):
+            result = executor.execute_cex_leg(opp, "key", "secret")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.side, "buy")
+        call_args = mock_exchange.create_market_order.call_args
+        self.assertEqual(call_args[0][0], "ETH/USDT")
+        self.assertEqual(call_args[0][1], "buy")
+        self.assertAlmostEqual(call_args[0][2], 10_000.0 / 3001.0, delta=0.01)
+
+    def test_sell_direction_maps_to_sell_side(self):
+        """BUY_DEX_SELL_CEX should place a sell order."""
+        from app.execution.cex_executor import BinanceCEXExecutor
+
+        mock_exchange = MagicMock()
+        mock_exchange.create_market_order.return_value = {"id": "ord456"}
+        mock_exchange.fetch_order.return_value = {
+            "id": "ord456", "status": "closed",
+            "filled": 3.33, "cost": 9_990.0, "average": 3000.0,
+        }
+        executor = BinanceCEXExecutor()
+        opp      = self._make_pass_opp("BUY_DEX_SELL_CEX")
+        with patch.object(executor, "_ccxt_exchange", return_value=mock_exchange):
+            result = executor.execute_cex_leg(opp, "key", "secret")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.side, "sell")
+
+    def test_failed_order_returns_unsuccessful_result(self):
+        """A closed order with filled=0 should return success=False."""
+        from app.execution.cex_executor import BinanceCEXExecutor
+
+        mock_exchange = MagicMock()
+        mock_exchange.create_market_order.return_value = {"id": "ord789"}
+        mock_exchange.fetch_order.return_value = {
+            "id": "ord789", "status": "canceled",
+            "filled": 0.0, "cost": 0.0, "average": None,
+        }
+        executor = BinanceCEXExecutor()
+        opp      = self._make_pass_opp()
+        with patch.object(executor, "_ccxt_exchange", return_value=mock_exchange):
+            result = executor.execute_cex_leg(opp, "key", "secret")
+
+        self.assertFalse(result.success)
+
+    def test_exchange_exception_returns_error_result(self):
+        """Any exception during order placement should return error result, not raise."""
+        from app.execution.cex_executor import BinanceCEXExecutor
+
+        mock_exchange = MagicMock()
+        mock_exchange.create_market_order.side_effect = RuntimeError("network error")
+        executor = BinanceCEXExecutor()
+        opp      = self._make_pass_opp()
+        with patch.object(executor, "_ccxt_exchange", return_value=mock_exchange):
+            result = executor.execute_cex_leg(opp, "key", "secret")
+
+        self.assertFalse(result.success)
+        self.assertIn("network error", result.error)
+
+
+# ---------------------------------------------------------------------------
+class TestArbitrageExecutor(unittest.TestCase):
+    """Tests for the dual-sided ArbitrageExecutor — no real network calls."""
+
+    def _make_pass_opp(self, direction: str = "BUY_CEX_SELL_DEX") -> ArbitrageOpportunity:
+        return ArbitrageOpportunity(
+            symbol="ETH/USDT", direction=direction,
+            cex_exchange="binance", dex_exchange="uniswap_v3",
+            cex_price=3001.0, dex_price=3060.0,
+            trade_amount_usd=10_000.0,
+            gross_profit_usd=200.0, gross_profit_pct=2.0,
+            cex_fee_usd=10.0, dex_fee_usd=30.0,
+            gas_cost_usd=13.5, slippage_usd=5.0, total_cost_usd=58.5,
+            net_profit_usd=141.5, net_profit_pct=1.415,
+            liquidity_usd=500_000.0, status="PASS",
+        )
+
+    def _make_uniswap_quote(self) -> Quote:
+        ts = time.time()
+        return Quote(
+            symbol="ETH/USDT", exchange="uniswap_v3", exchange_type="DEX",
+            bid=3050.0, ask=3060.0, mid=3055.0, timestamp=ts,
+            liquidity_usd=500_000.0,
+            raw={
+                "base_addr": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+                "quote_addr": "0xdAC17F958D2ee523a2206206994597C13D831ec7",
+                "base_decimals": 18, "quote_decimals": 6,
+                "fee_tier": 500, "amount_in_base": 3.277,
+                "gas_estimate": 150_000, "quote_timestamp": ts,
+                "quote_ttl_seconds": 30,
+            },
+        )
+
+    def _make_swap_result(self, success: bool = True):
+        from app.execution.swap_executor import SwapResult
+        return SwapResult(
+            tx_hash="0xdeadbeef", amount_in_wei=10**18,
+            amount_out_wei=10**6 * 3000,
+            gas_used=120_000, success=success,
+            error=None if success else "reverted",
+        )
+
+    def _make_cex_result(self, success: bool = True):
+        from app.execution.cex_executor import CEXOrderResult
+        return CEXOrderResult(
+            order_id="ord-1", symbol="ETH/USDT", side="buy",
+            amount=3.33, filled=3.33 if success else 0.0,
+            average_price=3001.0 if success else None,
+            cost=9_993.33 if success else 0.0,
+            status="closed" if success else "canceled",
+            success=success,
+            error=None if success else "canceled",
+        )
+
+    def test_chain_risk_blocks_execution(self):
+        """Mock DEX quote should be blocked by chain risk."""
+        from app.execution.arbitrage_executor import ArbitrageExecutor
+        opp       = self._make_pass_opp()
+        mock_quote = Quote(
+            symbol="ETH/USDT", exchange="mock_dex", exchange_type="DEX",
+            bid=3050.0, ask=3060.0, mid=3055.0, timestamp=time.time(),
+            liquidity_usd=500_000.0, raw={},
+        )
+        executor = ArbitrageExecutor()
+        result = executor.execute(
+            opp, mock_quote, MagicMock(), MagicMock(), "key", "secret"
+        )
+        self.assertFalse(result.success)
+        self.assertIsNotNone(result.error)
+        self.assertIn("MOCK_DEX", " ".join(result.warnings))
+
+    def test_buy_cex_sell_dex_both_succeed(self):
+        """BUY_CEX_SELL_DEX: CEX buy + DEX sell both succeed → success=True."""
+        from app.execution.arbitrage_executor import ArbitrageExecutor
+        opp   = self._make_pass_opp("BUY_CEX_SELL_DEX")
+        quote = self._make_uniswap_quote()
+
+        mock_dex = MagicMock()
+        mock_dex.execute_dex_leg.return_value = self._make_swap_result(True)
+        mock_cex = MagicMock()
+        mock_cex.execute_cex_leg.return_value = self._make_cex_result(True)
+
+        executor = ArbitrageExecutor(dex_executor=mock_dex, cex_executor=mock_cex)
+        result   = executor.execute(opp, quote, MagicMock(), MagicMock(), "k", "s")
+
+        self.assertTrue(result.success)
+        self.assertFalse(result.partial)
+        self.assertEqual(result.buy_leg.leg, "CEX")
+        self.assertEqual(result.sell_leg.leg, "DEX")
+
+    def test_buy_cex_sell_dex_cex_fails(self):
+        """BUY_CEX_SELL_DEX: CEX buy fails → abort, no DEX leg executed."""
+        from app.execution.arbitrage_executor import ArbitrageExecutor
+        opp   = self._make_pass_opp("BUY_CEX_SELL_DEX")
+        quote = self._make_uniswap_quote()
+
+        mock_dex = MagicMock()
+        mock_cex = MagicMock()
+        mock_cex.execute_cex_leg.return_value = self._make_cex_result(False)
+
+        executor = ArbitrageExecutor(dex_executor=mock_dex, cex_executor=mock_cex)
+        result   = executor.execute(opp, quote, MagicMock(), MagicMock(), "k", "s")
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.partial)   # buy failed → no exposure
+        self.assertIsNone(result.sell_leg)
+        mock_dex.execute_dex_leg.assert_not_called()
+
+    def test_buy_cex_sell_dex_dex_fails(self):
+        """BUY_CEX_SELL_DEX: CEX buy succeeds but DEX sell fails → partial=True."""
+        from app.execution.arbitrage_executor import ArbitrageExecutor
+        opp   = self._make_pass_opp("BUY_CEX_SELL_DEX")
+        quote = self._make_uniswap_quote()
+
+        mock_dex = MagicMock()
+        mock_dex.execute_dex_leg.side_effect = RuntimeError("liquidity error")
+        mock_cex = MagicMock()
+        mock_cex.execute_cex_leg.return_value = self._make_cex_result(True)
+
+        executor = ArbitrageExecutor(dex_executor=mock_dex, cex_executor=mock_cex)
+        result   = executor.execute(opp, quote, MagicMock(), MagicMock(), "k", "s")
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.partial)
+        self.assertIsNotNone(result.error)
+        self.assertIn("PARTIAL", result.error)
+
+    def test_buy_dex_sell_cex_both_succeed(self):
+        """BUY_DEX_SELL_CEX: DEX buy + CEX sell both succeed → success=True."""
+        from app.execution.arbitrage_executor import ArbitrageExecutor
+        opp   = self._make_pass_opp("BUY_DEX_SELL_CEX")
+        quote = self._make_uniswap_quote()
+
+        mock_dex = MagicMock()
+        mock_dex.execute_dex_leg.return_value = self._make_swap_result(True)
+        mock_cex = MagicMock()
+        mock_cex.execute_cex_leg.return_value = self._make_cex_result(True)
+
+        executor = ArbitrageExecutor(dex_executor=mock_dex, cex_executor=mock_cex)
+        result   = executor.execute(opp, quote, MagicMock(), MagicMock(), "k", "s")
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.buy_leg.leg, "DEX")
+        self.assertEqual(result.sell_leg.leg, "CEX")
+
+    def test_buy_dex_sell_cex_dex_fails(self):
+        """BUY_DEX_SELL_CEX: DEX buy fails → abort, no CEX leg executed."""
+        from app.execution.arbitrage_executor import ArbitrageExecutor
+        opp   = self._make_pass_opp("BUY_DEX_SELL_CEX")
+        quote = self._make_uniswap_quote()
+
+        mock_dex = MagicMock()
+        mock_dex.execute_dex_leg.return_value = self._make_swap_result(False)
+        mock_cex = MagicMock()
+
+        executor = ArbitrageExecutor(dex_executor=mock_dex, cex_executor=mock_cex)
+        result   = executor.execute(opp, quote, MagicMock(), MagicMock(), "k", "s")
+
+        self.assertFalse(result.success)
+        self.assertFalse(result.partial)
+        self.assertIsNone(result.sell_leg)
+        mock_cex.execute_cex_leg.assert_not_called()
+
+    def test_buy_dex_sell_cex_cex_fails(self):
+        """BUY_DEX_SELL_CEX: DEX buy succeeds but CEX sell fails → partial=True."""
+        from app.execution.arbitrage_executor import ArbitrageExecutor
+        opp   = self._make_pass_opp("BUY_DEX_SELL_CEX")
+        quote = self._make_uniswap_quote()
+
+        mock_dex = MagicMock()
+        mock_dex.execute_dex_leg.return_value = self._make_swap_result(True)
+        mock_cex = MagicMock()
+        mock_cex.execute_cex_leg.return_value = self._make_cex_result(False)
+
+        executor = ArbitrageExecutor(dex_executor=mock_dex, cex_executor=mock_cex)
+        result   = executor.execute(opp, quote, MagicMock(), MagicMock(), "k", "s")
+
+        self.assertFalse(result.success)
+        self.assertTrue(result.partial)
+        self.assertIn("PARTIAL", result.error)
+
+    def test_result_is_logged(self):
+        """execute() should write a JSON line to the result log."""
+        from app.execution.arbitrage_executor import ArbitrageExecutor
+        import tempfile, os as _os
+        opp   = self._make_pass_opp("BUY_CEX_SELL_DEX")
+        quote = self._make_uniswap_quote()
+
+        mock_dex = MagicMock()
+        mock_dex.execute_dex_leg.return_value = self._make_swap_result(True)
+        mock_cex = MagicMock()
+        mock_cex.execute_cex_leg.return_value = self._make_cex_result(True)
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".jsonl", delete=False) as tmp:
+            log_path = tmp.name
+
+        try:
+            executor = ArbitrageExecutor(
+                dex_executor=mock_dex, cex_executor=mock_cex, result_log=log_path
+            )
+            executor.execute(opp, quote, MagicMock(), MagicMock(), "k", "s")
+
+            with open(log_path) as f:
+                lines = f.readlines()
+            self.assertEqual(len(lines), 1)
+            logged = json.loads(lines[0])
+            self.assertEqual(logged["opportunity_symbol"], "ETH/USDT")
+            self.assertTrue(logged["success"])
+        finally:
+            _os.unlink(log_path)
+
+    def test_unknown_direction_returns_error(self):
+        from app.execution.arbitrage_executor import ArbitrageExecutor
+        opp = self._make_pass_opp()
+        opp.direction = "INVALID"
+        quote = self._make_uniswap_quote()
+        executor = ArbitrageExecutor()
+        result = executor.execute(opp, quote, MagicMock(), MagicMock(), "k", "s")
+        self.assertFalse(result.success)
+        self.assertIsNotNone(result.error)
 
 
 # ---------------------------------------------------------------------------

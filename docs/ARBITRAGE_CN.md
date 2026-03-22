@@ -68,16 +68,18 @@ app/
 ├── risk/
 │   ├── filters.py            ✅ 可配置风险过滤器
 │   └── chain_risk.py         ✅ 链上风险评估（TTL/MEV/路由校验）
-└── execution/
+├── execution/
     ├── wallet.py             ✅ 私钥加载与账户管理
     ├── erc20.py              ✅ ERC-20 授权管理
-    └── swap_executor.py      ✅ Uniswap V3 swap 执行器
+    ├── swap_executor.py      ✅ Uniswap V3 swap 执行器（DEX 侧）
+    ├── cex_executor.py       ✅ Binance 市价单执行器（CEX 侧）
+    └── arbitrage_executor.py ✅ DEX/CEX 双边套利编排器
 
 scripts/
 └── scan_arbitrage.py         ✅ CLI 扫描+执行入口
 
 tests/
-└── test_arbitrage.py         ✅ 63 个单元测试（无需 API Key，无网络调用）
+└── test_arbitrage.py         ✅ 79 个单元测试（无需 API Key，无网络调用）
 
 requirements-arbitrage.txt    ✅ 最小依赖清单（含 web3）
 ```
@@ -93,7 +95,9 @@ requirements-arbitrage.txt    ✅ 最小依赖清单（仅套利模块）
 | `MockCEXQuote` | ✅ 可用 | 内置模拟，无需网络，适合 CI/离线演示 |
 | `MockDEXQuote` | ✅ 可用 | 模拟 DEX，无需链上连接 |
 | `UniswapV3Quote` | ✅ 可用 | 调用链上 QuoterV2，需 `ETHEREUM_RPC_URL` |
-| `UniswapV3SwapExecutor` | ✅ 可用 | 链上 swap 执行，需 `WALLET_PRIVATE_KEY` |
+| `UniswapV3SwapExecutor` | ✅ 可用 | 链上 swap 执行，需 `ETHEREUM_RPC_URL` + `WALLET_PRIVATE_KEY` |
+| `BinanceCEXExecutor` | ✅ 可用 | Binance 市价单，需 `BINANCE_API_KEY` + `BINANCE_API_SECRET` |
+| `ArbitrageExecutor` | ✅ 可用 | 双边编排器，需上述全部配置 |
 
 ### 默认费率参数
 
@@ -232,7 +236,7 @@ python scripts/scan_arbitrage.py \
   --slippage-tolerance 0.5
 ```
 
-**执行流程：**
+**执行流程（DEX 侧）：**
 1. 扫描 PASS 机会
 2. 链上风险评估（Quote TTL / MEV / 路由元数据校验）
 3. 检查钱包 tokenIn 余额
@@ -241,7 +245,67 @@ python scripts/scan_arbitrage.py \
 6. 签名并广播 `exactInputSingle` 交易
 7. 等待 receipt 并输出结果
 
-> **注**：当前仅执行 **DEX 侧**（Uniswap swap）。CEX 侧（Binance 下单）需要额外集成 CEX 订单 API，不在本 PR 范围内。
+---
+
+### 🔄 双边闭环执行（DEX + CEX，需要 API Key + 私钥）
+
+这是完整的套利执行路径，同时执行 DEX 侧（链上 swap）和 CEX 侧（Binance 市价单）。
+
+**前置条件**
+
+```dotenv
+ETHEREUM_RPC_URL=https://mainnet.infura.io/v3/YOUR_KEY   # 以太坊 RPC
+WALLET_PRIVATE_KEY=0xYOUR_64HEX_PRIVATE_KEY               # DEX swap 钱包
+BINANCE_API_KEY=your_api_key                              # CEX 下单（Spot 权限）
+BINANCE_API_SECRET=your_api_secret
+```
+
+**执行命令**
+
+```bash
+# ⚠️ 真实交易 + 真实订单 — 请确认已理解风险
+python scripts/scan_arbitrage.py \
+  --cex binance --dex uniswap_v3 \
+  --symbols ETH/USDT --amount 5000 \
+  --execute-both \
+  --slippage-tolerance 0.5
+```
+
+**双边执行顺序**
+
+| 方向 | 第一腿（买入） | 第二腿（卖出） |
+|------|------------|------------|
+| `BUY_CEX_SELL_DEX` | CEX 买入（Binance 市价买） | DEX 卖出（Uniswap swap） |
+| `BUY_DEX_SELL_CEX` | DEX 买入（Uniswap swap） | CEX 卖出（Binance 市价卖） |
+
+**失败处理逻辑**
+
+| 情景 | 处理方式 | 资金暴露 |
+|------|---------|---------|
+| 第一腿失败 | 立即终止，第二腿不执行 | 无 |
+| 第一腿成功、第二腿失败 | 记录 `partial=True`，stderr 告警 | **有**（需手动平仓） |
+| 两腿均成功 | 记录 `success=True` | 无（已平仓） |
+
+**结果记录**
+
+每次执行结果自动追加到 `data/arb_results.jsonl`：
+
+```json
+{
+  "opportunity_symbol": "ETH/USDT",
+  "direction": "BUY_CEX_SELL_DEX",
+  "buy_leg": {"leg": "CEX", "success": true, "detail": {...}},
+  "sell_leg": {"leg": "DEX", "success": true, "detail": {...}},
+  "success": true,
+  "partial": false,
+  "elapsed_seconds": 3.2,
+  "timestamp": 1742000000.0,
+  "warnings": [],
+  "error": null
+}
+```
+
+> **注**：Binance API Key 需要 **Spot Trading** 权限（只需创建/查询订单，不需提现权限）。建议新建专用 Key 并绑定 IP 白名单。
 
 ### 指定交易对与金额
 
@@ -306,18 +370,19 @@ python scripts/scan_arbitrage.py \
 ### 完整参数列表
 
 ```
---symbols       交易对，逗号分隔（默认：ETH/USDT,BTC/USDT,BNB/USDT）
---amount        单笔交易额（USD，默认：10000）
---cex           CEX 来源：binance | mock（默认：binance）
---dex           DEX 来源：mock | uniswap_v3（默认：mock）
---output        输出格式：table | json（默认：table）
---min-profit    最低净利润（USD，默认：1.0）
---max-gas       最高 Gas 费（USD，默认：50.0）
---max-slippage  最大滑点 %（默认：1.0）
---min-liquidity 最低流动性（USD，默认：10000）
---show-all      显示所有机会，包括被过滤的（默认：False）
---demo          演示模式：模拟 DEX 价格偏高 ~1.5%，保证有 PASS 结果出现
---execute       执行 DEX 侧链上 swap（需要 ETHEREUM_RPC_URL + WALLET_PRIVATE_KEY）
+--symbols           交易对，逗号分隔（默认：ETH/USDT,BTC/USDT,BNB/USDT）
+--amount            单笔交易额（USD，默认：10000）
+--cex               CEX 来源：binance | mock（默认：binance）
+--dex               DEX 来源：mock | uniswap_v3（默认：mock）
+--output            输出格式：table | json（默认：table）
+--min-profit        最低净利润（USD，默认：1.0）
+--max-gas           最高 Gas 费（USD，默认：50.0）
+--max-slippage      最大滑点 %（默认：1.0）
+--min-liquidity     最低流动性（USD，默认：10000）
+--show-all          显示所有机会，包括被过滤的（默认：False）
+--demo              演示模式：模拟 DEX 价格偏高 ~1.5%，保证有 PASS 结果出现
+--execute           仅执行 DEX 侧链上 swap（需要 ETHEREUM_RPC_URL + WALLET_PRIVATE_KEY）
+--execute-both      双边闭环执行 DEX + CEX（需要以上 + BINANCE_API_KEY + BINANCE_API_SECRET）
 --slippage-tolerance  执行时最大可接受滑点 %（默认：0.5）
 ```
 
@@ -637,8 +702,8 @@ WantedBy=multi-user.target
 | P0 | 需求确认与架构设计 | ✅ 已完成 |
 | P1 | DEX/CEX 扫描器 MVP | ✅ 已完成 |
 | P2 | 链上报价 + DEX 执行（本 PR） | ✅ 已完成 |
-| P3 | 多链支持（BSC / Arbitrum / Polygon） | 🔜 下一阶段 |
-| P4 | CEX 执行闭环 + 双侧原子套利 | 📋 规划中 |
+| P3 | CEX 执行 + DEX/CEX 双边闭环（本 PR） | ✅ 已完成 |
+| P4 | 多链支持（BSC / Arbitrum / Polygon） | 🔜 下一阶段 |
 | P5 | 高级风控（MEV 保护、Flash Loan） | 📋 规划中 |
 | P6 | 生产化（数据库、Dashboard、监控） | 📋 长期 |
 

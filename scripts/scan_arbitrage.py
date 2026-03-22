@@ -9,8 +9,12 @@ Usage:
     # Real on-chain quote (requires ETHEREUM_RPC_URL in .env)
     python scripts/scan_arbitrage.py --dex uniswap_v3 --show-all
 
-    # Execute DEX leg (requires ETHEREUM_RPC_URL + WALLET_PRIVATE_KEY in .env)
+    # Execute DEX leg only (requires ETHEREUM_RPC_URL + WALLET_PRIVATE_KEY in .env)
     python scripts/scan_arbitrage.py --dex uniswap_v3 --execute
+
+    # Execute BOTH legs — full DEX/CEX dual-sided closed loop
+    # (requires ETHEREUM_RPC_URL + WALLET_PRIVATE_KEY + BINANCE_API_KEY + BINANCE_API_SECRET)
+    python scripts/scan_arbitrage.py --dex uniswap_v3 --execute-both
 """
 from __future__ import annotations
 
@@ -105,9 +109,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--execute", action="store_true", default=False,
         help=(
-            "Execute the DEX leg of PASS opportunities on-chain via Uniswap V3. "
+            "Execute the DEX leg only of PASS opportunities on-chain via Uniswap V3. "
             "Requires --dex uniswap_v3, ETHEREUM_RPC_URL and WALLET_PRIVATE_KEY in .env. "
             "WARNING: this sends real transactions and spends real funds."
+        ),
+    )
+    p.add_argument(
+        "--execute-both", action="store_true", default=False,
+        help=(
+            "Execute BOTH the DEX and CEX legs — full dual-sided closed-loop arbitrage. "
+            "Requires --dex uniswap_v3, ETHEREUM_RPC_URL, WALLET_PRIVATE_KEY, "
+            "BINANCE_API_KEY and BINANCE_API_SECRET in .env. "
+            "WARNING: this sends real transactions and real orders, spending real funds. "
+            "A partial-fill (one leg succeeds, other fails) leaves an open position."
         ),
     )
     p.add_argument(
@@ -127,18 +141,26 @@ def main() -> int:
         return 1
 
     # ------------------------------------------------------------------
-    # Validate --execute preconditions
+    # Validate --execute / --execute-both preconditions
     # ------------------------------------------------------------------
-    if args.execute:
+    if args.execute and args.execute_both:
+        print("ERROR: use either --execute or --execute-both, not both", file=sys.stderr)
+        return 1
+
+    if args.execute or args.execute_both:
         if args.dex != "uniswap_v3":
-            print(
-                "ERROR: --execute requires --dex uniswap_v3",
-                file=sys.stderr,
-            )
+            print("ERROR: --execute/--execute-both requires --dex uniswap_v3", file=sys.stderr)
             return 1
         if args.cex == "mock":
+            print("ERROR: --execute/--execute-both requires real CEX data (--cex binance)", file=sys.stderr)
+            return 1
+
+    if args.execute_both:
+        api_key    = os.environ.get("BINANCE_API_KEY",    "")
+        api_secret = os.environ.get("BINANCE_API_SECRET", "")
+        if not api_key or not api_secret:
             print(
-                "ERROR: --execute requires real CEX data (--cex binance)",
+                "ERROR: --execute-both requires BINANCE_API_KEY and BINANCE_API_SECRET in .env.",
                 file=sys.stderr,
             )
             return 1
@@ -243,6 +265,12 @@ def main() -> int:
     if args.execute and passing > 0:
         return _run_execution(args, opportunities, dex_quotes_by_symbol)
 
+    # ------------------------------------------------------------------
+    # Optional dual-sided execution (--execute-both)
+    # ------------------------------------------------------------------
+    if args.execute_both and passing > 0:
+        return _run_dual_execution(args, opportunities, dex_quotes_by_symbol)
+
     return 0
 
 
@@ -320,6 +348,95 @@ def _run_execution(args, opportunities, dex_quotes_by_symbol: dict) -> int:
             print(f"  [{opp.symbol}] ERROR: {exc}", file=sys.stderr)
 
     return 0
+
+
+def _run_dual_execution(args, opportunities, dex_quotes_by_symbol: dict) -> int:
+    """
+    Execute BOTH legs (DEX + CEX) for each PASS opportunity.
+
+    Execution order:
+      BUY_CEX_SELL_DEX → CEX buy first, then DEX sell.
+      BUY_DEX_SELL_CEX → DEX buy first, then CEX sell.
+
+    Results are written to data/arb_results.jsonl.
+    Partial fills (one leg succeeded, other failed) emit an alert to stderr.
+    """
+    from app.execution.wallet import get_account
+    from app.execution.swap_executor import UniswapV3SwapExecutor
+    from app.execution.cex_executor import BinanceCEXExecutor
+    from app.execution.arbitrage_executor import ArbitrageExecutor
+
+    try:
+        from web3 import Web3
+    except ImportError:
+        print("ERROR: web3 is not installed. Run: pip install web3>=6.0.0", file=sys.stderr)
+        return 1
+
+    rpc_url = os.environ.get("ETHEREUM_RPC_URL", "")
+    if not rpc_url:
+        print("ERROR: ETHEREUM_RPC_URL is not set.", file=sys.stderr)
+        return 1
+
+    try:
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        if not w3.is_connected():
+            print(f"ERROR: Cannot connect to Ethereum RPC at {rpc_url!r}", file=sys.stderr)
+            return 1
+        account = get_account(w3)
+    except Exception as exc:
+        print(f"ERROR: wallet/RPC setup failed: {exc}", file=sys.stderr)
+        return 1
+
+    api_key    = os.environ.get("BINANCE_API_KEY",    "")
+    api_secret = os.environ.get("BINANCE_API_SECRET", "")
+
+    orchestrator = ArbitrageExecutor(
+        dex_executor=UniswapV3SwapExecutor(
+            slippage_tolerance=args.slippage_tolerance / 100.0,
+        ),
+        cex_executor=BinanceCEXExecutor(),
+    )
+
+    n_pass = sum(1 for o in opportunities if o.status == "PASS")
+    print(
+        f"\n⚠️  DUAL-SIDED EXECUTION for {n_pass} PASS opportunity(ies) "
+        "— REAL TRANSACTIONS + REAL CEX ORDERS, REAL FUNDS",
+        file=sys.stderr,
+    )
+
+    for opp in opportunities:
+        if opp.status != "PASS":
+            continue
+        dex_quote = dex_quotes_by_symbol.get(opp.symbol)
+        if dex_quote is None:
+            print(f"  [{opp.symbol}] SKIP — no DEX quote found", file=sys.stderr)
+            continue
+
+        result = orchestrator.execute(opp, dex_quote, w3, account, api_key, api_secret)
+
+        for warn in result.warnings:
+            print(f"  [{opp.symbol}] WARN: {warn}", file=sys.stderr)
+
+        if result.error:
+            print(f"  [{opp.symbol}] ERROR: {result.error}", file=sys.stderr)
+
+        if result.success:
+            print(f"  [{opp.symbol}] {opp.direction} ✅ BOTH LEGS SUCCESS"
+                  f" ({result.elapsed_seconds:.1f}s)", file=sys.stderr)
+        elif result.partial:
+            buy_status  = "✅" if result.buy_leg  and result.buy_leg.success  else "❌"
+            sell_status = "✅" if result.sell_leg and result.sell_leg.success else "❌"
+            print(
+                f"  [{opp.symbol}] {opp.direction} ⚠️  PARTIAL "
+                f"buy={buy_status} sell={sell_status} — POSITION OPEN, manual action needed",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  [{opp.symbol}] {opp.direction} ❌ ABORTED (no exposure)", file=sys.stderr)
+
+    print("\nResults appended to data/arb_results.jsonl", file=sys.stderr)
+    return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
