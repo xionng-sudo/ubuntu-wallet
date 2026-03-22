@@ -2,6 +2,8 @@
 
 > 本文档用于将当前系统从“准生产研究系统”推进为“可持续维护的生产候选系统”。
 > 每条任务都可直接拆成 GitHub Issue。
+>
+> **文档说明**：P0～P2 阶段（Issue 1～11）均已实现。P3 阶段（Issue 12～14）为后续优化方向，尚待开发。
 
 ---
 
@@ -16,10 +18,10 @@
 | Issue 5 | P1 | ✅ 已实现 | `go-collector/exog/collector.go`, `python-analyzer/exog_features.py`, `ml-service/feature_builder.py` | `ENABLE_EXOG_FEATURES` |
 | Issue 6 | P1 | ✅ 已实现 | `scripts/report_drift.py`, `systemd/drift-monitor.service` | `ENABLE_DRIFT_MONITOR` |
 | Issue 7 | P1 | ✅ 已实现 | `python-analyzer/calibration_report.py`, `systemd/calibration-report.service` | `ENABLE_CALIB_REPORT` |
-| Issue 8 | P2 | ✅ 已存在+更新 | `docs/DEPLOY_CN.md` (章节21已加) | — |
-| Issue 9 | P2 | ✅ 已存在+更新 | `docs/RUNBOOK_CN.md` (章节16已加) | — |
-| Issue 10 | P2 | ✅ 已存在+更新 | `docs/MODEL_LIFECYCLE_CN.md` (章节16已加) | — |
-| Issue 11 | P2 | ✅ 已存在+更新 | `docs/FAILURE_MODES_CN.md` (章节13已加) | — |
+| Issue 8 | P2 | ✅ 已实现 | `docs/DEPLOY_CN.md` | — |
+| Issue 9 | P2 | ✅ 已实现 | `docs/RUNBOOK_CN.md` | — |
+| Issue 10 | P2 | ✅ 已实现 | `docs/MODEL_LIFECYCLE_CN.md` | — |
+| Issue 11 | P2 | ✅ 已实现 | `docs/FAILURE_MODES_CN.md` | — |
 | Issue 12 | P3 | ❌ 待实现 | — | — |
 | Issue 13 | P3 | ❌ 待实现 | — | — |
 | Issue 14 | P3 | ❌ 待实现 | — | — |

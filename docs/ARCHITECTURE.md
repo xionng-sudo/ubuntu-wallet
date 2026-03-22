@@ -1,6 +1,8 @@
 # ubuntu-wallet: Architecture & Operations Guide
 
 > **Audience**: Engineers and operators who need to understand, deploy, retrain, and maintain the ubuntu-wallet ML trading system for ETH perpetual futures.
+>
+> **中文用户**：请参阅根目录 [README.md](../README.md)（中文详细版）和 [ARCHITECTURE_CN.md](ARCHITECTURE_CN.md)（中文完整架构与部署手册），内容更为详细。
 
 ---
 

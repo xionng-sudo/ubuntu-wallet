@@ -1,1033 +1,1166 @@
-# 🔮 ETH Crypto Prediction & ML Trading System
+# ETH 加密货币预测与机器学习交易系统
 
-> High-precision, continuously-evaluable ML trading pipeline for ETH perpetual futures.
-> Built on Go data collection + Python ML training + FastAPI inference + systematic evaluation loop.
-
-**→ For a full technical and operational guide see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**
+> **定位说明**：本项目是一套以 ETH 永续合约为核心研究对象的一体化系统，涵盖数据采集、特征工程、模型训练、在线推理、回测评估与 systemd 生产部署。  
+> **适用场景**：研究学习 / 回测验证 / 论文实验 / 小规模策略评估。  
+> **不适合**：直接作为全自动实盘系统使用——使用真实资金前请充分理解系统逻辑并完成独立验证。
 
 ---
 
-## Quick Start
+## 目录
+
+1. [项目能力说明](#1-项目能力说明)
+2. [仓库结构说明](#2-仓库结构说明)
+3. [系统架构](#3-系统架构)
+4. [环境要求](#4-环境要求)
+5. [快速开始](#5-快速开始)
+6. [详细安装与配置](#6-详细安装与配置)
+7. [配置说明（.env）](#7-配置说明env)
+8. [数据采集（Go Collector）](#8-数据采集go-collector)
+9. [模型训练（Python Analyzer）](#9-模型训练python-analyzer)
+10. [推理服务（ML Service）](#10-推理服务ml-service)
+11. [回测说明](#11-回测说明)
+12. [模拟运行与日志评估](#12-模拟运行与日志评估)
+13. [生产部署（systemd）](#13-生产部署systemd)
+14. [常用命令汇总](#14-常用命令汇总)
+15. [故障排查](#15-故障排查)
+16. [风险提示与免责声明](#16-风险提示与免责声明)
+
+---
+
+## 1. 项目能力说明
+
+| 能力模块 | 说明 |
+|---|---|
+| **数据采集** | Go 编写的高性能采集器，支持从 Binance / OKX / Coinbase 拉取 1h/4h/1d K线数据，持久化为 JSON 文件 |
+| **特征工程** | 多周期（1h/4h/1d）技术指标特征构造，20+ 种指标，包含趋势、动量、波动率、成交量 |
+| **模型训练** | LightGBM + XGBoost 基学习器 + Logistic Regression 堆叠元模型，三分类（LONG/SHORT/FLAT）+ 概率校准 |
+| **在线推理** | FastAPI 推理服务（端口 9000），提供 `/predict`、`/healthz` 等接口 |
+| **回测** | 三重障碍法回测引擎（TP/SL/TIMEOUT），支持参数网格搜索，输出胜率/收益/MDD 等指标 |
+| **模拟运行** | 基于历史 K 线回放的模拟交易，复现历史信号与出场逻辑 |
+| **日志评估** | 对线上预测日志（JSONL）做事后评估，与回测逻辑对齐 |
+| **systemd 运维** | 完整的 systemd 服务单元，支持自动重启、健康检查定时任务、Telegram 告警 |
+
+---
+
+## 2. 仓库结构说明
+
+```
+ubuntu-wallet/
+├── .env.example                    # 环境变量模板（复制为 .env 并填入密钥）
+├── .gitignore
+├── README.md                       # 本文档
+├── README_backtest_event_v3_1h.md  # event_v3 1h 策略回测详细记录
+│
+├── go-collector/                   # Go 数据采集服务
+│   ├── main.go                     # HTTP API 服务主入口
+│   ├── go.mod / go.sum             # Go 模块定义
+│   ├── collector/                  # 各交易所采集器（Binance/OKX/Coinbase）
+│   ├── market/                     # 行情数据结构
+│   ├── models/                     # 数据模型
+│   ├── signal/                     # 信号相关
+│   ├── exog/                       # 外生特征
+│   ├── features/                   # 特征计算
+│   └── OPS-NOTES.md                # 运维操作笔记
+│
+├── python-analyzer/                # Python 训练/分析引擎
+│   ├── train_event_stack_v3.py     # 主训练脚本（LightGBM+XGBoost+堆叠）
+│   ├── labeling.py                 # 标签生成（三分类 / 三重障碍）
+│   ├── walkforward_cv.py           # 时间序列交叉验证（无数据泄露）
+│   ├── calibration_report.py       # 校准报告生成
+│   ├── backtest_multi_tf.py        # 多周期回测工具
+│   ├── technical_analysis.py       # 技术指标计算（20+ 种）
+│   ├── config.py                   # 配置
+│   ├── requirements.txt            # Python 依赖
+│   └── ...
+│
+├── ml-service/                     # FastAPI 推理服务（端口 9000）
+│   ├── app.py                      # FastAPI 主入口（/predict, /healthz）
+│   ├── model_loader.py             # 模型加载逻辑（从 models/current/ 目录加载）
+│   ├── feature_builder.py          # 多周期特征构造 + schema 验证
+│   ├── calibration.py              # 概率校准
+│   ├── prediction_logger.py        # 预测日志（写入 data/predictions_log.jsonl）
+│   ├── requirements.txt            # Python 依赖
+│   └── README.md                   # 服务说明
+│
+├── scripts/                        # 运行、回测、评估脚本
+│   ├── backtest_event_v3_http.py   # 三重障碍回测 + 参数网格搜索
+│   ├── evaluate_from_logs.py       # 基于预测日志的事后评估
+│   ├── live_trader_eth_perp_simulated.py  # 模拟交易（历史回放）
+│   ├── live_trader_eth_perp_binance.py    # Binance DRY-RUN / 真实交易
+│   ├── mt_trend_utils.py           # 多周期趋势过滤工具
+│   ├── rollback_model.py           # 模型版本回滚
+│   ├── generate_daily_report.py    # 日报生成
+│   ├── export_feature_schema.py    # 导出特征 schema
+│   ├── report_drift.py             # 特征漂移报告
+│   ├── analysis_tool.py            # 分析工具
+│   ├── install.sh                  # 一键安装脚本
+│   ├── run.sh                      # 服务运行管理
+│   └── ops/                        # 运维脚本（健康检查、Telegram 通知）
+│
+├── systemd/                        # systemd 服务单元与定时器
+│   ├── go-collector.service        # Go 采集器服务
+│   ├── ml-service.service          # ML 推理服务
+│   ├── evaluate-predictions.service / .timer  # 定期评估
+│   ├── check-go-collector.service / .timer    # 健康检查（每分钟）
+│   ├── daily-report.service / .timer          # 日报定时
+│   ├── drift-monitor.service / .timer         # 特征漂移监控
+│   ├── calibration-report.service / .timer    # 校准报告
+│   ├── env/                        # 环境变量模板（不含真实密钥）
+│   ├── DEPLOY-NEW-SERVER.md        # 新服务器部署完整说明
+│   └── UPGRADE.md                  # 升级说明
+│
+├── docs/                           # 详细文档
+│   ├── INDEX_CN.md                 # 文档索引
+│   ├── ARCHITECTURE.md / ARCHITECTURE_CN.md  # 架构说明（英/中）
+│   ├── DEPLOY_CN.md                # 中文部署说明
+│   ├── MODEL_LIFECYCLE_CN.md       # 模型生命周期管理
+│   ├── RUNBOOK_CN.md               # 运维手册
+│   ├── FAILURE_MODES_CN.md         # 故障模式与应对
+│   ├── ETH_perp_risk_rules.md      # ETH 永续合约风控规则
+│   └── ROADMAP_ISSUES_CN.md        # 路线图与已知问题
+│
+├── tests/                          # 测试文件
+│   ├── test_p0_pointer_and_schema.py  # 模型指针与 schema 回归测试
+│   └── verify_system.sh            # 系统验证脚本
+│
+├── tools/                          # 工具脚本
+│
+├── models/                         # 模型产物目录（运行时生成，不进 Git）
+│   ├── current/                    # 当前激活模型目录（ml-service 从此目录加载）
+│   ├── registry.json               # 模型版本注册表（记录所有历史版本）
+│   └── archive/<版本目录>/         # 各历史版本模型文件归档
+│
+└── data/                           # 数据目录（运行时生成，不进 Git）
+    ├── klines_1h.json              # 1 小时 K 线
+    ├── klines_4h.json              # 4 小时 K 线
+    ├── klines_1d.json              # 日线 K 线
+    └── predictions_log.jsonl       # 预测日志（JSONL 格式）
+```
+
+---
+
+## 3. 系统架构
+
+```
+┌─────────────────────────────────────────────────┐
+│              第一层：市场数据采集                   │
+│                                                 │
+│  Binance API ──┐                                │
+│  OKX API     ──┼─► go-collector (端口 8080)     │
+│  Coinbase API──┘      │                         │
+│                       ▼                         │
+│              data/klines_1h.json                │
+│              data/klines_4h.json                │
+│              data/klines_1d.json                │
+└─────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────┐
+│            第二层：离线训练流水线                   │
+│                                                 │
+│  python-analyzer/train_event_stack_v3.py        │
+│    ├── labeling.py（三重障碍标签）               │
+│    ├── 多周期特征构造（1h/4h/1d）               │
+│    ├── walkforward_cv.py（时序交叉验证）         │
+│    └── 模型训练（LightGBM + XGBoost + 堆叠）    │
+│              │                                  │
+│              ▼                                  │
+│         models/<版本目录>/                      │
+│           lightgbm_event_v3.pkl                 │
+│           xgboost_event_v3.json                 │
+│           stacking_event_v3.pkl                 │
+│           calibration_event_v3.pkl              │
+│           feature_columns_event_v3.json         │
+│           model_meta.json                       │
+└─────────────────────────────────────────────────┘
+         │（模型产物）
+         ▼
+┌─────────────────────────────────────────────────┐
+│            第三层：在线推理服务                    │
+│                                                 │
+│  ml-service/app.py（FastAPI, 端口 9000）         │
+│    ├── POST /predict                            │
+│    ├── GET  /healthz                            │
+│    ├── feature_builder.py（特征构造）            │
+│    ├── model_loader.py（从 models/current/ 目录加载） │
+│    └── prediction_logger.py（写预测日志）        │
+│              │                                  │
+│              ▼                                  │
+│      data/predictions_log.jsonl                 │
+└─────────────────────────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────────────────┐
+│            第四层：策略执行 / 评估                  │
+│                                                 │
+│  回测：backtest_event_v3_http.py                │
+│    └── 调用 /predict，三重障碍法网格搜索          │
+│                                                 │
+│  模拟交易：live_trader_eth_perp_simulated.py     │
+│    └── 历史回放，输出模拟盈亏                    │
+│                                                 │
+│  日志评估：evaluate_from_logs.py                │
+│    └── 读取 predictions_log.jsonl，             │
+│        对照真实 K 线计算实际收益指标             │
+└─────────────────────────────────────────────────┘
+```
+
+---
+
+## 4. 环境要求
+
+| 依赖项 | 推荐版本 | 说明 |
+|---|---|---|
+| 操作系统 | Ubuntu 22.04 LTS | 其他 Linux 发行版未经充分测试 |
+| Python | 3.10 / 3.11 / 3.12 | 建议使用 venv 隔离环境 |
+| Go | 1.21 及以上 | 用于编译 go-collector |
+| `jq` | 任意最新版 | JSON 解析工具，健康检查脚本依赖 |
+| `curl` | 任意最新版 | 服务健康检查 |
+| `git` | 任意最新版 | 拉取仓库 |
+
+**基础系统依赖安装：**
 
 ```bash
-# 1. Install dependencies
-./scripts/install.sh
+# 更新包列表
+sudo apt update
 
-# 2. Build and start Go collector (collects kline data)
-cd go-collector && go build -o go-collector . && ./go-collector &
+# 安装基础工具
+sudo apt install -y git curl jq python3 python3-venv python3-pip build-essential
 
-# 3. Train the event_v3 model (needs klines_1h/4h/1d.json in data/)
+# 安装 Go（使用官方安装包，推荐）
+wget https://go.dev/dl/go1.22.4.linux-amd64.tar.gz
+sudo tar -C /usr/local -xzf go1.22.4.linux-amd64.tar.gz
+echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+source ~/.bashrc
+
+# 验证 Go 安装
+go version
+```
+
+---
+
+## 5. 快速开始
+
+以下是从零开始跑通整个流水线的最短路径。
+
+```bash
+# ── 第一步：克隆仓库 ──────────────────────────────────────
+cd ~
+git clone https://github.com/xionng-sudo/ubuntu-wallet.git
+cd ubuntu-wallet
+
+# ── 第二步：创建运行时目录 ────────────────────────────────
+mkdir -p data models logs bin
+
+# ── 第三步：复制并填写环境变量 ────────────────────────────
+cp .env.example .env
+# 用你的编辑器打开 .env，填入 Binance/OKX API Key 等信息
+nano .env
+
+# ── 第四步：安装 Python 依赖 ──────────────────────────────
+cd ml-service
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+deactivate
+cd ..
+
+# ── 第五步：编译 Go Collector ─────────────────────────────
+cd go-collector
+go mod tidy
+go build -o ../bin/go-collector .
+cd ..
+
+# ── 第六步：启动 Go Collector（后台运行） ─────────────────
+nohup ./bin/go-collector > logs/go-collector.log 2>&1 &
+
+# ── 第七步：验证采集器健康状态 ────────────────────────────
+sleep 3
+curl -s http://127.0.0.1:8080/api/healthz | jq .
+
+# ── 第八步：启动推理服务（需要模型已训练完毕） ─────────────
+cd ml-service
+source .venv/bin/activate
+nohup uvicorn app:app --host 127.0.0.1 --port 9000 \
+  > ../logs/ml-service.log 2>&1 &
+
+# ── 第九步：验证推理服务 ──────────────────────────────────
+sleep 3
+curl -s http://127.0.0.1:9000/healthz | jq .
+
+# ── 第十步：运行快速回测（需要已训练好的模型） ─────────────
+# 如果没有模型，请先参考第 9 节完成训练
+cd ~/ubuntu-wallet
+python scripts/backtest_event_v3_http.py \
+  --data-dir data \
+  --base-url http://127.0.0.1:9000 \
+  --interval 1h \
+  --threshold 0.65 \
+  --tp-grid 0.0175:0.0175:0.001 \
+  --sl-grid 0.007:0.007:0.001 \
+  --horizon-bars 6
+```
+
+---
+
+## 6. 详细安装与配置
+
+### 6.1 克隆仓库
+
+```bash
+cd ~
+git clone https://github.com/xionng-sudo/ubuntu-wallet.git
+cd ubuntu-wallet
+
+# 创建运行时所需目录（均不进 Git）
+mkdir -p data models logs bin
+```
+
+### 6.2 系统依赖
+
+```bash
+sudo apt update
+sudo apt install -y \
+    git curl jq \
+    python3 python3-venv python3-pip \
+    build-essential \
+    libgomp1          # LightGBM 多线程依赖
+```
+
+### 6.3 为 ml-service 创建 Python 虚拟环境
+
+```bash
+cd ~/ubuntu-wallet/ml-service
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 升级 pip 并安装推理服务依赖
+pip install --upgrade pip
+pip install -r requirements.txt
+
+# 验证安装
+python -c "import fastapi, uvicorn, lightgbm; print('依赖安装成功')"
+
+deactivate
+cd ~/ubuntu-wallet
+```
+
+> **说明**：ml-service 使用独立 `.venv`，路径固定为 `ml-service/.venv`。  
+> systemd 服务单元硬编码使用 `ml-service/.venv/bin/python` 启动服务。
+
+### 6.4 为 python-analyzer 安装训练依赖（仅需训练时安装）
+
+```bash
+cd ~/ubuntu-wallet
+
+# 复用 ml-service 的 venv（在已激活的状态下继续安装）
+source ml-service/.venv/bin/activate
+
+pip install --upgrade pip
+pip install -r python-analyzer/requirements.txt
+
+# 注：python-analyzer/requirements.txt 包含 torch/tensorflow 等体积较大的包
+# 如仅做推理，可跳过此步
+
+deactivate
+```
+
+### 6.5 编译 Go Collector
+
+```bash
+cd ~/ubuntu-wallet/go-collector
+
+# 下载 Go 模块依赖
+go mod tidy
+
+# 编译并输出到 bin/ 目录
+go build -o ../bin/go-collector .
+
+# 验证编译结果
+ls -lh ../bin/go-collector
+# 期望看到类似：-rwxr-xr-x 1 ubuntu ubuntu 12M ... bin/go-collector
+```
+
+### 6.6 配置 .env
+
+```bash
+cd ~/ubuntu-wallet
+cp .env.example .env
+
+# 用编辑器填入实际配置
+nano .env
+```
+
+详细说明见第 7 节。
+
+### 6.7 目录说明
+
+| 目录 | 用途 | 是否进 Git |
+|---|---|---|
+| `data/` | K 线数据、预测日志、模型输入输出文件 | 不进 Git |
+| `models/` | 模型训练产物（含 current/ 目录和 registry.json） | 不进 Git |
+| `logs/` | 各服务运行日志（可选，也可通过 journalctl 查看） | 不进 Git |
+| `bin/` | 编译好的 go-collector 二进制文件 | 不进 Git |
+
+---
+
+## 7. 配置说明（.env）
+
+`.env.example` 包含以下关键变量：
+
+```bash
+# ── 交易所 API（读取权限即可，无需交易权限） ──────────────
+
+BINANCE_API_KEY=your_binance_api_key_here
+BINANCE_API_SECRET=your_binance_api_secret_here
+
+OKX_API_KEY=your_okx_api_key_here
+OKX_API_SECRET=your_okx_api_secret_here
+OKX_PASSPHRASE=your_okx_passphrase_here
+
+COINBASE_API_KEY=your_coinbase_api_key_here
+COINBASE_API_SECRET=your_coinbase_api_secret_here
+
+# ── Go Collector 配置 ──────────────────────────────────────
+
+COLLECTOR_PORT=8080           # Go 采集器 HTTP 监听端口
+COLLECTOR_API_URL=http://localhost:8080
+
+# ── 路径配置 ──────────────────────────────────────────────
+
+DATA_DIR=./data               # K 线数据、预测日志存储路径
+# MODEL_DIR=./models/current  # ml-service 默认直接使用 models/current/ 目录（通常无需设置此变量）
+```
+
+**重要提示：**
+
+- **绝对不要将真实 API Key 提交到 Git 仓库。** `.env` 文件已在 `.gitignore` 中排除。
+- 生产环境建议将敏感配置放到 `/etc/ubuntu-wallet/collector.env`（`600` 权限），通过 systemd 的 `EnvironmentFile=` 注入，而不是放在项目目录下的 `.env`。
+- API Key 只需要**读取行情**的权限，不需要交易权限（除非你要运行真实交易脚本）。
+- `MODEL_DIR` 默认指向 `models/current`（目录），ml-service 启动时直接从该目录加载模型文件。训练脚本每次训练完成后会将模型产物复制到 `models/current/` 目录，并将版本信息写入 `models/registry.json`。
+- 如果 API Key 已经泄露，请立即在交易所管理后台撤销并重新生成。
+
+---
+
+## 8. 数据采集（Go Collector）
+
+### 8.1 职责说明
+
+`go-collector` 是一个用 Go 编写的 HTTP 服务，负责：
+
+- 定期从 Binance / OKX / Coinbase 等交易所拉取 ETH/BTC 的 1h、4h、1d K线数据
+- 将数据持久化为 JSON 文件（`data/klines_1h.json`、`data/klines_4h.json`、`data/klines_1d.json`）
+- 提供 `/api/healthz` 接口供监控检查
+
+### 8.2 手动启动
+
+```bash
+cd ~/ubuntu-wallet
+
+# 前台运行（方便查看日志，Ctrl+C 停止）
+./bin/go-collector
+
+# 后台运行（nohup，日志重定向到文件）
+nohup ./bin/go-collector > logs/go-collector.log 2>&1 &
+echo "go-collector 已启动，PID: $!"
+
+# 使用 tmux（推荐，方便随时查看日志）
+tmux new -s go-collector
+./bin/go-collector
+# 按 Ctrl+B 然后按 D 分离会话
+# 重新连接：tmux attach -t go-collector
+```
+
+### 8.3 健康检查
+
+```bash
+# 验证服务是否正常运行
+curl -s http://127.0.0.1:8080/api/healthz | jq .
+
+# 期望输出示例（.ok 为 true 表示服务正常）：
+# {
+#   "ok": true,
+#   ...
+# }
+```
+
+### 8.4 确认数据文件已生成
+
+```bash
+# 检查 K 线文件是否存在及大小
+ls -lh ~/ubuntu-wallet/data/klines_*.json
+
+# 查看 1h K 线的数据条数
+python3 -c "import json; d=json.load(open('data/klines_1h.json')); print(f'1h K线数量: {len(d)}')"
+```
+
+> **注意**：ml-service 和回测脚本都依赖 `data/klines_1h.json`、`data/klines_4h.json`、`data/klines_1d.json` 文件存在。请确保 go-collector 已运行并写入了足够多的数据后，再进行训练或推理。
+
+---
+
+## 9. 模型训练（Python Analyzer）
+
+### 9.1 职责说明
+
+`python-analyzer/` 包含完整的训练流水线：
+
+- `labeling.py`：基于三重障碍法（Triple Barrier）生成三分类标签（LONG / SHORT / FLAT）
+- `train_event_stack_v3.py`：主训练脚本，构建多周期特征并训练堆叠集成模型
+- `walkforward_cv.py`：时间序列 Walk-Forward 交叉验证，避免未来数据泄露
+
+### 9.2 训练前准备
+
+```bash
+# 确认数据文件存在
+ls -lh ~/ubuntu-wallet/data/klines_1h.json
+ls -lh ~/ubuntu-wallet/data/klines_4h.json
+ls -lh ~/ubuntu-wallet/data/klines_1d.json
+
+# 确认模型输出目录存在
+mkdir -p ~/ubuntu-wallet/models
+
+# 激活虚拟环境
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
+cd ~/ubuntu-wallet
+```
+
+### 9.3 训练命令（标准配置）
+
+```bash
+python python-analyzer/train_event_stack_v3.py \
+  --data-dir data \
+  --model-dir models \
+  --label-method ternary \
+  --horizon 12 \
+  --up-thresh 0.015 \
+  --calibration isotonic
+```
+
+**参数说明：**
+
+| 参数 | 示例值 | 说明 |
+|---|---|---|
+| `--data-dir` | `data` | K 线数据所在目录 |
+| `--model-dir` | `models` | 模型产物输出目录 |
+| `--label-method` | `ternary` | 标签生成方法，`ternary` 为三分类，`triple_barrier` 为三重障碍法 |
+| `--horizon` | `12` | 标签时间窗口（单位：bar 数，1h bar × 12 = 12 小时） |
+| `--up-thresh` | `0.015` | 上涨阈值（1.5%），超过此值标记为 LONG |
+| `--calibration` | `isotonic` | 概率校准方法，`isotonic` 或 `sigmoid` |
+
+### 9.4 Walk-Forward 交叉验证（建议在部署前运行）
+
+```bash
+python python-analyzer/walkforward_cv.py \
+  --data-dir data \
+  --n-splits 5 \
+  --gap-bars 12 \
+  --label-method ternary \
+  --confidence-threshold 0.65 \
+  --output-csv /tmp/cv_report.csv
+
+# 查看报告
+cat /tmp/cv_report.csv
+```
+
+### 9.5 模型产物说明
+
+训练成功后，模型会保存到 `models/<版本目录>/`，包含：
+
+| 文件 | 说明 |
+|---|---|
+| `lightgbm_event_v3.pkl` | LightGBM 基学习器 |
+| `lightgbm_event_v3_scaler.pkl` | LightGBM 特征缩放器 |
+| `xgboost_event_v3.json` | XGBoost 基学习器（原生格式） |
+| `xgboost_event_v3_scaler.pkl` | XGBoost 特征缩放器 |
+| `stacking_event_v3.pkl` | 堆叠元模型（Logistic Regression） |
+| `calibration_event_v3.pkl` | 概率校准器（Isotonic Regression） |
+| `feature_columns_event_v3.json` | 特征列名列表（用于 schema 验证） |
+| `model_meta.json` | 模型元信息（版本、训练时间、参数等） |
+
+训练脚本完成后将模型文件归档至 `models/archive/<版本目录>/`，同时复制到 `models/current/`（ml-service 默认从此目录加载），并将版本信息写入 `models/registry.json`。
+
+---
+
+## 10. 推理服务（ML Service）
+
+### 10.1 职责说明
+
+`ml-service/` 是基于 FastAPI 的在线推理服务，提供以下功能：
+
+- 接收 K 线数据请求，构建多周期特征，调用模型输出 LONG/SHORT/FLAT 信号
+- 记录每次预测到 `data/predictions_log.jsonl`
+- 提供 `/healthz` 接口，报告模型状态
+
+### 10.2 启动推理服务
+
+```bash
+cd ~/ubuntu-wallet/ml-service
+source .venv/bin/activate
+
+# 前台运行（调试时推荐，Ctrl+C 停止）
+uvicorn app:app --host 127.0.0.1 --port 9000
+
+# 后台运行（推荐配合日志文件）
+nohup uvicorn app:app --host 127.0.0.1 --port 9000 \
+  > ~/ubuntu-wallet/logs/ml-service.log 2>&1 &
+echo "ml-service 已启动，PID: $!"
+```
+
+### 10.3 健康检查
+
+```bash
+# 检查服务是否启动、模型是否已加载
+curl -s http://127.0.0.1:9000/healthz | jq .
+
+# 期望输出示例（字段说明见下表）：
+# {
+#   "ok": true,
+#   "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6",
+#   "calibration_available": true,
+#   "calibration_method": "isotonic",
+#   "model_dir": "/home/ubuntu/ubuntu-wallet/models/current",
+#   ...
+# }
+```
+
+**重要字段说明：**
+
+- `ok: true`：服务正常且模型已成功加载（`ok: false` 表示模型未加载）
+- `calibration_available: true`：概率校准器已加载（建议确保此为 true，校准后的置信度更可靠）
+- `model_version`：当前激活的模型版本标识
+- `model_dir`：实际加载模型的目录路径
+
+### 10.4 发起预测请求（手动测试）
+
+```bash
+# 手动调用 /predict 接口（通常由 go-collector 自动调用）
+curl -s -X POST http://127.0.0.1:9000/predict \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "BTCUSDT", "interval": "1h"}' | jq .
+```
+
+### 10.5 预测日志格式
+
+每次预测结果会追加写入 `data/predictions_log.jsonl`，每行一条记录：
+
+```json
+{
+  "ts": "2026-03-11T19:00:00Z",
+  "symbol": "BTCUSDT",
+  "interval": "1h",
+  "proba_long": 0.73,
+  "proba_short": 0.12,
+  "proba_flat": 0.15,
+  "signal": "LONG",
+  "confidence": 0.73,
+  "calibrated_confidence": 0.71,
+  "calibration_method": "isotonic",
+  "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6",
+  "active_model": "event_v3"
+}
+```
+
+**字段说明：**
+
+| 字段 | 说明 |
+|---|---|
+| `ts` | 特征对应的 bar 时间（对齐 klines_1h.json） |
+| `proba_long/short/flat` | 模型对 LONG/SHORT/FLAT 的概率估计 |
+| `signal` | 信号方向（LONG / SHORT / FLAT） |
+| `confidence` | 信号置信度 |
+| `model_version` | 产生此预测的模型版本 |
+| `active_model` | 模型系列名称，用于筛选 A/B 测试结果 |
+
+---
+
+## 11. 回测说明
+
+### 11.1 脚本说明
+
+回测脚本 `scripts/backtest_event_v3_http.py` 实现了三重障碍法回测：
+
+- 对历史每根 1h K 线调用 `/predict` 接口，获取预测概率
+- 根据 `threshold` 过滤信号（置信度 >= threshold 才入场）
+- 模拟 TP / SL / TIMEOUT 三种出场方式
+- 支持参数网格搜索（`--thresholds`、`--tp-grid`、`--sl-grid`）
+- 内置多周期方向过滤（4h/1d 趋势约束，方案 B）
+
+### 11.2 完整回测命令（网格搜索）
+
+```bash
+cd ~/ubuntu-wallet
+source ml-service/.venv/bin/activate
+
+python scripts/backtest_event_v3_http.py \
+  --data-dir data \
+  --base-url http://127.0.0.1:9000 \
+  --interval 1h \
+  --since 2026-02-01T00:00:00Z \
+  --until 2026-03-10T23:00:00Z \
+  --thresholds 0.55:0.85:0.02 \
+  --tp-grid 0.005:0.030:0.0025 \
+  --sl-grid 0.003:0.020:0.001 \
+  --horizon-bars 6 \
+  --fee 0.0004 \
+  --slippage 0.0 \
+  --objective avg_ret_mdd_daily \
+  --min-signals-per-week 1.0 \
+  --position-mode single
+```
+
+### 11.3 参数说明
+
+| 参数 | 示例值 | 说明 |
+|---|---|---|
+| `--data-dir` | `data` | K 线数据目录 |
+| `--base-url` | `http://127.0.0.1:9000` | ml-service 地址 |
+| `--interval` | `1h` | 交易时间框架 |
+| `--since` | `2026-02-01T00:00:00Z` | 回测开始时间（ISO 8601 UTC） |
+| `--until` | `2026-03-10T23:00:00Z` | 回测结束时间（ISO 8601 UTC） |
+| `--thresholds` | `0.55:0.85:0.02` | 阈值网格（起点:终点:步长），置信度低于此值的信号被忽略 |
+| `--tp-grid` | `0.005:0.030:0.0025` | 止盈比例网格 |
+| `--sl-grid` | `0.003:0.020:0.001` | 止损比例网格 |
+| `--horizon-bars` | `6` | 最大持仓时间（bar 数，1h × 6 = 6 小时）|
+| `--fee` | `0.0004` | 单边手续费（0.04%）|
+| `--slippage` | `0.0` | 额外滑点（0 表示不考虑）|
+| `--objective` | `avg_ret_mdd_daily` | 优化目标函数 |
+| `--min-signals-per-week` | `1.0` | 最低信号频率过滤 |
+| `--position-mode` | `single` | 持仓模式（`stack`=默认，每个信号都开仓；`single`=单仓，上一笔未平仓时忽略新信号） |
+
+### 11.4 多周期方向过滤规则
+
+脚本内部实现了基于 4h/1d K 线的趋势过滤（方案 B）：
+
+- **做多条件**：4h 趋势必须为 UP，且 1d 趋势不能为 DOWN
+- **做空条件**：4h 趋势必须为 DOWN，且 1d 趋势不能为 UP
+- 趋势判断基于 SMA(5) 与 SMA(20) 的相对位置（容忍区间 0.1%）
+
+### 11.5 当前推荐参数
+
+详细回测记录见 [README_backtest_event_v3_1h.md](README_backtest_event_v3_1h.md)。
+
+| 参数 | 推荐值 |
+|---|---|
+| threshold | 0.55（calibrated_confidence 可用时建议 0.65） |
+| tp | 1.75% |
+| sl | 0.90% |
+| horizon | 6 小时（6 根 1h bar） |
+| interval | 1h |
+| 多周期过滤 | 方案 B（4h/1d 趋势约束） |
+
+---
+
+## 12. 模拟运行与日志评估
+
+### 12.1 模拟交易（历史回放）
+
+`scripts/live_trader_eth_perp_simulated.py` 基于历史 K 线数据回放，模拟完整的交易逻辑（入场、出场、风控）：
+
+```bash
+cd ~/ubuntu-wallet
+source ml-service/.venv/bin/activate
+
+python scripts/live_trader_eth_perp_simulated.py \
+  --data-dir data \
+  --base-url http://127.0.0.1:9000 \
+  --tp 0.0175 \
+  --sl 0.007 \
+  --threshold 0.65 \
+  --horizon 6
+```
+
+**输出内容**：逐笔模拟交易记录，包含入场时间、信号方向、置信度、出场原因（TP/SL/TIMEOUT）、模拟盈亏等。
+
+### 12.2 基于预测日志的事后评估
+
+`scripts/evaluate_from_logs.py` 读取线上预测日志，结合真实 K 线数据计算事后收益指标：
+
+```bash
+cd ~/ubuntu-wallet
+source ml-service/.venv/bin/activate
+
+python scripts/evaluate_from_logs.py \
+  --log-path data/predictions_log.jsonl \
+  --data-dir data \
+  --interval 1h \
+  --active-model event_v3 \
+  --since 2026-03-09T00:00:00Z \
+  --until 2026-03-14T00:00:00Z \
+  --threshold 0.55 \
+  --tp 0.0175 \
+  --sl 0.009 \
+  --fee 0.0004 \
+  --slippage 0.0 \
+  --horizon-bars 6
+```
+
+**参数说明：**
+
+| 参数 | 说明 |
+|---|---|
+| `--log-path` | 预测日志文件路径（JSONL 格式） |
+| `--active-model` | 筛选指定 active_model 字段的预测记录 |
+| `--since / --until` | 评估时间窗口（ISO 8601 UTC） |
+| `--threshold` | 信号阈值，低于此置信度的预测不计入 |
+| `--tp / --sl` | 止盈/止损比例 |
+| `--horizon-bars` | 最大持仓 bar 数 |
+
+**输出内容**：包含 `signals/week`、`win_rate`、`avg_ret`、`profit_factor`、各类 MDD 等指标。
+
+> **注意**：当前 `evaluate_from_logs.py` 不含 4h/1d 多周期过滤逻辑，仅基于 1h 概率做决策。若实盘策略加入了多周期过滤，评估指标可能与实盘存在偏差。
+
+---
+
+## 13. 生产部署（systemd）
+
+### 13.1 前提条件
+
+```bash
+# 确认部署路径（systemd 服务单元硬编码此路径）
+# 服务器用户：ubuntu，仓库路径：/home/ubuntu/ubuntu-wallet
+ls /home/ubuntu/ubuntu-wallet/bin/go-collector      # go-collector 二进制
+ls /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/python  # Python venv
+```
+
+### 13.2 配置敏感环境变量
+
+生产环境将 API Key 等敏感信息放到 `/etc/ubuntu-wallet/`：
+
+```bash
+# 创建配置目录
+sudo mkdir -p /etc/ubuntu-wallet
+
+# 从模板创建配置文件
+sudo cp /home/ubuntu/ubuntu-wallet/systemd/env/collector.env.example \
+        /etc/ubuntu-wallet/collector.env
+
+# 设置严格权限（仅 root 可读）
+sudo chmod 600 /etc/ubuntu-wallet/collector.env
+sudo chown root:root /etc/ubuntu-wallet/collector.env
+
+# 填入真实 API Key
+sudo nano /etc/ubuntu-wallet/collector.env
+```
+
+### 13.3 部署 Go Collector 服务
+
+```bash
+# 复制服务单元文件
+sudo cp /home/ubuntu/ubuntu-wallet/systemd/go-collector.service \
+        /etc/systemd/system/go-collector.service
+
+# 重新加载 systemd 配置
+sudo systemctl daemon-reload
+
+# 启用并立即启动服务（开机自启 + 立即启动）
+sudo systemctl enable --now go-collector.service
+
+# 检查服务状态
+systemctl status go-collector.service --no-pager
+
+# 查看实时日志（Ctrl+C 退出）
+journalctl -u go-collector.service -f --no-pager
+
+# 验证健康状态
+curl -s http://127.0.0.1:8080/api/healthz | jq .
+```
+
+### 13.4 部署 ML Service 服务
+
+```bash
+# 复制服务单元文件
+sudo cp /home/ubuntu/ubuntu-wallet/systemd/ml-service.service \
+        /etc/systemd/system/ml-service.service
+
+# 重新加载 systemd 配置
+sudo systemctl daemon-reload
+
+# 启用并立即启动服务
+sudo systemctl enable --now ml-service.service
+
+# 检查服务状态
+systemctl status ml-service.service --no-pager
+
+# 查看实时日志
+journalctl -u ml-service.service -f --no-pager
+
+# 验证健康状态
+curl -s http://127.0.0.1:9000/healthz | jq .
+```
+
+### 13.5 部署定时评估服务（可选）
+
+```bash
+# 复制评估服务和定时器
+sudo cp /home/ubuntu/ubuntu-wallet/systemd/evaluate-predictions.service \
+        /etc/systemd/system/evaluate-predictions.service
+sudo cp /home/ubuntu/ubuntu-wallet/systemd/evaluate-predictions.timer \
+        /etc/systemd/system/evaluate-predictions.timer
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now evaluate-predictions.timer
+
+# 验证定时器已注册
+systemctl list-timers --all | grep evaluate
+```
+
+### 13.6 部署健康检查定时器（可选）
+
+每分钟检查 go-collector 健康状态，异常时自动重启并发送 Telegram 告警：
+
+```bash
+sudo cp /home/ubuntu/ubuntu-wallet/systemd/check-go-collector.service \
+        /etc/systemd/system/check-go-collector.service
+sudo cp /home/ubuntu/ubuntu-wallet/systemd/check-go-collector.timer \
+        /etc/systemd/system/check-go-collector.timer
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now check-go-collector.timer
+
+# 验证定时器
+systemctl list-timers --all | grep check-go-collector
+
+# 立即手动执行一次检查（不等下一分钟）
+sudo systemctl start check-go-collector.service
+journalctl -u check-go-collector.service -n 50 --no-pager
+```
+
+> 详细部署步骤请参考 [systemd/DEPLOY-NEW-SERVER.md](systemd/DEPLOY-NEW-SERVER.md)。
+
+---
+
+## 14. 常用命令汇总
+
+```bash
+# ── 服务状态查看 ─────────────────────────────────────────
+systemctl status go-collector.service --no-pager
+systemctl status ml-service.service --no-pager
+
+# ── 服务日志查看（最近 100 行）────────────────────────────
+journalctl -u go-collector.service -n 100 --no-pager
+journalctl -u ml-service.service -n 100 --no-pager
+
+# ── 实时日志流 ────────────────────────────────────────────
+journalctl -u go-collector.service -f --no-pager
+journalctl -u ml-service.service -f --no-pager
+
+# ── 健康检查 ──────────────────────────────────────────────
+curl -s http://127.0.0.1:8080/api/healthz | jq .
+curl -s http://127.0.0.1:9000/healthz | jq .
+
+# ── 服务重启 ──────────────────────────────────────────────
+sudo systemctl restart go-collector.service
+sudo systemctl restart ml-service.service
+
+# ── 激活 Python 虚拟环境 ──────────────────────────────────
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
+
+# ── 模型训练 ──────────────────────────────────────────────
+cd ~/ubuntu-wallet
 source ml-service/.venv/bin/activate
 python python-analyzer/train_event_stack_v3.py \
   --data-dir data --model-dir models \
   --label-method ternary --horizon 12 --up-thresh 0.015 \
   --calibration isotonic
 
-# 4. Start ml-service (inference API on port 9000)
-cd ml-service && uvicorn app:app --host 127.0.0.1 --port 9000
-
-# 5. Verify health
-curl http://127.0.0.1:9000/healthz
-
-# 6. Run backtest
+# ── 快速回测（单组参数） ──────────────────────────────────
 python scripts/backtest_event_v3_http.py \
   --data-dir data --base-url http://127.0.0.1:9000 \
-  --threshold 0.65 --tp-grid 0.0175:0.0175:0.001 \
-  --sl-grid 0.007:0.007:0.001 --horizon-bars 6
+  --interval 1h \
+  --threshold 0.65 \
+  --tp-grid 0.0175:0.0175:0.001 \
+  --sl-grid 0.007:0.007:0.001 \
+  --horizon-bars 6
 
-# 7. Simulate / replay live trading
-python scripts/live_trader_eth_perp_simulated.py \
-  --data-dir data --tp 0.0175 --sl 0.007 --threshold 0.65
-
-# 8. Evaluate logged predictions
+# ── 日志评估 ──────────────────────────────────────────────
 python scripts/evaluate_from_logs.py \
-  --log-path data/predictions_log.jsonl --data-dir data \
-  --threshold 0.55 --tp 0.0175 --sl 0.007 --horizon-bars 6
-```
-
----
-
-## System Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                  Market Data Collection                         │
-│  Binance API  ──┐                                               │
-│  OKX API      ──┤── go-collector (port 8080) ──► data/         │
-│  Coinbase API ──┘   klines_1h/4h/1d.json                       │
-└─────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                ML Training Pipeline (offline)                   │
-│                                                                 │
-│  labeling.py ──────────────────────────────────┐               │
-│    make_ternary_labels()                        │               │
-│    make_triple_barrier_labels()                 │               │
-│                                                 ▼               │
-│  train_event_stack_v3.py                  LightGBM + XGBoost   │
-│    build_multi_tf_feature_df()           (base models, 3-class) │
-│    ── 1h features                               │               │
-│    ── 4h features (prefix tf4h_)          LogisticRegression    │
-│    ── 1d features (prefix tf1d_)         (stacking meta-model) │
-│                                                 │               │
-│  walkforward_cv.py                       calibration.py         │
-│    (time-series CV, no leakage)          (isotonic/sigmoid)     │
-│                                                 │               │
-│                              ┌─────────────────▼──────────┐    │
-│                              │   models/ directory         │    │
-│                              │   lightgbm_event_v3.pkl     │    │
-│                              │   xgboost_event_v3.json     │    │
-│                              │   stacking_event_v3.pkl     │    │
-│                              │   calibration_event_v3.pkl  │    │
-│                              │   feature_columns_event_v3.json│  │
-│                              │   model_meta.json           │    │
-│                              └────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-         │ (model artifacts)
-         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                   ml-service (FastAPI, port 9000)               │
-│                                                                 │
-│  POST /predict                                                  │
-│    feature_builder.py ── builds multi-tf features              │
-│      schema_validation() ── detects online/offline drift       │
-│    model_loader.py ── loads models + calibration               │
-│    calibration.py ── calibrate_proba()                         │
-│    prediction_logger.py ── logs to data/predictions_log.jsonl  │
-│                                                                 │
-│  Response: { signal, confidence, calibrated_confidence, ... }  │
-└─────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                Strategy / Decision Layer                        │
-│                                                                 │
-│  Multi-timeframe filter (Scheme B):                             │
-│    LONG allowed  : 4h=UP and 1d≠DOWN                           │
-│    SHORT allowed : 4h=DOWN and 1d≠UP                           │
-│                                                                 │
-│  Execution:                                                     │
-│    backtest_event_v3_http.py  (offline grid search)            │
-│    live_trader_eth_perp_simulated.py  (historical replay)      │
-│    live_trader_eth_perp_binance.py    (live DRY-RUN / real)    │
-└─────────────────────────────────────────────────────────────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                Evaluation Loop (closed-loop)                    │
-│                                                                 │
-│  evaluate_from_logs.py  (scheduled every 6h via systemd timer) │
-│    reads data/predictions_log.jsonl                            │
-│    simulates triple-barrier exits on real klines               │
-│    reports: win_rate, avg_ret, MDD, coverage, TP/SL/TO dist    │
-└─────────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Key Components
-
-| Component | Location | Purpose |
-|-----------|----------|---------|
-| Go collector | `go-collector/` | Market data ingestion (klines, trader data) |
-| Training pipeline | `python-analyzer/train_event_stack_v3.py` | Train LightGBM+XGBoost+stacking model |
-| Labeling | `python-analyzer/labeling.py` | Ternary & triple-barrier label generation |
-| Walk-forward CV | `python-analyzer/walkforward_cv.py` | Time-series CV without leakage |
-| ML inference API | `ml-service/app.py` | FastAPI: `/predict`, `/healthz` |
-| Feature builder | `ml-service/feature_builder.py` | Multi-tf feature construction + schema validation |
-| Model loader | `ml-service/model_loader.py` | Load models + calibration artifacts |
-| Calibration | `ml-service/calibration.py` | Isotonic/Platt calibration |
-| Prediction logger | `ml-service/prediction_logger.py` | JSONL log with raw+calibrated probabilities |
-| Backtest engine | `scripts/backtest_event_v3_http.py` | Triple-barrier backtest + grid search |
-| Simulated trader | `scripts/live_trader_eth_perp_simulated.py` | Historical replay with risk engine |
-| Evaluation | `scripts/evaluate_from_logs.py` | Evaluate logged predictions vs real outcomes |
-| Multi-TF utils | `scripts/mt_trend_utils.py` | MTTrendContext (4h/1d trend filters) |
-
----
-
-## Best Practices
-
-### Signal quality over quantity
-- Use threshold ≥ 0.65 (or calibrated_confidence ≥ 0.65) to ensure high precision
-- Multi-timeframe filter reduces false breakouts significantly
-- Triple-barrier labels better align training with actual exit logic
-
-### Calibration
-After training, check `/healthz` for `calibration_available: true`. When calibration is loaded,
-the system uses calibrated probabilities for thresholding and logs both raw and calibrated
-probabilities for each prediction. This makes confidence more reliable for decision making.
-
-### Walk-forward validation
-Before deploying a new model, always run walkforward_cv.py to check for temporal leakage
-and understand generalization across different time periods:
-
-```bash
-python python-analyzer/walkforward_cv.py \
-  --data-dir data --n-splits 5 --gap-bars 12 \
-  --label-method ternary --confidence-threshold 0.65 \
-  --output-csv /tmp/cv_report.csv
-```
-
-### Evaluation loop
-The predictions_log.jsonl is the key monitoring artifact. Schedule evaluate_from_logs.py
-via `systemd/evaluate-predictions.timer` to get automatic performance reports every 6 hours.
-
----
-
-## Recommended Strategy Parameters
-
-Based on backtesting and live evaluation (as of 2026-03):
-
-| Parameter | Value | Notes |
-|-----------|-------|-------|
-| threshold | 0.65 | Use calibrated_confidence when available |
-| tp | 1.75% | Take-profit |
-| sl | 0.70% | Stop-loss |
-| horizon | 6h | Max holding period |
-| interval | 1h | Trading timeframe |
-| 4h filter | UP required for LONG | Multi-TF Scheme B |
-| 1d filter | Not DOWN for LONG | Multi-TF Scheme B |
-
----
-
-## Deployment (Production)
-
-```bash
-# Install and enable systemd services
-sudo cp systemd/go-collector.service /etc/systemd/system/
-sudo cp systemd/ml-service.service /etc/systemd/system/
-sudo cp systemd/evaluate-predictions.service /etc/systemd/system/
-sudo cp systemd/evaluate-predictions.timer /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now go-collector ml-service
-sudo systemctl enable --now evaluate-predictions.timer
-
-# Monitor
-sudo journalctl -fu ml-service
-sudo journalctl -fu evaluate-predictions
-```
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for complete deployment, maintenance,
-and troubleshooting documentation.
-
----
-
-## 📑 目录 (Original Chinese Documentation)
-
-1. [系统架构](#系统架构)
-2. [技术栈与库版本](#技术栈与库版本)
-3. [环境准备 (Ubuntu 22.04)](#环境准备)
-4. [详细安装步骤](#详细安装步骤)
-5. [配置 API 密钥](#配置-api-密钥)
-6. [编译和构建](#编译和构建)
-7. [运行系统](#运行系统)
-8. [各模块说明](#各模块说明)
-9. [图形可视化说明](#图形可视化说明)
-10. [常见问题](#常见问题)
-
----
-
-## 系统架构
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│                    ETH 预测系统架构                           │
-├──────────────────┬──────────────────┬────────────────────────┤
-│   Binance API    │     OKX API      │    Coinbase API        │
-└────────┬─────────┴────────┬─────────┴──────────┬─────────────┘
-         │                  │                    │
-         ▼                  ▼                    ▼
-┌──────────────────────────────────────────────────────────────┐
-│              Go 数据采集服务 (端口 8080)                       │
-│  • 获取 Top50 交易员数据     • 获取前100次交易记录              │
-│  • 实时K线和行情数据         • REST API 接口                  │
-│  • 价格层级分析              • 每5分钟自动更新                  │
-└────────────────────────┬─────────────────────────────────────┘
-                         │ HTTP API
-                         ▼
-┌──────────────────────────────────────────────────────────────┐
-│              Python 分析引擎                                  │
-│  ┌─────────────┐ ┌─────────────┐ ┌─────────────────────┐     │
-│  │  技术分析    │ │  ML 预测    │ │  自动学习机器人       │     │
-│  │• SMA/EMA    │ │• XGBoost   │ │• 增量训练            │      │
-│  │• MACD/RSI   │ │• LightGBM  │ │• 交易员数据融合       │     │
-│  │• 布林带/ADX  │ │• LSTM       │ │• 模型自动更新        │     │
-│  │• 一目均衡表  │ │• 集成投票    │ │• 特征自动工程        │     │
-│  └─────────────┘ └─────────────┘ └─────────────────────┘     │
-│  ┌─────────────┐ ┌──────────────────────────────────────┐    │
-│  │  提醒系统    │ │  Dash 可视化仪表板 (端口 8050)         │    │
-│  │• 买卖信号   │  │• K线图 + 技术指标                     │    │
-│  │• RSI 超买卖 │  │• 交易员分析图                         │    │
-│  │• AI 预测    │  │• 预测结果图                           │    │
-│  │• 成交量异常 │  │• 实时更新 (30秒)                      │    │
-│  └─────────────┘ └──────────────────────────────────────┘    │
-└──────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 技术栈与库版本
-
-### Go 语言 (数据采集)
-
-| 组件 | 版本 | 用途 |
-|------|------|------|
-| Go | 1.21.x | 编程语言 |
-| gorilla/websocket | v1.5.1 | WebSocket 连接 |
-| robfig/cron/v3 | v3.0.1 | 定时任务 |
-| sirupsen/logrus | v1.9.3 | 日志管理 |
-
-### Python (分析与预测)
-
-| 库名 | 版本 | 用途 |
-|------|------|------|
-| Python | 3.10/3.11/3.12 | 编程语言 |
-| **数据处理** | | |
-| numpy | 1.26.4 | 数值计算 |
-| pandas | 2.2.1 | 数据处理 |
-| scipy | 1.12.0 | 科学计算 |
-| **技术分析** | | |
-| ta | 0.11.0 | 技术指标 |
-| ta-lib | 0.4.28 | 专业技术分析 |
-| pandas-ta | 0.3.14b1 | Pandas技术分析扩展 |
-| **机器学习** | | |
-| scikit-learn | 1.4.1 | 经典ML |
-| xgboost | 2.0.3 | 梯度提升 |
-| lightgbm | 4.3.0 | 轻量级梯度提升 |
-| **深度学习** | | |
-| torch (PyTorch) | 2.2.1 | LSTM神经网络 |
-| tensorflow | 2.15.0 | 深度学习 (备选) |
-| **可视化** | | |
-| plotly | 5.19.0 | 交互式图表 |
-| dash | 2.16.1 | Web 仪表板 |
-| dash-bootstrap-components | 1.5.0 | UI 组件 |
-| matplotlib | 3.8.3 | 静态图表 |
-| mplfinance | 0.12.10b0 | 金融K线图 |
-| kaleido | 0.2.1 | 图表导出 |
-| **交易所API** | | |
-| ccxt | 4.2.70 | 统一交易所接口 |
-| requests | 2.31.0 | HTTP 请求 |
-| websocket-client | 1.7.0 | WebSocket |
-| aiohttp | 3.9.3 | 异步HTTP |
-| **其他工具** | | |
-| python-dotenv | 1.0.1 | 环境变量 |
-| joblib | 1.3.2 | 模型序列化 |
-| flask | 3.0.2 | Web框架 (API) |
-| transformers | 4.38.2 | NLP/情绪分析 |
-
-### 系统依赖
-
-| 组件 | 版本 | 用途 |
-|------|------|------|
-| Ubuntu | 22.04 LTS | 操作系统 |
-| build-essential | - | C/C++ 编译工具 |
-| TA-Lib C 库 | 0.4.0 | 技术分析底层库 |
-
----
-
-## 环境准备
-
-### 确认系统版本
-
-```bash
-# 确认 Ubuntu 版本
-lsb_release -a
-# 应显示: Ubuntu 22.04.x LTS
-```
-
-### 确保有 sudo 权限
-
-```bash
-sudo whoami
-# 应显示: root
-```
-
----
-
-## 详细安装步骤
-
-### 方法一：生产部署（systemd + ml-service + go-collector，自愈，推荐）
-
-适用场景：云服务器长期运行 / 自动重启 / 监控自愈。
-
-部署后会启动：
-- `ml-service`（FastAPI，仅监听 `127.0.0.1:9000`）
-- `go-collector`（HTTP API 默认 `8080`，以你的程序/环境变量为准）
-- `check-go-collector.timer`（每分钟健康检查，异常自动重启并 Telegram 通知）
-
-#### 1）克隆项目
-```bash
-cd ~
-git clone https://github.com/xionghan889-tech/ubuntu-wallet.git
-cd ubuntu-wallet
-```
-
-#### 2）一键部署（需要 root）
-```bash
-sudo bash scripts/install/bootstrap-new-server.sh
-```
-
-脚本会自动：
-- 从 `systemd/env/*.example` 生成 `/etc/ubuntu-wallet/*.env`（如已存在不会覆盖）
-- 安装 systemd unit 到 `/etc/systemd/system/`
-- 安装 sudoers（允许自愈脚本无密码重启 go-collector）
-- 尝试构建 go-collector、创建 ml-service 的 `.venv`
-- 检查 env 必填项；若缺失会提示你补录，并不会强行启动服务
-
-#### 3）填写敏感配置（不进 Git）
-```bash
-sudo nano /etc/ubuntu-wallet/collector.env
-sudo nano /etc/ubuntu-wallet/telegram.env
-```
-
-如脚本未自动启动服务，手动启动：
-```bash
-sudo systemctl enable --now ml-service.service
-sudo systemctl enable --now go-collector.service
-sudo systemctl enable --now check-go-collector.timer
-```
-
-#### 4）验收
-```bash
-curl -fsS http://127.0.0.1:9000/docs | head
-curl -fsS --max-time 3 http://127.0.0.1:8080/api/healthz | jq .
-systemctl list-timers --all | grep check-go-collector || true
-journalctl -u check-go-collector.service -n 80 --no-pager
-```
-
-详细说明见：
-- `systemd/DEPLOY-NEW-SERVER.md`
-
----
-
-### 方法二：本地研究/开发（scripts/install.sh + scripts/run.sh）
-
-适用场景：本地跑完整研究流程（`python-analyzer` + Dash 8050）。
-
-> 注意：该方式与生产 systemd 部署是两条路线，生产机器建议优先用“方法一”。
-
-```bash
-# 1. 克隆项目
-git clone https://github.com/xionghan889-tech/ubuntu-wallet.git
-cd ubuntu-wallet
-
-# 2. 给脚本添加执行权限
-chmod +x scripts/install.sh scripts/run.sh
-
-# 3. 运行安装脚本
-bash scripts/install.sh
-```
-### 方法二: 手动逐步安装
-
-#### 步骤 1: 更新系统
-
-```bash
-sudo apt update && sudo apt upgrade -y
-```
-
-#### 步骤 2: 安装系统依赖
-
-```bash
-sudo apt install -y \
-    build-essential \
-    git \
-    curl \
-    wget \
-    unzip \
-    software-properties-common \
-    apt-transport-https \
-    ca-certificates \
-    gnupg \
-    lsb-release \
-    jq \
-    libffi-dev \
-    libssl-dev
-```
-
-#### 步骤 3: 安装 Python 3.11
-
-```bash
-# 添加 deadsnakes PPA (提供最新 Python 版本)
-sudo add-apt-repository ppa:deadsnakes/ppa -y
-sudo apt update
-
-# 安装 Python 3.11
-sudo apt install -y python3.11 python3.11-venv python3.11-dev python3-pip
-
-# 验证安装
-python3.11 --version
-# 输出: Python 3.11.x
-```
-
-#### 步骤 4: 安装 Go 1.21
-
-```bash
-# 下载 Go
-GO_VERSION="1.21.13"
-wget "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -O /tmp/go.tar.gz
-
-# 解压安装
-sudo rm -rf /usr/local/go
-sudo tar -C /usr/local -xzf /tmp/go.tar.gz
-rm /tmp/go.tar.gz
-
-# 配置环境变量
-echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
-echo 'export GOPATH=$HOME/go' >> ~/.bashrc
-echo 'export PATH=$PATH:$GOPATH/bin' >> ~/.bashrc
-source ~/.bashrc
-
-# 验证安装
-go version
-# 输出: go version go1.21.13 linux/amd64
-```
-
-#### 步骤 5: 安装 TA-Lib C 库
-
-```bash
-# TA-Lib Python 包需要底层 C 库支持
-cd /tmp
-wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
-tar -xzf ta-lib-0.4.0-src.tar.gz
-cd ta-lib/
-./configure --prefix=/usr
-make -j$(nproc)
-sudo make install
-sudo ldconfig
-cd -
-
-# 验证
-ldconfig -p | grep ta_lib
-# 应显示 libta_lib 库路径
-```
-
-#### 步骤 6: 创建 Python 虚拟环境
-
-```bash
-# 回到项目目录
-cd ~/ubuntu-wallet
-
-# 创建虚拟环境
-python3.11 -m venv venv
-
-# 激活虚拟环境
-source venv/bin/activate
-
-# 升级 pip
-pip install --upgrade pip setuptools wheel
-
-# 安装 Python 依赖
-pip install -r python-analyzer/requirements.txt
-
-# 验证关键包
-python -c "import numpy; print(f'NumPy: {numpy.__version__}')"
-python -c "import pandas; print(f'Pandas: {pandas.__version__}')"
-python -c "import sklearn; print(f'Scikit-learn: {sklearn.__version__}')"
-python -c "import xgboost; print(f'XGBoost: {xgboost.__version__}')"
-python -c "import torch; print(f'PyTorch: {torch.__version__}')"
-python -c "import plotly; print(f'Plotly: {plotly.__version__}')"
-python -c "import dash; print(f'Dash: {dash.__version__}')"
-python -c "import ccxt; print(f'CCXT: {ccxt.__version__}')"
-```
-
-> **注意**: 如果 `ta-lib` Python 包安装失败，可以跳过，系统使用 `ta` 和 `pandas-ta` 作为替代。
-> 如果 PyTorch 安装过慢，可以先安装 CPU 版本：
-> ```bash
-> pip install torch --index-url https://download.pytorch.org/whl/cpu
-> ```
-
-#### 步骤 7: 编译 Go 程序
-
-```bash
-# 进入 Go 项目目录
-cd go-collector
-
-# 下载依赖
-go mod tidy
-
-# 编译
+  --log-path data/predictions_log.jsonl \
+  --data-dir data --interval 1h \
+  --threshold 0.55 --tp 0.0175 --sl 0.009 \
+  --fee 0.0004 --horizon-bars 6
+
+# ── 重新编译 go-collector ────────────────────────────────
+cd ~/ubuntu-wallet/go-collector
 go build -o ../bin/go-collector .
-
-# 验证
-ls -la ../bin/go-collector
-# 应显示可执行文件
-
-# 回到项目根目录
-cd ..
-```
-
-#### 步骤 8: 配置环境和目录
-
-```bash
-# 创建必要目录
-mkdir -p data models bin logs
-
-# 创建环境配置文件
-cp .env.example .env
-
-# 编辑 .env 填入你的 API 密钥
-nano .env
-```
-
----
-
-## 配置 API 密钥
-
-### 获取 Binance API Key
-
-1. 访问 [Binance](https://www.binance.com/) 注册账号
-2. 进入 **个人中心** → **API 管理**
-3. 创建新 API Key（建议只开启 **读取** 权限，不要开交易权限）
-4. 复制 API Key 和 Secret Key
-
-### 获取 OKX API Key
-
-1. 访问 [OKX](https://www.okx.com/) 注册账号
-2. 进入 **设置** → **API**
-3. 创建新 API Key，设置 Passphrase（必须记住）
-4. 权限选择 **只读**
-5. 复制 API Key、Secret Key、Passphrase
-
-### 获取 Coinbase API Key
-
-1. 访问 [Coinbase](https://www.coinbase.com/) 注册账号
-2. 进入 **Settings** → **API**
-3. 创建新 API Key
-4. 复制 API Key 和 Secret
-
-### 编辑 .env 文件
-
-```bash
-nano .env
-```
-
-```env
-# 填入你的密钥
-BINANCE_API_KEY=你的Binance_API_Key
-BINANCE_API_SECRET=你的Binance_Secret
-
-OKX_API_KEY=你的OKX_API_Key
-OKX_API_SECRET=你的OKX_Secret
-OKX_PASSPHRASE=你的OKX_Passphrase
-
-COINBASE_API_KEY=你的Coinbase_API_Key
-COINBASE_API_SECRET=你的Coinbase_Secret
-
-COLLECTOR_PORT=8080
-COLLECTOR_API_URL=http://localhost:8080
-DATA_DIR=./data
-MODEL_DIR=./models
-```
-
-> **⚠️ 重要**: 即使不填 API Key，系统也能运行（使用模拟数据）。但要获取真实交易员数据，需要填入有效的 API Key。
-
-## Klines 历史回溯（Lookback）
-
-默认情况下，go-collector 拉取 K 线会取最近窗口（`GetKlines(..., limit=500)`）。为了支持回测/特征���程，需要拉取更长历史时，可以对 15m/1h/4h/1d 启用 lookback 分页拉取（1m/5m 仍保持轻量）。
-
-### 环境变量（go-collector）
-
-- `KLINES_LOOKBACK_ENABLED`：是否启用 lookback（默认：true）
-  - `false` 时，所有 interval 都回退到最近 500 根 K 线（`GetKlines(..., 500)`）
-- `KLINES_15M_LOOKBACK_DAYS`：15m 回溯天数（默认：90）
-- `KLINES_1H_LOOKBACK_DAYS`：1h 回溯天数（默认：180）
-- `KLINES_4H_LOOKBACK_DAYS`：4h 回溯天数（默认：365）
-- `KLINES_1D_LOOKBACK_DAYS`：1d 回溯天数（默认：730）
-- `KLINES_LOOKBACK_MAX_PAGES`：lookback 分页最大页数（默认：2000），用于防止极端情况下死循环/无限请求
-KLINES_LOOKBACK_MODE=on_startup（默认，推荐生产）
-KLINES_LOOKBACK_MODE=always（每次 FAST tick 都回溯，可能限频/日志刷屏）
-KLINES_LOOKBACK_MODE=off（不回溯，只拉最近窗口）
-
-> 将某个 `KLINES_*_LOOKBACK_DAYS` 设为 `0` 会让该 interval 回退到最近 500 根。
-
-### systemd 示例（/etc/ubuntu-wallet/collector.env）
-```env
-KLINES_LOOKBACK_ENABLED=true
-KLINES_15M_LOOKBACK_DAYS=90
-KLINES_1H_LOOKBACK_DAYS=180
-KLINES_4H_LOOKBACK_DAYS=365
-KLINES_1D_LOOKBACK_DAYS=730
-KLINES_LOOKBACK_MAX_PAGES=2000
-```
-
-### docker 示例
-```bash
-docker run --rm \
-  -e KLINES_LOOKBACK_ENABLED=true \
-  -e KLINES_15M_LOOKBACK_DAYS=90 \
-  -e KLINES_1H_LOOKBACK_DAYS=180 \
-  -e KLINES_4H_LOOKBACK_DAYS=365 \
-  -e KLINES_1D_LOOKBACK_DAYS=730 \
-  -e KLINES_LOOKBACK_MAX_PAGES=2000 \
-  your-image:latest
-```
----
-
-## 编译和构建
-
-```bash
-# 确保在项目根目录
 cd ~/ubuntu-wallet
 
-# 编译 Go 采集器
-cd go-collector
-go mod tidy
-go build -o ../bin/go-collector .
-cd ..
+# ── 查看预测日志最新记录 ──────────────────────────────────
+tail -n 5 ~/ubuntu-wallet/data/predictions_log.jsonl | python3 -c \
+  "import sys,json; [print(json.dumps(json.loads(l), indent=2, ensure_ascii=False)) for l in sys.stdin]"
 
-# 验证
-./bin/go-collector --help 2>/dev/null || echo "编译成功"
-```
+# ── 查看模型当前激活版本 ──────────────────────────────────
+cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool | grep -E "model_version|trained_at"
 
----
-
-## 运行系统
-
-### 方式一: 一键启动完整系统
-
-```bash
-chmod +x scripts/run.sh
-
-# 启动完整系统 (Go采集器 + Python分析 + 可视化仪表板)
-bash scripts/run.sh full
-```
-###关闭
-./scripts/run.sh stop
-
-### 方式二: 分步启动
-
-#### 终端 1: 启动 Go 数据采集器
-
-```bash
-cd ~/ubuntu-wallet
-
-# 加载环境变量
-export $(grep -v '^#' .env | xargs)
-
-# 启动采集器
-./bin/go-collector
-```
-
-你会看到类似输出：
-```
-INFO[2024-01-01T12:00:00] ========================================
-INFO[2024-01-01T12:00:00]   ETH Crypto Trader Data Collector
-INFO[2024-01-01T12:00:00] ========================================
-INFO[2024-01-01T12:00:00] Starting initial data collection...
-INFO[2024-01-01T12:00:05] [Binance] Fetched 50 top traders
-INFO[2024-01-01T12:00:10] [OKX] Fetched 50 top traders
-INFO[2024-01-01T12:00:15] Data collection completed successfully!
-INFO[2024-01-01T12:00:15] API server starting on port 8080
-```
-
-#### 终端 2: 启动 Python 分析系统
-
-```bash
-cd ~/ubuntu-wallet
-
-# 激活虚拟环境
-source venv/bin/activate
-
-# 进入 Python 目录
-cd python-analyzer
-
-# === 可选运行模式 ===
-
-# 完整运行（分析 + 训练 + 预测 + 仪表板）
-python main.py
-
-# 仅分析
-python main.py --analyze
-
-# 仅训练模型
-python main.py --train
-
-# 仅预测
-python main.py --predict
-
-# 仅启动仪表板
-python main.py --dashboard
-
-# 生成并保存图表
-python main.py --save-charts
-
-# 查看交易员分析
-python main.py --traders
-```
-
-### 方式三: 使用管理脚本
-
-```bash
-# 查看所有命令
-bash scripts/run.sh
-
-# 启动完整系统
-bash scripts/run.sh full
-
-# 仅启动采集器
-bash scripts/run.sh collector
-
-# 仅分析
-bash scripts/run.sh analyze
-
-# 训练模型
-bash scripts/run.sh train
-
-# 运行预测
-bash scripts/run.sh predict
-
-# 启动仪表板
-bash scripts/run.sh dashboard
-
-# 查看系统状态
-bash scripts/run.sh status
-
-# 停止所有服务
-bash scripts/run.sh stop
-```
-
-### 访问仪表板
-
-在浏览器中打开:
-```
-http://localhost:8050
-```
-
-如果是远程服务器，使用服务器 IP:
-```
-http://你的服务器IP:8050
-```
-
----
-
-## 各模块说明
-
-### 1. Go 数据采集器 (`go-collector/`)
-
-| 文件 | 功能 |
-|------|------|
-| `main.go` | 主程序入口、HTTP API 服务器、数据调度 |
-| `collector/binance.go` | Binance 交易所数据采集 (期货排行榜) |
-| `collector/okx.go` | OKX 交易所数据采集 (跟单排行) |
-| `collector/coinbase.go` | Coinbase 数据采集 (市场交易) |
-| `models/models.go` | 数据模型定义 |
-
-**API 接口:**
-
-| 接口 | 方法 | 说明 |
-|------|------|------|
-| `/api/traders` | GET | 获取所有交易所的Top交易员 |
-| `/api/trades` | GET | 获取所有交易记录 |
-| `/api/trades?exchange=binance` | GET | 按交易所过滤交易 |
-| `/api/price-levels` | GET | 获取价格层级分析 |
-| `/api/market` | GET | 获取当前市场数据 |
-| `/api/klines?interval=1h` | GET | 获取K线数据 |
-| `/api/status` | GET | 获取系统状态 |
-| `/api/all-data` | GET | 获取全部数据 |
-
-### 2. Python 分析引擎 (`python-analyzer/`)
-
-| 文件 | 功能 |
-|------|------|
-| `main.py` | 主入口，系统调度 |
-| `config.py` | 配置管理 |
-| `data_collector.py` | Python端数据采集 (ccxt库) |
-| `technical_analysis.py` | 20+ 种技术分析指标 |
-| `ml_predictor.py` | ML预测: XGBoost + LightGBM + LSTM |
-| `visualization.py` | Dash 可视化仪表板 |
-| `alerts.py` | 交易信号提醒系统 |
-
-### 3. 技术分析指标清单
-
-| 类别 | 指标 | 说明 |
-|------|------|------|
-| **趋势** | SMA (7,25,99,200) | 简单移动平均线 |
-| | EMA (12,26,50,200) | 指数移动平均线 |
-| | MACD | 移动平均收敛/发散 |
-| | ADX | 平均趋向指数 |
-| | Ichimoku | 一目均衡表 |
-| | Parabolic SAR | 抛物线止损转向 |
-| **动量** | RSI (14) | 相对强弱指数 |
-| | Stochastic | 随机振荡器 |
-| | Williams %R | 威廉指标 |
-| | CCI | 商品频道指数 |
-| | ROC | 变动率 |
-| | MFI | 资金流量指数 |
-| **波动率** | Bollinger Bands | 布林带 |
-| | ATR | 真实波幅 |
-| | Keltner Channel | 肯特纳通道 |
-| **成交量** | OBV | 能量潮 |
-| | VWAP | 成交量加权均价 |
-| | Volume Profile | 成交量分布 |
-
-### 4. 机器学习模型
-
-| 模型 | 类型 | 特点 |
-|------|------|------|
-| XGBoost | 梯度提升树 | 高效、可解释性强、特征重要度 |
-| LightGBM | 轻量梯度提升 | 更快训练、更低内存 |
-| LSTM | 深度学习 (RNN) | 捕捉时间序列长期依赖 |
-| 集成投票 | 集成学习 | 多模型投票、提高稳定性 |
-
-### 5. 自动学习机器人
-
-系统支持自动学习，定期执行以下流程:
-
-1. **数据采集**: 从三个交易所获取最新数据
-2. **特征工程**: 自动产生 60+ 特征
-3. **模型训练**: 重新训练所有模型
-4. **预测更新**: 更新预测结果
-5. **信号检查**: 检查并发送交易提醒
-
-自动更新间隔: 每 5 分钟 (可在 config.py 中调整)
-
----
-
-## 图形可视化说明
-
-### 仪表板包含以下图表
-
-1. **K线图** (主图)
-   - 蜡烛图 + 布林带 + 均线
-   - 买卖信号标注（三角形标记）
-   - 支持 1m/5m/15m/1h/4h/1d 时间框架
-   - 具体时间精确显示 (格式: YYYY-MM-DD HH:MM)
-
-2. **MACD 子图**
-   - MACD 线 + 信号线 + 柱状图
-   - 金叉/死叉标识
-
-3. **RSI 子图**
-   - RSI 曲线
-   - 超买(70)/超卖(30) 标线
-
-4. **成交量子图**
-   - 成交量柱状图（红绿区分涨跌）
-   - 20日成交量均线
-
-5. **交易员分析图**
-   - 各交易所 Top10 ROI
-   - 买卖比例饼图
-   - 价格区间买卖统计
-   - 收益排名柱状图
-
-6. **AI 预测图**
-   - 价格走势 + 预测标注
-   - 各模型置信度对比
-   - 信号强度历史
-   - 预测方向分布
-
-7. **价格层级图**
-   - 各价格区间买卖量对比
-   - 水平柱状图展示
-
-**所有图表均包含具体时间戳，格式: `YYYY-MM-DD HH:MM:SS`**
-
----
-
-## 项目文件结构
-
-```
-ubuntu-wallet/
-├── .env.example              # 环境变量模板
-├── .gitignore                # Git忽略规则
-├── README.md                 # 本文档
-│
-├── go-collector/             # Go 数据采集服务
-│   ├── go.mod                # Go 模块定义
-│   ├── main.go               # 主入口 + HTTP API
-│   ├── collector/
-│   │   ├── binance.go        # Binance 采集器
-│   │   ├── okx.go            # OKX 采集器
-│   │   └── coinbase.go       # Coinbase 采集器
-│   └── models/
-│       └── models.go         # 数据模型
-│
-├── python-analyzer/          # Python 分析引擎
-│   ├── requirements.txt      # Python 依赖
-│   ├── config.py             # 配置文件
-│   ├── data_collector.py     # 数据采集 (ccxt)
-│   ├── technical_analysis.py # 技术分析 (20+指标)
-│   ├── ml_predictor.py       # ML预测 (XGBoost/LightGBM/LSTM)
-│   ├── visualization.py      # Dash 可视化仪表板
-│   ├── alerts.py             # 交易信号提醒
-│   └── main.py               # 主入口
-│
-├── scripts/
-│   ├── install.sh            # 一键安装脚本
-│   └── run.sh                # 运行管理脚本
-│
-├── data/                     # 数据目录 (运行时生成)
-├── models/                   # 模型目录 (训练后生成)
-├── logs/                     # 日志目录
-└── bin/                      # 编译输出
-    └── go-collector          # Go 可执行文件
-```
-
----
-
-## 常见问题
-
-### Q: 没有 API Key 能运行吗？
-A: 可以。系统在无法连接交易所 API 时会自动使用模拟数据运行，你可以先测试完整流程，再补充真实 API Key。
-
-### Q: ta-lib 安装失败怎么办？
-A: ta-lib 的 Python 包依赖底层 C 库。确保先安装 C 库：
-```bash
-# 如果之前的安装步骤失败了，试试：
-sudo apt install -y libta-lib-dev
-# 或从源码编译 (参考安装步骤 5)
-```
-如果仍然失败，可以跳过 ta-lib，系统使用 `ta` 和 `pandas-ta` 作为替代方案。
-
-### Q: PyTorch 安装很慢或失败？
-A: 使用 CPU 版本:
-```bash
-pip install torch --index-url https://download.pytorch.org/whl/cpu
-```
-
-### Q: 仪表板无法访问？
-A: 检查:
-```bash
-# 确认端口是否在监听
-ss -tlnp | grep 8050
-
-# 如果是云服务器，确认安全组/防火墙允许 8050 端口
-sudo ufw allow 8050
-```
-
-### Q: 模型准确率低？
-A: 这是正常的。加密货币市场波动大，50-60% 的准确率已经不错。建议:
-- 收集更多历史数据 (增大 limit)
-- 调整 `config.py` 中的超参数
-- 让系统运行更长时间，自动学习会逐步优化
-
-### Q: 如何在后台运行？
-A: 使用 `nohup` 或 `tmux`:
-```bash
-# 方法1: nohup
-nohup bash scripts/run.sh full &
-
-# 方法2: tmux (推荐)
-sudo apt install tmux
-tmux new -s eth-predictor
-bash scripts/run.sh full
-# 按 Ctrl+B 然后按 D 分离会话
-# tmux attach -t eth-predictor  回到会话
-```
-
-### Q: 如何升级？
-```bash
+# ── 更新代码并重启服务 ────────────────────────────────────
 cd ~/ubuntu-wallet
 git pull
-source venv/bin/activate
-pip install -r python-analyzer/requirements.txt --upgrade
-cd go-collector && go mod tidy && go build -o ../bin/go-collector . && cd ..
+sudo systemctl restart go-collector.service
+sudo systemctl restart ml-service.service
 ```
 
 ---
 
-## ⚠️ 免责声明
+## 15. 故障排查
 
-本系统仅供学习和研究使用。加密货币交易存在极高风险，任何预测都不能保证准确。请勿将本系统的任何输出作为唯一决策依据。投资有风险，入市需谨慎。
+### 15.1 端口已被占用
+
+```bash
+# 检查 8080 / 9000 端口是否被占用
+ss -tlnp | grep -E '8080|9000'
+
+# 查找占用进程的详细信息
+lsof -i :8080
+lsof -i :9000
+```
+
+### 15.2 go-collector 无法启动
+
+```bash
+# 检查二进制文件是否存在且有执行权限
+ls -lh ~/ubuntu-wallet/bin/go-collector
+
+# 如果不存在，重新编译
+cd ~/ubuntu-wallet/go-collector
+go mod tidy
+go build -o ../bin/go-collector .
+
+# 检查环境变量配置
+# 生产环境
+cat /etc/ubuntu-wallet/collector.env
+
+# 开发环境
+cat ~/ubuntu-wallet/.env
+
+# 查看服务启动日志
+journalctl -u go-collector.service -n 50 --no-pager
+```
+
+### 15.3 ml-service 无法启动
+
+```bash
+# 检查 venv 是否存在
+ls ~/ubuntu-wallet/ml-service/.venv/bin/python
+
+# 如果 venv 不存在，重新创建
+cd ~/ubuntu-wallet/ml-service
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+deactivate
+
+# 检查 uvicorn 是否安装
+~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn --version
+
+# 查看服务启动日志
+journalctl -u ml-service.service -n 50 --no-pager
+```
+
+### 15.4 模型文件缺失
+
+```bash
+# 检查模型目录
+ls -lh ~/ubuntu-wallet/models/
+
+# 检查 current/ 目录下的模型元信息
+ls ~/ubuntu-wallet/models/current/
+cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool
+
+# 如果 models/current/ 不存在或为空，需要先进行训练
+# 参考第 9 节运行训练脚本
+```
+
+### 15.5 Python 依赖问题
+
+```bash
+# 重新安装依赖
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
+pip install --upgrade pip
+pip install -r ~/ubuntu-wallet/ml-service/requirements.txt
+
+# 检查 LightGBM 是否可用
+python -c "import lightgbm; print('LightGBM 版本:', lightgbm.__version__)"
+
+# 如果出现 libgomp 相关错误，安装系统库
+sudo apt install -y libgomp1
+```
+
+### 15.6 健康检查失败
+
+```bash
+# 确认服务进程是否在运行
+ps aux | grep go-collector
+ps aux | grep uvicorn
+
+# 确认端口是否在监听
+ss -tlnp | grep 8080
+ss -tlnp | grep 9000
+
+# 查看服务日志寻找错误原因
+journalctl -u go-collector.service -n 50 --no-pager
+journalctl -u ml-service.service -n 50 --no-pager
+```
+
+### 15.7 Go 构建问题
+
+```bash
+# 确认 Go 版本（需要 1.21+）
+go version
+
+# 清理缓存并重新构建
+cd ~/ubuntu-wallet/go-collector
+go clean -cache
+go mod tidy
+go build -o ../bin/go-collector .
+```
+
+### 15.8 数据文件不更新
+
+```bash
+# 确认 go-collector 正在运行
+systemctl status go-collector.service --no-pager
+
+# 检查数据文件的最后修改时间
+ls -lh ~/ubuntu-wallet/data/klines_*.json
+
+# 检查 API Key 配置是否正确
+# 健康检查接口通常能反映连接状态
+curl -s http://127.0.0.1:8080/api/healthz | jq .
+```
+
+---
+
+## 16. 风险提示与免责声明
+
+**请在使用本系统前仔细阅读以下说明：**
+
+1. **研究与学习用途**：本系统主要用于机器学习模型研究、策略回测分析和系统架构学习，不构成任何投资建议。
+
+2. **不承诺收益**：历史回测结果不代表未来实盘收益。回测中出现的高胜率和低回撤，在真实市场中可能因滑点、流动性、市场制度变化等因素而显著恶化。
+
+3. **真实资金使用需充分验证**：如有意将本系统用于真实资金交易，在正式投入前必须：
+   - 充分理解系统的每一个组件和逻辑
+   - 在 DRY-RUN 模式下长期观察（建议至少数周）
+   - 独立评估策略在不同市场环境下的表现
+   - 设置严格的风控规则和仓位限制
+
+4. **加密货币市场风险**：加密货币市场波动极大，可能在短时间内发生大幅价格变动，存在本金损失乃至归零的风险。
+
+5. **API Key 安全**：请妥善保管交易所 API Key，绝对不要提交到 Git 仓库，不要分享给他人。如怀疑 Key 已泄露，请立即在交易所管理后台撤销并重新生成。
+
+6. **本仓库作者不对使用本系统所导致的任何直接或间接损失承担责任。**
+
+---
+
+## 更多文档
+
+| 文档 | 说明 |
+|---|---|
+| [docs/ARCHITECTURE_CN.md](docs/ARCHITECTURE_CN.md) | 详细系统架构说明 |
+| [docs/DEPLOY_CN.md](docs/DEPLOY_CN.md) | 详细部署步骤 |
+| [docs/MODEL_LIFECYCLE_CN.md](docs/MODEL_LIFECYCLE_CN.md) | 模型版本管理与生命周期 |
+| [docs/RUNBOOK_CN.md](docs/RUNBOOK_CN.md) | 运维操作手册 |
+| [docs/FAILURE_MODES_CN.md](docs/FAILURE_MODES_CN.md) | 故障模式与应对方案 |
+| [docs/ETH_perp_risk_rules.md](docs/ETH_perp_risk_rules.md) | ETH 永续合约风控规则 |
+| [README_backtest_event_v3_1h.md](README_backtest_event_v3_1h.md) | event_v3 1h 策略回测详细记录 |
+| [systemd/DEPLOY-NEW-SERVER.md](systemd/DEPLOY-NEW-SERVER.md) | 新服务器完整部署说明 |
+| [go-collector/OPS-NOTES.md](go-collector/OPS-NOTES.md) | Go Collector 运维笔记 |

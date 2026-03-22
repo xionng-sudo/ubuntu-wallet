@@ -49,7 +49,7 @@ go version
 
 ```bash
 cd ~
-git clone https://github.com/xionghan889-tech/ubuntu-wallet.git
+git clone https://github.com/xionng-sudo/ubuntu-wallet.git
 cd ubuntu-wallet
 mkdir -p bin
 ```
