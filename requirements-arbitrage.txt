@@ -1,0 +1,10 @@
+# Minimum dependencies for the DEX/CEX arbitrage scanner
+# Install with:
+#   pip install -r requirements-arbitrage.txt
+#
+# For the full ML/trading stack (training, backtesting, dashboard) use:
+#   pip install -r python-analyzer/requirements.txt
+
+ccxt==4.2.70          # Unified crypto exchange API (CEX quotes)
+python-dotenv==1.0.1  # .env file loading (BINANCE_API_KEY etc.)
+requests==2.31.0      # HTTP client (used by CCXT internally)
