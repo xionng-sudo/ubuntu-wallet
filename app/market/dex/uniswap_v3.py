@@ -18,7 +18,10 @@ _TOKEN_REGISTRY: dict[str, tuple[str, int]] = {
     "USDT": ("0xdAC17F958D2ee523a2206206994597C13D831ec7",  6),
     "USDC": ("0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",  6),
     "DAI":  ("0x6B175474E89094C44Da98b954EedeAC495271d0F", 18),
-    "BNB":  ("0xB8c77482e45F1F44dE1745F52C74426C631bDD52", 18),
+    # NOTE: BNB ERC-20 (0xB8c77482…) is a legacy Binance token with essentially
+    # no Uniswap V3 liquidity on Ethereum mainnet.  Quoting it returns unreliable
+    # prices (e.g. ~7 USDT instead of ~600 USDT).  BNB/USDT is therefore excluded
+    # from this registry.  Use the mock DEX or a BSC-native DEX for BNB quotes.
 }
 
 # Preferred Uniswap V3 fee tier (basis points) per symbol pair.
@@ -32,7 +35,6 @@ _DEFAULT_FEE_TIERS: dict[str, int] = {
     "BTC/USDC":  3000,
     "WBTC/USDT": 3000,
     "WBTC/USDC": 3000,
-    "BNB/USDT":  3000,
 }
 _FALLBACK_FEE_TIER = 3000
 
@@ -90,8 +92,11 @@ class UniswapV3Quote(BaseDEXQuote):
     Supported symbols
     -----------------
     Any BASE/QUOTE pair where both tokens appear in the built-in token registry
-    (ETH, WETH, BTC, WBTC, USDT, USDC, DAI, BNB).  Examples: ETH/USDT,
+    (ETH, WETH, BTC, WBTC, USDT, USDC, DAI).  Examples: ETH/USDT,
     BTC/USDT, ETH/USDC, WBTC/USDC.
+
+    BNB is intentionally excluded: the BNB ERC-20 token on Ethereum mainnet
+    has no meaningful Uniswap V3 pool and produces unreliable quotes.
 
     Quote TTL
     ---------

@@ -29,6 +29,14 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
+# Load .env from the repo root so ETHEREUM_RPC_URL, WALLET_PRIVATE_KEY, etc.
+# are available without requiring the caller to manually `export` them.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(REPO_ROOT, ".env"))
+except ImportError:
+    pass  # python-dotenv not installed; fall back to environment variables
+
 from app.market.cex.binance import BinanceCEXQuote
 from app.market.cex.mock_cex import MockCEXQuote
 from app.market.dex.mock_dex import MockDEXQuote
@@ -84,8 +92,8 @@ def build_parser() -> argparse.ArgumentParser:
         description="Scan DEX/CEX arbitrage opportunities",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--symbols", default="ETH/USDT,BTC/USDT,BNB/USDT",
-                   help="Comma-separated trading pairs")
+    p.add_argument("--symbols", default="ETH/USDT,BTC/USDT",
+                   help="Comma-separated trading pairs (BNB/USDT is not supported with --dex uniswap_v3)")
     p.add_argument("--amount", type=float, default=10_000.0,
                    help="Trade amount in USD")
     p.add_argument("--cex", choices=["binance", "mock"], default="binance",

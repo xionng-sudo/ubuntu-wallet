@@ -361,6 +361,25 @@ class TestUniswapV3Quote(unittest.TestCase):
         for tok in ("ETH", "WETH", "BTC", "WBTC", "USDT", "USDC"):
             self.assertIn(tok, _TOKEN_REGISTRY, f"{tok} missing from token registry")
 
+    def test_bnb_not_in_token_registry(self):
+        """BNB ERC-20 must be absent: it has no real Uniswap V3 pool on mainnet."""
+        self.assertNotIn("BNB", _TOKEN_REGISTRY,
+                         "BNB should not be in the Uniswap V3 registry — "
+                         "BNB ERC-20 has no meaningful mainnet pool and returns garbage quotes.")
+
+    def test_bnb_usdt_skipped_with_warning(self):
+        """BNB/USDT fetch_quotes emits RuntimeWarning (BNB not in registry)."""
+        q = UniswapV3Quote(rpc_url="http://mock")
+        mock_w3 = MagicMock()
+        with patch.object(q, "_web3", return_value=mock_w3):
+            with self.assertWarns(RuntimeWarning):
+                results = q.fetch_quotes(["BNB/USDT"], 10_000.0)
+        self.assertEqual(results, [], "BNB/USDT should produce no quotes")
+
+    def test_bnb_usdt_absent_from_default_fee_tiers(self):
+        """BNB/USDT must not have a fee tier entry (no valid pool)."""
+        self.assertNotIn("BNB/USDT", _DEFAULT_FEE_TIERS)
+
     def test_default_fee_tiers_known(self):
         self.assertIn("ETH/USDT", _DEFAULT_FEE_TIERS)
         self.assertIn("BTC/USDT", _DEFAULT_FEE_TIERS)
