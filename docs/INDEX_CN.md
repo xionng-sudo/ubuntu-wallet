@@ -3,6 +3,8 @@
 > 本文档是所有中文文档的导航入口。
 >
 > 仓库地址：`https://github.com/xionng-sudo/ubuntu-wallet`
+>
+> **新用户入口**：先阅读根目录 [README.md](../README.md)，它提供了完整的项目概述、快速开始、所有关键命令和故障排查。本文档作为更深入的文档导航索引。
 
 ---
 
@@ -250,9 +252,9 @@ deactivate
 | 路径                                          | 说明                                   |
 |-----------------------------------------------|----------------------------------------|
 | `~/ubuntu-wallet/data/predictions_log.jsonl`  | 预测日志（运行后生成）                 |
-| `~/ubuntu-wallet/data/raw/klines_1h.json`     | 1h K 线数据（采集后生成）              |
-| `~/ubuntu-wallet/data/raw/klines_4h.json`     | 4h K 线数据（采集后生成）              |
-| `~/ubuntu-wallet/data/raw/klines_1d.json`     | 日线 K 线数据（采集后生成）            |
+| `~/ubuntu-wallet/data/klines_1h.json`     | 1h K 线数据（采集后生成）              |
+| `~/ubuntu-wallet/data/klines_4h.json`     | 4h K 线数据（采集后生成）              |
+| `~/ubuntu-wallet/data/klines_1d.json`     | 日线 K 线数据（采集后生成）            |
 | `~/ubuntu-wallet/models/`                     | 模型文件目录（训练默认输出，服务加载源）|
 | `~/ubuntu-wallet/models_backup/`              | 模型备份目录（建议人工维护）           |
 | `~/ubuntu-wallet/data/logs/evaluate_predictions.log` | 评估任务日志（部署后写入）       |
@@ -286,6 +288,6 @@ deactivate
 2. **端口确认**：ml-service 使用端口 **9000**（不是 8000）
 3. **部署路径**：文档里的 `~/ubuntu-wallet/` 表示部署服务器上的典型 checkout 路径，不是仓库内固定路径
 4. **venv 路径**：
-   - ml-service 推理 venv：`~/ubuntu-wallet/ml-service/.venv/`（部署后创建）
-   - 训练/分析 venv：通常由操作者自行创建，例如 `~/ubuntu-wallet/venv-analyzer/`（非仓库内容）
+   - ml-service 推理 venv：`~/ubuntu-wallet/ml-service/.venv/`（部署后创建，systemd 服务硬编码使用此路径）
+   - 训练/分析 venv：可复用 `ml-service/.venv`（安装 `python-analyzer/requirements.txt`），或单独创建 `venv-analyzer/`（均为运行时产物，不进 Git）
 5. **真仓前必须先完成 2 周以上 DRY-RUN**

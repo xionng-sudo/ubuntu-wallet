@@ -2,6 +2,8 @@
 
 > 仓库：`xionng-sudo/ubuntu-wallet`
 >
+> **快速参考**：如需快速上手，请先阅读根目录 [README.md](../README.md)（包含快速开始与常用命令）。本文档提供更详细的分步骤部署说明，适合生产环境部署人员。
+>
 > 本文档目标：
 > - 从 0 到 1 在一台新服务器上部署 `ubuntu-wallet`
 > - 让 `go-collector`、`ml-service`、评估任务能够稳定运行
@@ -261,7 +263,7 @@ deactivate
 ```bash
 cd ~/ubuntu-wallet
 python3 -m venv venv-analyzer
-source venv-analyzer/bin/activate
+source ml-service/.venv/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install -r python-analyzer/requirements.txt
 deactivate
@@ -276,7 +278,7 @@ python -c "import fastapi, uvicorn, pydantic; print('ml-service 依赖正常 / m
 deactivate
 
 # 验证 analyzer venv（如已创建）
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python --version
 python -c "import lightgbm, xgboost, sklearn; print('analyzer 依赖正常 / analyzer deps OK')"
 deactivate
@@ -535,7 +537,7 @@ deactivate
 ## 13.1 历史回放模拟
 ```bash
 cd ~/ubuntu-wallet
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python scripts/live_trader_eth_perp_simulated.py
 ```
 
@@ -733,7 +735,7 @@ deactivate
 
 # 如果有 venv-analyzer（用于训练/分析）
 if [ -d ~/ubuntu-wallet/venv-analyzer ]; then
-  source ~/ubuntu-wallet/venv-analyzer/bin/activate
+  source ~/ubuntu-wallet/ml-service/.venv/bin/activate
   pip install -r ~/ubuntu-wallet/python-analyzer/requirements.txt
   deactivate
 fi
@@ -957,14 +959,14 @@ deactivate
 
 ## 手工模拟
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
 deactivate
 ```
 
 ## 手工训练
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --label-method triple_barrier \
   --tp-pct 0.0175 \

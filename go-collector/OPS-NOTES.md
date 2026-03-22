@@ -3,6 +3,8 @@
 适用环境：Ubuntu 22.04 + systemd  
 目标：go-collector 常驻运行；每分钟检查一次 `/api/healthz`；异常自动重启并 Telegram 通知；带 cooldown 防抖。
 
+> **参考文档**：完整部署步骤请参阅 [../README.md](../README.md) 第 13 节（生产部署）和 [../systemd/DEPLOY-NEW-SERVER.md](../systemd/DEPLOY-NEW-SERVER.md)。
+
 ---
 
 ## 1. 组件清单（你已部署/新增的内容）

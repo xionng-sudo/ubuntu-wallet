@@ -5,6 +5,8 @@
 > - 提供一线排查与恢复步骤
 > - 降低“系统出问题只能靠猜”的风险
 >
+> **快速参考**：常见问题快速排查请见根目录 [README.md](../README.md) 第 15 节（故障排查）。本文档提供更深入的故障分析与恢复流程。
+>
 > 本文档覆盖：
 > - Go 采集层
 > - Python 推理层
@@ -409,7 +411,7 @@ journalctl -u ml-service -n 100 --no-pager
 ## 处理方法
 - 构造最小测试请求逐步排除
 - 查看 ml-service 日志中的堆栈信息
-- 检查 `data/raw/klines_*.json` 是否存在且内容正常
+- 检查 `data/klines_*.json` 是否存在且内容正常
 - 确认 `MODEL_DIR` 和 `DATA_DIR` 环境变量指向正确目录
 
 ---

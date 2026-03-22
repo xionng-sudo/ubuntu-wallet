@@ -5,6 +5,8 @@
 > - 让每个阶段都有可执行的命令、可检查的验收标准
 > - 避免模型上线/回滚/退役时依靠口头传承
 >
+> **快速参考**：模型训练命令请见根目录 [README.md](../README.md) 第 9 节。本文档提供完整的模型生命周期管理规程。
+>
 > 适用对象：
 > - 模型训练工程师
 > - 模型运维工程师
@@ -111,7 +113,7 @@ Walk-Forward 交叉验证（walkforward_cv.py）
 
 ```bash
 # 查看各文件最后修改时间
-ls -lh ~/ubuntu-wallet/data/raw/klines_*.json
+ls -lh ~/ubuntu-wallet/data/klines_*.json
 
 # 预期输出（Expected output）示例：
 # -rw-rw-r-- 1 ubuntu ubuntu 45M Mar 15 10:30 klines_1d.json
@@ -210,7 +212,7 @@ cat ~/ubuntu-wallet/models/feature_columns_event_v3.json | python3 -m json.tool 
 
 ```bash
 cd ~/ubuntu-wallet
-source venv-analyzer/bin/activate
+source ml-service/.venv/bin/activate
 
 python scripts/export_feature_schema.py \
   --model-dir models \
@@ -244,7 +246,7 @@ cd ~/ubuntu-wallet
 
 # 如果还没有 venv-analyzer，创建一个
 python3 -m venv venv-analyzer
-source venv-analyzer/bin/activate
+source ml-service/.venv/bin/activate
 pip install --upgrade pip setuptools wheel
 pip install -r python-analyzer/requirements.txt
 deactivate
@@ -256,7 +258,7 @@ deactivate
 
 ```bash
 cd ~/ubuntu-wallet
-source venv-analyzer/bin/activate
+source ml-service/.venv/bin/activate
 
 python python-analyzer/train_event_stack_v3.py \
   --label-method triple_barrier \
@@ -401,7 +403,7 @@ cat ~/ubuntu-wallet/models/model_meta.json | python3 -m json.tool
 
 ```bash
 cd ~/ubuntu-wallet
-source venv-analyzer/bin/activate
+source ml-service/.venv/bin/activate
 
 python python-analyzer/walkforward_cv.py \
   --data-dir ~/ubuntu-wallet/data \
@@ -589,7 +591,7 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 # （如需测试候选模型，先按第 7.3/第 8 章的方法让 ml-service 实际加载那组文件）
 
 cd ~/ubuntu-wallet
-source venv-analyzer/bin/activate
+source ml-service/.venv/bin/activate
 
 python scripts/backtest_event_v3_http.py \
   --data-dir ~/ubuntu-wallet/data \
@@ -654,7 +656,7 @@ risk/realism: MDD(trade_seq)=4.80% MDD(hourly)=3.21% MDD(daily)=5.12% max_consec
 # 此时 ml-service 加载的是生产模型
 curl -s http://127.0.0.1:9000/healthz | python3 -c "import sys,json; m=json.load(sys.stdin); print('生产模型 (Production model):', m['model_version'])"
 
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python scripts/backtest_event_v3_http.py \
   --data-dir ~/ubuntu-wallet/data \
   --thresholds "0.55:0.75:0.05" \
@@ -684,7 +686,7 @@ sudo systemctl restart ml-service
 sleep 5
 curl -s http://127.0.0.1:9000/healthz | python3 -c "import sys,json; m=json.load(sys.stdin); print('候选模型 (Candidate model):', m['model_version'])"
 
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python scripts/backtest_event_v3_http.py \
   --data-dir ~/ubuntu-wallet/data \
   --thresholds "0.55:0.75:0.05" \

@@ -2,6 +2,8 @@
 
 > 本文档面向日常维护人员。
 >
+> **快速参考**：常用命令速查请见根目录 [README.md](../README.md) 第 14 节。本文档提供更完整的日常运维规程。
+>
 > 目标：
 > - 说明系统每天/每周该怎么维护
 > - 说明哪些指标必须看
@@ -309,14 +311,14 @@ deactivate
 
 ## 5.5 跑模拟交易
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
 deactivate
 ```
 
 ## 5.6 跑 walk-forward
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
   --data-dir ~/ubuntu-wallet/data \
   --n-splits 5 \
