@@ -927,6 +927,16 @@ journalctl -u check-go-collector.service -n 50 --no-pager
 
 > 详细部署步骤请参考 [systemd/DEPLOY-NEW-SERVER.md](systemd/DEPLOY-NEW-SERVER.md)。
 
+### 13.7 其他可选定时服务
+
+仓库还包含以下定时服务，部署方式与上述一致（参考 [docs/DEPLOY_CN.md](docs/DEPLOY_CN.md) 中的详细说明）：
+
+| 服务 | 定时器 | 作用 |
+|---|---|---|
+| `daily-report.service` | `daily-report.timer` （每天 01:05 UTC） | 每日预测质量报告 |
+| `drift-monitor.service` | `drift-monitor.timer` （每 6 小时） | 特征漂移监控 |
+| `calibration-report.service` | `calibration-report.timer` （每周一 02:00 UTC） | 校准质量报告 |
+
 ---
 
 ## 14. 常用命令汇总
