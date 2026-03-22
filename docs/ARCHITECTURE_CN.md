@@ -2,6 +2,8 @@
 
 > 仓库：`xionng-sudo/ubuntu-wallet`
 > 
+> **快速参考**：完整的安装、配置、命令速查请见根目录 [README.md](../README.md)（中文详细版）。本文档聚焦于更深入的技术架构细节。
+>
 > 目标：将本仓库说明为一套可持续维护的加密交易机器学习系统，包括：
 > - 数据采集
 > - 特征构建
@@ -696,7 +698,7 @@ deactivate
 ### 训练分析环境
 ```bash
 python3 -m venv venv-analyzer
-source venv-analyzer/bin/activate
+source ml-service/.venv/bin/activate
 pip install -r python-analyzer/requirements.txt
 deactivate
 ```
@@ -810,7 +812,7 @@ systemctl status evaluate-predictions.timer
 
 ## 9.2 先跑 walk-forward CV
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 cd ~/ubuntu-wallet
 
 python python-analyzer/walkforward_cv.py \
@@ -824,7 +826,7 @@ python python-analyzer/walkforward_cv.py \
 
 ## 9.2.1 再做训练 / 推理 schema 一致性检查
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 cd ~/ubuntu-wallet
 
 python scripts/export_feature_schema.py \
@@ -1278,7 +1280,7 @@ journalctl -u go-collector -n 200 --no-pager
 
 ## 启动评估
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
   --data-dir ~/ubuntu-wallet/data \
@@ -1290,13 +1292,13 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
 
 ## 跑模拟交易
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
 ```
 
 ## 训练新模型
 ```bash
-source ~/ubuntu-wallet/venv-analyzer/bin/activate
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --label-method triple_barrier \
   --tp-pct 0.0175 \

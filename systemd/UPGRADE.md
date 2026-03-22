@@ -9,6 +9,8 @@
 - unit 变更时正确 `daemon-reload`
 - 提供回滚与排障手册
 
+> **参考**：更多运维操作请查阅 [../docs/RUNBOOK_CN.md](../docs/RUNBOOK_CN.md) 和 [../README.md](../README.md) 第 14 节（常用命令汇总）。
+
 ---
 
 ## 0) 更新前检查（推荐）
