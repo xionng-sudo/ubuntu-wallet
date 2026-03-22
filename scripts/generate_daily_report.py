@@ -20,6 +20,23 @@ Report includes:
   - TP / SL / TIMEOUT distribution
   - LONG / SHORT directional breakdown
 
+MT filter modes:
+  - strict:
+      LONG requires 4h UP and 1d not DOWN;
+      SHORT requires 4h DOWN and 1d not UP.
+  - relaxed:
+      Allow NEUTRAL; reject only on strong opposite direction:
+        LONG rejects if 1d DOWN or 4h DOWN
+        SHORT rejects if 1d UP   or 4h UP
+  - regime:
+      Use 1d as dominant regime (hard direction gate), 4h does NOT veto 1d:
+        if 1d UP:   allow LONG only
+        if 1d DOWN: allow SHORT only
+        if 1d NEUTRAL: fall back to relaxed
+  - conflict (方案 2 / recommended for stability):
+      If 1d and 4h conflict (UP vs DOWN), reject ALL trades (FLAT).
+      Otherwise fall back to relaxed filtering.
+
 Usage
 -----
   # Evaluate yesterday (default) and write to data/reports/
@@ -79,7 +96,10 @@ def _load_predictions_for_day(
             line = line.strip()
             if not line:
                 continue
-            j = json.loads(line)
+            try:
+                j = json.loads(line)
+            except Exception:
+                continue
 
             if symbol is not None and j.get("symbol") != symbol:
                 continue
@@ -119,7 +139,123 @@ def _load_predictions_for_day(
     return out
 
 
+def _pick_model_version(preds: List[Dict[str, Any]], override: Optional[str]) -> str:
+    """Pick a stable model_version from preds (time-ordered)."""
+    if override:
+        return override
+    for p in reversed(preds):
+        mv = p.get("model_version")
+        if mv:
+            return str(mv)
+    return "unknown"
+
+
+def _mt_filter_side(
+    *,
+    side_initial: str,
+    t4: str,
+    t1d: str,
+    mode: str,
+    mt_reject_reasons: Counter,
+) -> str:
+    """
+    Apply MT filter and return final side.
+
+    mode:
+      - strict:  requires 4h same-direction confirmation
+      - relaxed: rejects only on strong opposite direction (allows NEUTRAL)
+      - regime:  1d is dominant regime; do not let 4h veto 1d direction
+      - conflict: if 1d and 4h conflict, reject all trades; otherwise fall back to relaxed
+    """
+    mode = (mode or "strict").lower().strip()
+    if side_initial not in ("LONG", "SHORT"):
+        return side_initial
+
+    if mode not in ("strict", "relaxed", "regime", "conflict"):
+        raise ValueError(f"Unknown --mt-filter-mode: {mode}")
+
+    def _strict() -> str:
+        if side_initial == "LONG":
+            if t4 != "UP":
+                mt_reject_reasons["long_4h_not_up"] += 1
+                return "FLAT"
+            if t1d == "DOWN":
+                mt_reject_reasons["long_1d_is_down"] += 1
+                return "FLAT"
+            return "LONG"
+
+        # SHORT
+        if t4 != "DOWN":
+            mt_reject_reasons["short_4h_not_down"] += 1
+            return "FLAT"
+        if t1d == "UP":
+            mt_reject_reasons["short_1d_is_up"] += 1
+            return "FLAT"
+        return "SHORT"
+
+    def _relaxed() -> str:
+        if side_initial == "LONG":
+            if t1d == "DOWN":
+                mt_reject_reasons["long_1d_is_down"] += 1
+                return "FLAT"
+            if t4 == "DOWN":
+                mt_reject_reasons["long_4h_is_down"] += 1
+                return "FLAT"
+            return "LONG"
+
+        # SHORT
+        if t1d == "UP":
+            mt_reject_reasons["short_1d_is_up"] += 1
+            return "FLAT"
+        if t4 == "UP":
+            mt_reject_reasons["short_4h_is_up"] += 1
+            return "FLAT"
+        return "SHORT"
+
+    if mode == "strict":
+        return _strict()
+
+    if mode == "relaxed":
+        return _relaxed()
+
+    if mode == "regime":
+        # 1d is the main regime gate; 4h is not allowed to veto the 1d direction.
+        if t1d == "UP":
+            if side_initial == "SHORT":
+                mt_reject_reasons["regime_1d_up_reject_short"] += 1
+                return "FLAT"
+            return "LONG"
+
+        if t1d == "DOWN":
+            if side_initial == "LONG":
+                mt_reject_reasons["regime_1d_down_reject_long"] += 1
+                return "FLAT"
+            return "SHORT"
+
+        # t1d NEUTRAL: fall back to relaxed (4h only rejects strong opposite)
+        if side_initial == "LONG":
+            if t4 == "DOWN":
+                mt_reject_reasons["regime_1d_neutral_long_4h_down"] += 1
+                return "FLAT"
+            return "LONG"
+        else:
+            if t4 == "UP":
+                mt_reject_reasons["regime_1d_neutral_short_4h_up"] += 1
+                return "FLAT"
+            return "SHORT"
+
+    # conflict-aware (方案 2)
+    # If 1d and 4h are in opposite directions, do not trade.
+    if (t1d == "UP" and t4 == "DOWN") or (t1d == "DOWN" and t4 == "UP"):
+        mt_reject_reasons["conflict_1d_vs_4h"] += 1
+        return "FLAT"
+
+    # If not conflicting, fall back to relaxed filtering.
+    return _relaxed()
+
+
 def _build_report(
+    *,
     date_str: str,
     preds: List[Dict[str, Any]],
     klines: List[Dict],
@@ -137,6 +273,7 @@ def _build_report(
     tie_breaker: str,
     timeout_exit: str,
     mt_filter: bool,
+    mt_filter_mode: str,
     model_version_override: Optional[str],
 ) -> Dict[str, Any]:
     """Run simulation and return structured report dict."""
@@ -153,16 +290,7 @@ def _build_report(
             return "NEUTRAL"
         return trend_1d_list[idx]
 
-    # Determine model_version from logs
-    model_versions = list({p["model_version"] for p in preds if p.get("model_version")})
-    if model_version_override:
-        model_version = model_version_override
-    elif len(model_versions) == 1:
-        model_version = model_versions[0]
-    elif model_versions:
-        model_version = model_versions[-1]  # most recent (arbitrary order, but ok)
-    else:
-        model_version = "unknown"
+    model_version = _pick_model_version(preds, model_version_override)
 
     n_total = len(preds)
     trades = []
@@ -214,25 +342,19 @@ def _build_report(
             trend_4h_counts[t4] += 1
             trend_1d_counts[t1] += 1
 
-            if side_final == "LONG":
-                if t4 != "UP":
-                    side_final = "FLAT"
-                    mt_reject_reasons["long_4h_not_up"] += 1
-                elif t1 == "DOWN":
-                    side_final = "FLAT"
-                    mt_reject_reasons["long_1d_is_down"] += 1
-            elif side_final == "SHORT":
-                if t4 != "DOWN":
-                    side_final = "FLAT"
-                    mt_reject_reasons["short_4h_not_down"] += 1
-                elif t1 == "UP":
-                    side_final = "FLAT"
-                    mt_reject_reasons["short_1d_is_up"] += 1
+            side_final = _mt_filter_side(
+                side_initial=side_initial,
+                t4=t4,
+                t1d=t1,
+                mode=mt_filter_mode,
+                mt_reject_reasons=mt_reject_reasons,
+            )
 
         final_side_counts[side_final] += 1
 
         if side_final == "FLAT":
-            filtered_mt += 1
+            if mt_filter:
+                filtered_mt += 1
             continue
 
         passed_mt += 1
@@ -250,7 +372,6 @@ def _build_report(
             timeout_exit=timeout_exit,
         )
         if tr.outcome == "NO_TRADE":
-            # rare: simulation found no trade; keep counts as passed_mt though
             continue
         trades.append(tr)
 
@@ -269,6 +390,7 @@ def _build_report(
             "slippage_per_side": slippage,
             "horizon_bars": horizon,
             "mt_filter": mt_filter,
+            "mt_filter_mode": (mt_filter_mode if mt_filter else "off"),
         },
         "signal_stats": {
             "total_predictions": n_total,
@@ -353,7 +475,6 @@ def _render_markdown(report: Dict[str, Any]) -> str:
     sm = report.get("strategy_metrics")
     db = report.get("direction_breakdown", {})
 
-    # Backward compatible rendering: show new fields if present.
     has_new = "skipped_flat_model" in ss and "passed_mt" in ss
 
     lines = [
@@ -373,6 +494,7 @@ def _render_markdown(report: Dict[str, Any]) -> str:
         f"- fee/side: `{params['fee_per_side']*100:.4f}%`",
         f"- horizon_bars: `{params['horizon_bars']}`",
         f"- mt_filter: `{params['mt_filter']}`",
+        f"- mt_filter_mode: `{params.get('mt_filter_mode', 'unknown')}`",
         "",
         "## Signal Stats",
         "",
@@ -389,9 +511,7 @@ def _render_markdown(report: Dict[str, Any]) -> str:
             f"| passed_mt          | {ss['passed_mt']} |",
         ]
     else:
-        lines += [
-            f"| filtered_mt       | {ss['filtered_mt']} |",
-        ]
+        lines += [f"| filtered_mt       | {ss['filtered_mt']} |"]
 
     lines += [
         f"| n_trades          | {ss['n_trades']} |",
@@ -496,6 +616,12 @@ def main() -> int:
     ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
 
     ap.add_argument("--no-mt-filter", action="store_true", help="Disable 4h/1d multi-timeframe filter")
+    ap.add_argument(
+        "--mt-filter-mode",
+        choices=["strict", "relaxed", "regime", "conflict"],
+        default="conflict",
+        help="MT filter mode (default: conflict). conflict rejects trades when 1d and 4h conflict; otherwise uses relaxed.",
+    )
 
     ap.add_argument("--report-dir", default="data/reports", help="Directory to write report files (default: data/reports)")
 
@@ -589,6 +715,7 @@ def main() -> int:
         tie_breaker=args.tie_breaker,
         timeout_exit=args.timeout_exit,
         mt_filter=mt_filter,
+        mt_filter_mode=args.mt_filter_mode,
         model_version_override=args.model_version,
     )
 
@@ -614,10 +741,9 @@ def main() -> int:
     print(f"  predictions   : {ss['total_predictions']}", flush=True)
     print(f"  trades        : {ss['n_trades']}", flush=True)
     print(f"  coverage      : {ss['coverage']:.4f}", flush=True)
-    if "skipped_flat_model" in ss:
-        print(f"  flat(model)   : {ss['skipped_flat_model']}", flush=True)
-        print(f"  filtered_mt   : {ss['filtered_mt']}", flush=True)
-        print(f"  passed_mt     : {ss['passed_mt']}", flush=True)
+    print(f"  flat(model)   : {ss['skipped_flat_model']}", flush=True)
+    print(f"  filtered_mt   : {ss['filtered_mt']}", flush=True)
+    print(f"  passed_mt     : {ss['passed_mt']}", flush=True)
     sm = report.get("strategy_metrics")
     if sm:
         print(f"  win_rate      : {sm['win_rate']:.4f}", flush=True)

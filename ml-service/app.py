@@ -66,6 +66,20 @@ class PredictResponse(BaseModel):
         default=None, description="Calibration method used: isotonic | sigmoid | None"
     )
     model_version: str
+
+    p_long: Optional[float] = None
+    p_short: Optional[float] = None
+    p_flat: Optional[float] = None
+
+    cal_p_long: Optional[float] = None
+    cal_p_short: Optional[float] = None
+    cal_p_flat: Optional[float] = None
+
+    effective_long: Optional[float] = None
+    effective_short: Optional[float] = None
+    threshold_enter: Optional[float] = None
+    threshold_delta: Optional[float] = None
+
     reasons: List[str] = []
 
 
@@ -367,36 +381,60 @@ def predict(req: PredictRequest):
         )
 
         if signal == "LONG":
-            reasons = [
-                f"p_long={p_long:.4f}>={p_enter} delta={p_long - p_short:.4f}>={delta}",
-                f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
-                as_of_str,
-            ]
-            if cal_conf is not None:
-                reasons.insert(1, f"cal_p_long={cp_long:.4f}")
+            msg = (
+                f"signal=LONG raw(p_long={p_long:.4f}, p_short={p_short:.4f}, p_flat={p_flat:.4f}) "
+                f"effective_long={eff_long:.4f} effective_short={eff_short:.4f} "
+                f"threshold={p_enter:.4f} delta={delta:.4f}"
+            )
+            if cp_long is not None:
+                msg += (
+                    f" cal(p_long={cp_long:.4f}, p_short={cp_short:.4f}, p_flat={cp_flat:.4f})"
+                )
         elif signal == "SHORT":
-            reasons = [
-                f"p_short={p_short:.4f}>={p_enter} delta={p_short - p_long:.4f}>={delta}",
-                f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
-                as_of_str,
-            ]
-            if cal_conf is not None:
-                reasons.insert(1, f"cal_p_short={cp_short:.4f}")
+            msg = (
+                f"signal=SHORT raw(p_long={p_long:.4f}, p_short={p_short:.4f}, p_flat={p_flat:.4f}) "
+                f"effective_long={eff_long:.4f} effective_short={eff_short:.4f} "
+                f"threshold={p_enter:.4f} delta={delta:.4f}"
+            )
+            if cp_short is not None:
+                msg += (
+                    f" cal(p_long={cp_long:.4f}, p_short={cp_short:.4f}, p_flat={cp_flat:.4f})"
+                )
         else:
-            reasons = [
-                f"no_signal: p_long={p_long:.4f} p_short={p_short:.4f} p_flat={p_flat:.4f} threshold={p_enter}",
-                f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
-                as_of_str,
-            ]
+            msg = (
+                f"signal=FLAT raw(p_long={p_long:.4f}, p_short={p_short:.4f}, p_flat={p_flat:.4f}) "
+                f"effective_long={eff_long:.4f} effective_short={eff_short:.4f} "
+                f"threshold={p_enter:.4f} delta={delta:.4f}"
+            )
+            if cp_long is not None:
+                msg += (
+                    f" cal(p_long={cp_long:.4f}, p_short={cp_short:.4f}, p_flat={cp_flat:.4f})"
+                )
 
-        return PredictResponse(
+        reasons = [
+            msg,
+            f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
+            as_of_str,
+        ]
+
+    return PredictResponse(
             signal=signal,
             confidence=round(confidence, 4),
             calibrated_confidence=round(cal_conf, 4) if cal_conf is not None else None,
             calibration_method=cal_method,
             model_version=_loaded.model_version,
+            p_long=round(p_long, 6),
+            p_short=round(p_short, 6),
+            p_flat=round(p_flat, 6),
+            cal_p_long=round(cp_long, 6) if cp_long is not None else None,
+            cal_p_short=round(cp_short, 6) if cp_short is not None else None,
+            cal_p_flat=round(cp_flat, 6) if cp_flat is not None else None,
+            effective_long=round(eff_long, 6),
+            effective_short=round(eff_short, 6),
+            threshold_enter=round(p_enter, 6),
+            threshold_delta=round(delta, 6),
             reasons=reasons,
-        )
+    )
 
     # --- legacy binary output ---
     if mode != "proba_binary":

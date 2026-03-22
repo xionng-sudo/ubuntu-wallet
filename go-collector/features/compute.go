@@ -8,6 +8,12 @@ import (
 	"github.com/ubuntu-wallet/go-collector/models"
 )
 
+type TraderFlow struct {
+	BuyRatio  float64
+	SellRatio float64
+	NetFlow   float64
+}
+
 // PickClosedCandle returns the last CLOSED candle.
 // If the latest candle is too recent (< intervalDuration), we use the previous one.
 func PickClosedCandle(klines []models.OHLCV, intervalDuration time.Duration, now time.Time) (models.OHLCV, []models.OHLCV, error) {
@@ -129,7 +135,17 @@ func itoa(i int) string {
 	}
 }
 
-func mapBaseAndCore(raw map[string]float64, closes, highs, lows, vols []float64, open, high, low, close, volume float64, ts time.Time) {
+func stochD3(highs, lows, closes []float64, lookback int) float64 {
+	if len(closes) < lookback+2 {
+		return 0
+	}
+	k1 := stochK(highs[:len(highs)-2], lows[:len(lows)-2], closes[:len(closes)-2], lookback)
+	k2 := stochK(highs[:len(highs)-1], lows[:len(lows)-1], closes[:len(closes)-1], lookback)
+	k3 := stochK(highs, lows, closes, lookback)
+	return safe((k1 + k2 + k3) / 3.0)
+}
+
+func mapBaseAndCore(raw map[string]float64, closes, highs, lows, vols []float64, open, high, low, close, volume float64, ts time.Time, flow TraderFlow) {
 	m, sig, hist := macd(closes, 12, 26, 9)
 
 	raw["sma_7"] = safe(sma(closes, 7))
@@ -216,9 +232,46 @@ func mapBaseAndCore(raw map[string]float64, closes, highs, lows, vols []float64,
 	} else {
 		raw["is_weekend"] = 0
 	}
+
+	raw["roc_12"] = safe(roc(closes, 12))
+	raw["roc_24"] = safe(roc(closes, 24))
+	raw["stoch_k"] = safe(stochK(highs, lows, closes, 14))
+	raw["stoch_d"] = safe(stochD3(highs, lows, closes, 14))
+	raw["williams_r"] = safe(williamsR(highs, lows, closes, 14))
+	raw["cci"] = safe(cci(highs, lows, closes, 20))
+
+	bu, bm, bl, bw, bp := bollinger(closes, 20, 2.0)
+	raw["bb_upper"] = bu
+	raw["bb_middle"] = bm
+	raw["bb_lower"] = bl
+	raw["bb_width"] = bw
+	raw["bb_pct"] = bp
+
+	km := safe(ema(closes, 20))
+	av := safe(atr(highs, lows, closes, 14))
+	raw["keltner_middle"] = km
+	raw["keltner_upper"] = safe(km + 2*av)
+	raw["keltner_lower"] = safe(km - 2*av)
+
+	adxV, pdi, mdi := adxDI(highs, lows, closes, 14)
+	raw["adx"] = adxV
+	raw["plus_di"] = pdi
+	raw["minus_di"] = mdi
+	raw["mfi"] = safe(mfi(highs, lows, closes, vols, 14))
+
+	t, kjn, sa, sb := ichimoku(highs, lows)
+	raw["ichimoku_tenkan"] = t
+	raw["ichimoku_kijun"] = kjn
+	raw["ichimoku_senkou_a"] = sa
+	raw["ichimoku_senkou_b"] = sb
+	raw["parabolic_sar"] = safe(parabolicSAR(highs, lows, 0.02, 0.2))
+
+	raw["trader_buy_ratio"] = safe(flow.BuyRatio)
+	raw["trader_sell_ratio"] = safe(flow.SellRatio)
+	raw["trader_net_flow"] = safe(flow.NetFlow)
 }
 
-func mapTF(prefix string, raw map[string]float64, series []models.OHLCV, ts time.Time) {
+func mapTF(prefix string, raw map[string]float64, series []models.OHLCV, ts time.Time, flow TraderFlow) {
 	if len(series) < 2 {
 		return
 	}
@@ -248,10 +301,49 @@ func mapTF(prefix string, raw map[string]float64, series []models.OHLCV, ts time
 	raw[prefix+"atr"] = safe(atr(highs, lows, closes, 14))
 
 	raw[prefix+"returns"] = safe(lagReturn(closes, 1))
+	if len(closes) >= 2 && closes[len(closes)-2] > 0 && closes[len(closes)-1] > 0 {
+		raw[prefix+"log_returns"] = safe(math.Log(closes[len(closes)-1] / closes[len(closes)-2]))
+	} else {
+		raw[prefix+"log_returns"] = 0
+	}
+
 	raw[prefix+"price_range"] = safe((last.High - last.Low) / math.Max(last.Close, 1e-12))
 	raw[prefix+"body_size"] = safe((last.Close - last.Open) / math.Max(last.Open, 1e-12))
 	raw[prefix+"upper_shadow"] = safe((last.High - math.Max(last.Open, last.Close)) / math.Max(last.Close, 1e-12))
 	raw[prefix+"lower_shadow"] = safe((math.Min(last.Open, last.Close) - last.Low) / math.Max(last.Close, 1e-12))
+
+	raw[prefix+"volume_sma_20"] = safe(sma(vols, 20))
+	if raw[prefix+"volume_sma_20"] != 0 {
+		raw[prefix+"volume_ratio"] = safe(last.Volume / raw[prefix+"volume_sma_20"])
+	} else {
+		raw[prefix+"volume_ratio"] = 0
+	}
+
+	obv := 0.0
+	for i := 1; i < len(closes); i++ {
+		if closes[i] > closes[i-1] {
+			obv += vols[i]
+		} else if closes[i] < closes[i-1] {
+			obv -= vols[i]
+		}
+	}
+	raw[prefix+"obv"] = safe(obv)
+
+	n := 20
+	if len(closes) < n {
+		n = len(closes)
+	}
+	if n > 0 {
+		num, den := 0.0, 0.0
+		for i := len(closes) - n; i < len(closes); i++ {
+			typ := (highs[i] + lows[i] + closes[i]) / 3.0
+			num += typ * vols[i]
+			den += vols[i]
+		}
+		if den != 0 {
+			raw[prefix+"vwap"] = safe(num / den)
+		}
+	}
 
 	for _, l := range []int{1, 2, 3, 5, 10, 20} {
 		raw[prefix+"return_lag_"+itoa(l)] = safe(lagReturn(closes, l))
@@ -277,9 +369,55 @@ func mapTF(prefix string, raw map[string]float64, series []models.OHLCV, ts time
 		raw[prefix+"is_weekend"] = 0
 	}
 
-	raw[prefix+"trader_buy_ratio"] = 0
-	raw[prefix+"trader_sell_ratio"] = 0
-	raw[prefix+"trader_net_flow"] = 0
+	raw[prefix+"roc_12"] = safe(roc(closes, 12))
+	raw[prefix+"roc_24"] = safe(roc(closes, 24))
+	raw[prefix+"stoch_k"] = safe(stochK(highs, lows, closes, 14))
+	raw[prefix+"stoch_d"] = safe(stochD3(highs, lows, closes, 14))
+	raw[prefix+"williams_r"] = safe(williamsR(highs, lows, closes, 14))
+	raw[prefix+"cci"] = safe(cci(highs, lows, closes, 20))
+
+	bu, bm, bl, bw, bp := bollinger(closes, 20, 2.0)
+	raw[prefix+"bb_upper"] = bu
+	raw[prefix+"bb_middle"] = bm
+	raw[prefix+"bb_lower"] = bl
+	raw[prefix+"bb_width"] = bw
+	raw[prefix+"bb_pct"] = bp
+
+	km := safe(ema(closes, 20))
+	av := safe(atr(highs, lows, closes, 14))
+	raw[prefix+"keltner_middle"] = km
+	raw[prefix+"keltner_upper"] = safe(km + 2*av)
+	raw[prefix+"keltner_lower"] = safe(km - 2*av)
+
+	adxV, pdi, mdi := adxDI(highs, lows, closes, 14)
+	raw[prefix+"adx"] = adxV
+	raw[prefix+"plus_di"] = pdi
+	raw[prefix+"minus_di"] = mdi
+	raw[prefix+"mfi"] = safe(mfi(highs, lows, closes, vols, 14))
+
+	t, kjn, sa, sb := ichimoku(highs, lows)
+	raw[prefix+"ichimoku_tenkan"] = t
+	raw[prefix+"ichimoku_kijun"] = kjn
+	raw[prefix+"ichimoku_senkou_a"] = sa
+	raw[prefix+"ichimoku_senkou_b"] = sb
+	raw[prefix+"parabolic_sar"] = safe(parabolicSAR(highs, lows, 0.02, 0.2))
+
+	// tf signal score true value (simple rule-based)
+	score := 0.0
+	if raw[prefix+"ema_12"] > raw[prefix+"ema_26"] {
+		score += 0.4
+	}
+	if raw[prefix+"rsi"] > 50 {
+		score += 0.3
+	}
+	if raw[prefix+"macd"] > raw[prefix+"macd_signal"] {
+		score += 0.3
+	}
+	raw[prefix+"signal_score"] = safe(score)
+
+	raw[prefix+"trader_buy_ratio"] = safe(flow.BuyRatio)
+	raw[prefix+"trader_sell_ratio"] = safe(flow.SellRatio)
+	raw[prefix+"trader_net_flow"] = safe(flow.NetFlow)
 }
 
 func ComputeSnapshot(
@@ -289,6 +427,9 @@ func ComputeSnapshot(
 	klines4h []models.OHLCV,
 	klines1d []models.OHLCV,
 	featureCols []string,
+	flow1h TraderFlow,
+	flow4h TraderFlow,
+	flow1d TraderFlow,
 	now time.Time,
 ) (*FeatureSnapshot, error) {
 	closed1h, series1h, err := PickClosedCandle(klines1h, time.Hour, now)
@@ -298,22 +439,21 @@ func ComputeSnapshot(
 
 	closes1h, highs1h, lows1h, vols1h := closesHighsLowsVolumes(series1h)
 	raw := make(map[string]float64, 512)
-	mapBaseAndCore(raw, closes1h, highs1h, lows1h, vols1h, closed1h.Open, closed1h.High, closed1h.Low, closed1h.Close, closed1h.Volume, closed1h.Timestamp.UTC())
+	mapBaseAndCore(raw, closes1h, highs1h, lows1h, vols1h, closed1h.Open, closed1h.High, closed1h.Low, closed1h.Close, closed1h.Volume, closed1h.Timestamp.UTC(), flow1h)
 
 	if len(klines4h) >= 2 {
 		if closed4h, series4h, e := PickClosedCandle(klines4h, 4*time.Hour, now); e == nil {
-			mapTF("tf4h_", raw, series4h, closed4h.Timestamp.UTC())
+			mapTF("tf4h_", raw, series4h, closed4h.Timestamp.UTC(), flow4h)
 		}
 	}
 	if len(klines1d) >= 2 {
 		if closed1d, series1d, e := PickClosedCandle(klines1d, 24*time.Hour, now); e == nil {
-			mapTF("tf1d_", raw, series1d, closed1d.Timestamp.UTC())
+			mapTF("tf1d_", raw, series1d, closed1d.Timestamp.UTC(), flow1d)
 		}
 	}
 
 	aligned, computed, missing := AlignToSchema(raw, featureCols)
 
-	// legacy fields populated from aligned/raw for signal compatibility
 	m := aligned["macd"]
 	ms := aligned["macd_signal"]
 	mh := aligned["macd_hist"]
@@ -359,7 +499,6 @@ func ComputeSnapshot(
 		MissingCols:   missing,
 	}
 
-	// legacy filter_4h
 	if len(klines4h) >= 2 {
 		closed4h, series4h, e := PickClosedCandle(klines4h, 4*time.Hour, now)
 		if e == nil {

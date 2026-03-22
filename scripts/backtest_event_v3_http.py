@@ -27,6 +27,11 @@ Optimization:
 Outputs:
 - TP/SL/TO decomposition:
   avg_ret_tp, avg_ret_sl, avg_ret_to, timeout_win_rate
+
+Debug / alignment:
+- --side-source signal|probs
+- --mt-filter-mode off|long_only|symmetric
+- --debug-best prints side-count diagnostics for the best config
 """
 
 from __future__ import annotations
@@ -70,7 +75,13 @@ def load_klines_1h(path: str) -> List[Dict[str, Any]]:
             ts = r.get("timestamp") or r.get("open_time") or r.get("time") or r.get("t")
             dt = _to_utc_dt(ts)
             out.append(
-                {"ts": dt, "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])}
+                {
+                    "ts": dt,
+                    "open": float(r["open"]),
+                    "high": float(r["high"]),
+                    "low": float(r["low"]),
+                    "close": float(r["close"]),
+                }
             )
         out.sort(key=lambda x: x["ts"])
         return out
@@ -78,7 +89,15 @@ def load_klines_1h(path: str) -> List[Dict[str, Any]]:
     if isinstance(data[0], list):
         for r in data:
             dt = _to_utc_dt(r[0])
-            out.append({"ts": dt, "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4])})
+            out.append(
+                {
+                    "ts": dt,
+                    "open": float(r[1]),
+                    "high": float(r[2]),
+                    "low": float(r[3]),
+                    "close": float(r[4]),
+                }
+            )
         out.sort(key=lambda x: x["ts"])
         return out
 
@@ -89,6 +108,17 @@ def load_klines_1h(path: str) -> List[Dict[str, Any]]:
 class PredictOut:
     signal: str
     confidence: float
+    reasons: List[str]
+    model_version: str
+
+
+@dataclass(frozen=True)
+class CachedPred:
+    signal: str
+    confidence: float
+    p_long: Optional[float]
+    p_short: Optional[float]
+    p_flat: Optional[float]
     reasons: List[str]
     model_version: str
 
@@ -448,6 +478,13 @@ def decide_side(p_long: Optional[float], p_short: Optional[float], threshold: fl
     return "FLAT"
 
 
+def decide_side_from_signal(signal: str) -> str:
+    s = (signal or "").upper().strip()
+    if s in ("LONG", "SHORT", "FLAT"):
+        return s
+    return "FLAT"
+
+
 def _sma(vals: List[float], window: int) -> List[Optional[float]]:
     out: List[Optional[float]] = []
     s = 0.0
@@ -485,6 +522,54 @@ def _trend_series(
     return out
 
 
+def apply_mt_filter(
+    side: str,
+    sig_ts: datetime,
+    trend_4h_at,
+    trend_1d_at,
+    mode: str,
+) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
+    """
+    Returns:
+      (final_side, trend_4h, trend_1d, reject_reason)
+    """
+    mode = (mode or "off").lower().strip()
+
+    if side not in ("LONG", "SHORT"):
+        return side, None, None, None
+
+    if mode == "off":
+        return side, None, None, None
+
+    t4 = trend_4h_at(sig_ts)
+    t1d = trend_1d_at(sig_ts)
+
+    if mode == "long_only":
+        if side == "LONG":
+            if t4 != "UP":
+                return "FLAT", t4, t1d, "long_t4_not_up"
+            if t1d == "DOWN":
+                return "FLAT", t4, t1d, "long_t1d_down"
+        return side, t4, t1d, None
+
+    if mode == "symmetric":
+        if side == "LONG":
+            if t4 != "UP":
+                return "FLAT", t4, t1d, "long_t4_not_up"
+            if t1d == "DOWN":
+                return "FLAT", t4, t1d, "long_t1d_down"
+            return side, t4, t1d, None
+
+        if side == "SHORT":
+            if t4 != "DOWN":
+                return "FLAT", t4, t1d, "short_t4_not_down"
+            if t1d == "UP":
+                return "FLAT", t4, t1d, "short_t1d_up"
+            return side, t4, t1d, None
+
+    raise ValueError(f"Unknown mt filter mode: {mode}")
+
+
 def print_backtest_summary(
     *,
     model_version: str,
@@ -501,13 +586,16 @@ def print_backtest_summary(
     tie_breaker: str,
     objective: str,
     position_mode: str,
+    side_source: str,
+    mt_filter_mode: str,
 ) -> None:
     print(f"Model version: {model_version}")
     print(f"Grid: thresholds={n_thresholds} tp={n_tp} sl={n_sl}")
     print(
         f"Backtest bars: {n_bars} from {start_ts} to {end_ts}\n"
         f"Exec: horizon={horizon} bars, fee/side={fee*100:.4f}%, slippage/side={slippage*100:.4f}%, "
-        f"timeout_exit={timeout_exit}, tie={tie_breaker}, objective={objective}, position_mode={position_mode}"
+        f"timeout_exit={timeout_exit}, tie={tie_breaker}, objective={objective}, "
+        f"position_mode={position_mode}, side_source={side_source}, mt_filter_mode={mt_filter_mode}"
     )
     print(
         "\n[回测摘要]\n"
@@ -516,6 +604,7 @@ def print_backtest_summary(
         f"- 回测区间: 共 {n_bars} 根 1h K 线，时间 {start_ts} → {end_ts}\n"
         f"- 执行设定: 持有期 {horizon} 根K线, 单边手续费 {fee*100:.4f}%, 单边滑点 {slippage*100:.4f}%\n"
         f"           超时平仓方式={timeout_exit}, TP/SL 同时触发时优先={tie_breaker}, 目标函数={objective}, 仓位模式={position_mode}\n"
+        f"           信号来源={side_source}, 多周期过滤={mt_filter_mode}\n"
     )
 
 
@@ -539,6 +628,11 @@ def main() -> int:
     ap.add_argument("--sl-grid", default="0.003:0.020:0.001")
     ap.add_argument("--warmup-bars", type=int, default=200)
     ap.add_argument("--sleep-ms", type=int, default=0)
+
+    ap.add_argument("--side-source", choices=["signal", "probs"], default="probs")
+    ap.add_argument("--mt-filter-mode", choices=["off", "long_only", "symmetric"], default="long_only")
+    ap.add_argument("--debug-best", action="store_true")
+
     args = ap.parse_args()
 
     if args.horizon_bars <= 0:
@@ -553,7 +647,6 @@ def main() -> int:
         print(f"ERROR: not enough klines rows: {len(klines)}", file=sys.stderr)
         return 2
 
-    # 4h / 1d K 线与趋势
     try:
         klines_4h = load_klines_1h(f"{args.data_dir.rstrip('/')}/klines_4h.json")
         klines_1d = load_klines_1h(f"{args.data_dir.rstrip('/')}/klines_1d.json")
@@ -607,17 +700,29 @@ def main() -> int:
     tp_grid = _parse_range(args.tp_grid)
     sl_grid = _parse_range(args.sl_grid)
 
-    pred_cache: Dict[str, Tuple[Optional[float], Optional[float], Optional[float], str]] = {}
+    pred_cache: Dict[str, CachedPred] = {}
 
-    def get_probs(as_of_ts: str) -> Tuple[Optional[float], Optional[float], Optional[float], str]:
+    def get_pred(as_of_ts: str) -> CachedPred:
         if as_of_ts in pred_cache:
             return pred_cache[as_of_ts]
+
         out = call_predict(args.base_url, predict_payload(args.interval, as_of_ts))
         p_long, p_short, p_flat = parse_probs_from_reasons(out.reasons)
-        pred_cache[as_of_ts] = (p_long, p_short, p_flat, out.model_version)
+
+        cp = CachedPred(
+            signal=out.signal,
+            confidence=out.confidence,
+            p_long=p_long,
+            p_short=p_short,
+            p_flat=p_flat,
+            reasons=out.reasons,
+            model_version=out.model_version,
+        )
+        pred_cache[as_of_ts] = cp
+
         if args.sleep_ms > 0:
             time.sleep(args.sleep_ms / 1000.0)
-        return pred_cache[as_of_ts]
+        return cp
 
     horizon = int(args.horizon_bars)
     usable = [i for i in indices if i >= args.warmup_bars and i + horizon < len(klines)]
@@ -629,8 +734,8 @@ def main() -> int:
     model_version = ""
     for i in usable:
         as_of_ts = klines[i]["ts"].isoformat().replace("+00:00", "Z")
-        _p_long, _p_short, _p_flat, mv = get_probs(as_of_ts)
-        model_version = mv or model_version
+        cp = get_pred(as_of_ts)
+        model_version = cp.model_version or model_version
 
     print_backtest_summary(
         model_version=model_version,
@@ -647,9 +752,11 @@ def main() -> int:
         tie_breaker=args.tie_breaker,
         objective=args.objective,
         position_mode=args.position_mode,
+        side_source=args.side_source,
+        mt_filter_mode=args.mt_filter_mode,
     )
 
-    best: Optional[Tuple[float, float, float, Metrics, Tuple[float, ...]]] = None
+    best: Optional[Tuple[float, float, float, Metrics, Tuple[float, ...], Dict[str, Any]]] = None
     total_bars = len(usable)
 
     for thr in thresholds:
@@ -657,8 +764,16 @@ def main() -> int:
             for sl in sl_grid:
                 trades: List[TradeResult] = []
 
-                # single-position gating
                 next_allowed_ts: Optional[datetime] = None
+
+                raw_long = raw_short = raw_flat = 0
+                filtered_long = filtered_short = 0
+                final_long = final_short = 0
+
+                signal_long = signal_short = signal_flat = 0
+                probs_long = probs_short = probs_flat = 0
+
+                mt_reject_reasons: Dict[str, int] = {}
 
                 for i in usable:
                     sig_ts = klines[i]["ts"]
@@ -668,17 +783,53 @@ def main() -> int:
                             continue
 
                     as_of_ts = sig_ts.isoformat().replace("+00:00", "Z")
-                    p_long, p_short, _p_flat, _mv = pred_cache[as_of_ts]
-                    side = decide_side(p_long, p_short, thr)
+                    cp = pred_cache[as_of_ts]
 
-                    # 多周期过滤（方案 B）
+                    signal_side = decide_side_from_signal(cp.signal)
+                    if signal_side == "LONG":
+                        signal_long += 1
+                    elif signal_side == "SHORT":
+                        signal_short += 1
+                    else:
+                        signal_flat += 1
+
+                    probs_side = decide_side(cp.p_long, cp.p_short, thr)
+                    if probs_side == "LONG":
+                        probs_long += 1
+                    elif probs_side == "SHORT":
+                        probs_short += 1
+                    else:
+                        probs_flat += 1
+
+                    side = signal_side if args.side_source == "signal" else probs_side
+
                     if side == "LONG":
-                        t4 = trend_4h_at(sig_ts)
-                        t1d = trend_1d_at(sig_ts)
-                        if t4 != "UP":
-                            side = "FLAT"
-                        elif t1d == "DOWN":
-                            side = "FLAT"
+                        raw_long += 1
+                    elif side == "SHORT":
+                        raw_short += 1
+                    else:
+                        raw_flat += 1
+
+                    side_before_filter = side
+                    side, t4, t1d, reject_reason = apply_mt_filter(
+                        side=side,
+                        sig_ts=sig_ts,
+                        trend_4h_at=trend_4h_at,
+                        trend_1d_at=trend_1d_at,
+                        mode=args.mt_filter_mode,
+                    )
+
+                    if side_before_filter == "LONG" and side == "FLAT":
+                        filtered_long += 1
+                    if side_before_filter == "SHORT" and side == "FLAT":
+                        filtered_short += 1
+                    if reject_reason:
+                        mt_reject_reasons[reject_reason] = mt_reject_reasons.get(reject_reason, 0) + 1
+
+                    if side == "LONG":
+                        final_long += 1
+                    elif side == "SHORT":
+                        final_short += 1
 
                     if side == "FLAT":
                         continue
@@ -707,9 +858,18 @@ def main() -> int:
                 if m.signals_per_week < args.min_signals_per_week:
                     continue
 
+                debug_info = {
+                    "signal_side_counts": {"LONG": signal_long, "SHORT": signal_short, "FLAT": signal_flat},
+                    "probs_side_counts": {"LONG": probs_long, "SHORT": probs_short, "FLAT": probs_flat},
+                    "raw_side_counts": {"LONG": raw_long, "SHORT": raw_short, "FLAT": raw_flat},
+                    "filtered_counts": {"LONG": filtered_long, "SHORT": filtered_short},
+                    "final_side_counts": {"LONG": final_long, "SHORT": final_short},
+                    "mt_reject_reasons": dict(sorted(mt_reject_reasons.items())),
+                }
+
                 score = _score_metrics(m, args.objective)
                 if best is None or score > best[4]:
-                    best = (thr, tp, sl, m, score)
+                    best = (thr, tp, sl, m, score, debug_info)
 
     if best is None:
         msg_en = "No config satisfies min signals/week constraint. Try lowering --min-signals-per-week."
@@ -718,13 +878,14 @@ def main() -> int:
         print(msg_zh, file=sys.stderr)
         return 3
 
-    thr, tp, sl, m, _score = best
+    thr, tp, sl, m, _score, debug_info = best
     print("\n=== BEST CONFIG (grid objective) ===")
     print(
         f"threshold={thr:.2f} tp={tp*100:.2f}% sl={sl*100:.2f}% "
         f"fee/side={args.fee*100:.4f}% slippage/side={args.slippage*100:.4f}% "
         f"horizon={horizon} timeout_exit={args.timeout_exit} tie={args.tie_breaker} "
-        f"objective={args.objective} position_mode={args.position_mode}"
+        f"objective={args.objective} position_mode={args.position_mode} "
+        f"side_source={args.side_source} mt_filter_mode={args.mt_filter_mode}"
     )
     print(
         "metrics: "
@@ -754,6 +915,16 @@ def main() -> int:
         f"{(f'{m.bars_to_exit_p90:.1f}' if m.bars_to_exit_p90 is not None else 'na')}/"
         f"{m.bars_to_exit_max}"
     )
+
+    if args.debug_best:
+        print("debug(best):")
+        print(f"  signal_side_counts={debug_info['signal_side_counts']}")
+        print(f"  probs_side_counts={debug_info['probs_side_counts']}")
+        print(f"  raw_side_counts={debug_info['raw_side_counts']}")
+        print(f"  filtered_counts={debug_info['filtered_counts']}")
+        print(f"  final_side_counts={debug_info['final_side_counts']}")
+        print(f"  mt_reject_reasons={debug_info['mt_reject_reasons']}")
+
     return 0
 
 

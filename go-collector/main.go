@@ -271,6 +271,58 @@ func collectFastAll(dataDir string, binance *collector.BinanceCollector, isStart
 	log.Info("FAST data collection completed successfully!")
 }
 
+func aggregateTraderFlow(trades map[string][]models.Trade, now time.Time, window time.Duration) features.TraderFlow {
+	var buyVol, sellVol float64
+	cutoff := now.Add(-window)
+
+	for _, ts := range trades {
+		for _, t := range ts {
+			tt := t.UpdateTime
+			if tt.IsZero() {
+				tt = t.CloseTime
+			}
+			if tt.IsZero() {
+				tt = t.OpenTime
+			}
+			// 没时间戳就跳过（避免脏数据）
+			if tt.IsZero() {
+				continue
+			}
+			if tt.Before(cutoff) || tt.After(now) {
+				continue
+			}
+
+			amt := t.Amount
+			if amt == 0 && t.Price != 0 && t.Quantity != 0 {
+				amt = t.Price * t.Quantity
+			}
+			if amt < 0 {
+				amt = -amt
+			}
+			if amt == 0 {
+				continue
+			}
+
+			switch strings.ToUpper(strings.TrimSpace(t.Side)) {
+			case "BUY":
+				buyVol += amt
+			case "SELL":
+				sellVol += amt
+			}
+		}
+	}
+
+	total := buyVol + sellVol
+	if total == 0 {
+		return features.TraderFlow{}
+	}
+	return features.TraderFlow{
+		BuyRatio:  buyVol / total,
+		SellRatio: sellVol / total,
+		NetFlow:   (buyVol - sellVol) / total,
+	}
+}
+
 // SLOW: heavy endpoints, do less frequently
 func collectSlowAll(dataDir string, binance *collector.BinanceCollector, okx *collector.OKXCollector, coinbase *collector.CoinbaseCollector) {
 	var wg sync.WaitGroup
@@ -309,6 +361,12 @@ func computeAndPersistFeaturesAndSignals(dataDir string) {
 	kl1h := append([]models.OHLCV(nil), store.Klines["1h"]...)
 	kl4h := append([]models.OHLCV(nil), store.Klines["4h"]...)
 	kl1d := append([]models.OHLCV(nil), store.Klines["1d"]...)
+	// deep-copy trades
+	tradesCopy := make(map[string][]models.Trade, len(store.Trades))
+	for k, v := range store.Trades {
+		vc := append([]models.Trade(nil), v...)
+		tradesCopy[k] = vc
+	}
 	store.mu.RUnlock()
 
 	if len(kl1h) < 2 {
@@ -317,11 +375,20 @@ func computeAndPersistFeaturesAndSignals(dataDir string) {
 	}
 
 	now := time.Now().UTC()
+	flow1h := aggregateTraderFlow(tradesCopy, now, 1*time.Hour)
+	flow4h := aggregateTraderFlow(tradesCopy, now, 4*time.Hour)
+	flow1d := aggregateTraderFlow(tradesCopy, now, 24*time.Hour)
 	if len(runtimeFeatureColumns) == 0 {
 		log.Warn("Feature schema columns not loaded; skip feature compute")
 		return
 	}
-	snap, err := features.ComputeSnapshot("ETHUSDT", "1h", kl1h, kl4h, kl1d, runtimeFeatureColumns, now)
+	snap, err := features.ComputeSnapshot(
+		"ETHUSDT", "1h",
+		kl1h, kl4h, kl1d,
+		runtimeFeatureColumns,
+		flow1h, flow4h, flow1d,
+		now,
+	)
 	if err != nil {
 		log.Warnf("ComputeSnapshot failed: %v", err)
 		return
