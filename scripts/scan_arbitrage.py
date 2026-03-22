@@ -5,7 +5,12 @@ Usage:
     python scripts/scan_arbitrage.py --help
     python scripts/scan_arbitrage.py --symbols ETH/USDT,BTC/USDT --amount 10000
     python scripts/scan_arbitrage.py --cex mock --dex mock --output json --show-all
-    python scripts/scan_arbitrage.py --dex mock --output table --show-all
+
+    # Real on-chain quote (requires ETHEREUM_RPC_URL in .env)
+    python scripts/scan_arbitrage.py --dex uniswap_v3 --show-all
+
+    # Execute DEX leg (requires ETHEREUM_RPC_URL + WALLET_PRIVATE_KEY in .env)
+    python scripts/scan_arbitrage.py --dex uniswap_v3 --execute
 """
 from __future__ import annotations
 
@@ -97,6 +102,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Show blocked opportunities too")
     p.add_argument("--demo", action="store_true", default=False,
                    help="Use demo mode with exaggerated mock spreads to show PASS results")
+    p.add_argument(
+        "--execute", action="store_true", default=False,
+        help=(
+            "Execute the DEX leg of PASS opportunities on-chain via Uniswap V3. "
+            "Requires --dex uniswap_v3, ETHEREUM_RPC_URL and WALLET_PRIVATE_KEY in .env. "
+            "WARNING: this sends real transactions and spends real funds."
+        ),
+    )
+    p.add_argument(
+        "--slippage-tolerance", type=float, default=0.5,
+        help="Max slippage %% accepted during on-chain execution (default: 0.5%%)",
+    )
     return p
 
 
@@ -108,6 +125,23 @@ def main() -> int:
     if not symbols:
         print("ERROR: no symbols provided", file=sys.stderr)
         return 1
+
+    # ------------------------------------------------------------------
+    # Validate --execute preconditions
+    # ------------------------------------------------------------------
+    if args.execute:
+        if args.dex != "uniswap_v3":
+            print(
+                "ERROR: --execute requires --dex uniswap_v3",
+                file=sys.stderr,
+            )
+            return 1
+        if args.cex == "mock":
+            print(
+                "ERROR: --execute requires real CEX data (--cex binance)",
+                file=sys.stderr,
+            )
+            return 1
 
     # ------------------------------------------------------------------
     # Fetch CEX quotes
@@ -156,12 +190,12 @@ def main() -> int:
     print(f"Fetching {args.dex} DEX quotes …", file=sys.stderr)
     try:
         dex_quotes = dex_fetcher.fetch_quotes(symbols, args.amount)
-    except NotImplementedError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
     except Exception as exc:
         print(f"ERROR: failed to fetch DEX quotes: {exc}", file=sys.stderr)
         return 1
+
+    # Index DEX quotes by symbol for later lookup during execution
+    dex_quotes_by_symbol = {q.symbol: q for q in dex_quotes}
 
     # ------------------------------------------------------------------
     # Arbitrage engine
@@ -202,8 +236,90 @@ def main() -> int:
         f"{passing} passing filters",
         file=sys.stderr,
     )
+
+    # ------------------------------------------------------------------
+    # Optional on-chain execution (--execute)
+    # ------------------------------------------------------------------
+    if args.execute and passing > 0:
+        return _run_execution(args, opportunities, dex_quotes_by_symbol)
+
     return 0
 
+
+def _run_execution(args, opportunities, dex_quotes_by_symbol: dict) -> int:
+    """Execute the DEX leg of PASS opportunities via Uniswap V3."""
+    from app.risk.chain_risk import assess_chain_risks
+    from app.execution.wallet import get_account
+    from app.execution.swap_executor import UniswapV3SwapExecutor
+
+    try:
+        from web3 import Web3
+    except ImportError:
+        print(
+            "ERROR: web3 is not installed. Run: pip install web3>=6.0.0",
+            file=sys.stderr,
+        )
+        return 1
+
+    rpc_url = os.environ.get("ETHEREUM_RPC_URL", "")
+    if not rpc_url:
+        print(
+            "ERROR: ETHEREUM_RPC_URL is not set. Add it to your .env file.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        if not w3.is_connected():
+            print(
+                f"ERROR: Cannot connect to Ethereum RPC at {rpc_url!r}",
+                file=sys.stderr,
+            )
+            return 1
+        account = get_account(w3)
+    except Exception as exc:
+        print(f"ERROR: wallet/RPC setup failed: {exc}", file=sys.stderr)
+        return 1
+
+    executor = UniswapV3SwapExecutor(
+        slippage_tolerance=args.slippage_tolerance / 100.0,
+    )
+
+    print(
+        f"\n⚠️  EXECUTING DEX LEG for {sum(1 for o in opportunities if o.status == 'PASS')} "
+        f"PASS opportunity(ies) — REAL TRANSACTIONS, REAL FUNDS",
+        file=sys.stderr,
+    )
+
+    for opp in opportunities:
+        if opp.status != "PASS":
+            continue
+        dex_quote = dex_quotes_by_symbol.get(opp.symbol)
+        if dex_quote is None:
+            print(f"  [{opp.symbol}] SKIP — no DEX quote found", file=sys.stderr)
+            continue
+
+        # Chain risk assessment
+        risk = assess_chain_risks(opp, dex_quote)
+        for warn in risk.warnings:
+            print(f"  [{opp.symbol}] WARN: {warn}", file=sys.stderr)
+        if not risk.is_safe:
+            print(f"  [{opp.symbol}] BLOCKED by chain risk — skipping", file=sys.stderr)
+            continue
+
+        try:
+            result = executor.execute_dex_leg(w3, account, opp, dex_quote)
+            status = "✅ SUCCESS" if result.success else "❌ REVERTED"
+            print(
+                f"  [{opp.symbol}] {opp.direction} {status} "
+                f"tx={result.tx_hash} gas={result.gas_used}",
+                file=sys.stderr,
+            )
+        except Exception as exc:
+            print(f"  [{opp.symbol}] ERROR: {exc}", file=sys.stderr)
+
+    return 0
 
 if __name__ == "__main__":
     sys.exit(main())

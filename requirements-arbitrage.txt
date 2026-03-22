@@ -8,3 +8,4 @@
 ccxt==4.2.70          # Unified crypto exchange API (CEX quotes)
 python-dotenv==1.0.1  # .env file loading (BINANCE_API_KEY etc.)
 requests==2.31.0      # HTTP client (used by CCXT internally)
+web3>=6.0.0           # Ethereum interaction (UniswapV3Quote + on-chain execution)

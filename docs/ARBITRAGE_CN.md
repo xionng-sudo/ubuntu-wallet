@@ -1,34 +1,34 @@
 # DEX/CEX 套利扫描器 — 中文文档
 
-> 语言：中文 | 项目版本：MVP v1.0
+> 语言：中文 | 项目版本：v1.1（含链上执行）
 
 ---
 
-## ⚠️ 当前版本重要说明
+## ⚠️ 运行环境说明
 
-> **MVP v1.0 可运行路径基于模拟 DEX 数据。**
->
-> - `--cex binance`（默认）：使用 Binance 真实订单簿报价（需要公网访问 `api.binance.com`）
-> - `--dex mock`（默认）：使用内置模拟 DEX，**无需任何链上访问或 API Key**
-> - `--dex uniswap_v3`：**尚未实现**，调用时会抛出 `NotImplementedError`
->
-> **真实 Uniswap V3 链上路由集成计划在下一阶段（P0 路线图）完成。**
-> 若需在无公网环境下完整体验扫描流程，请使用 `--cex mock --dex mock --demo`（见第 5 节）。
+| 模式 | 命令示例 | 网络要求 |
+|------|---------|---------|
+| 完全离线演示 | `--cex mock --dex mock --demo` | 无需任何网络 |
+| 实时报价（仅扫描） | `--cex binance --dex uniswap_v3` | Binance API + Ethereum RPC |
+| 链上 DEX 执行 | `--dex uniswap_v3 --execute` | 上述 + 钱包私钥 |
+
+> **注**：`--dex uniswap_v3` 会通过 QuoterV2 合约获取**真实**链上报价，而非模拟数据。执行需要钱包私钥，请确保理解风险后再使用 `--execute`。
 
 ---
 
 ## 1. 项目简介与目标
 
-本模块是一个 **DEX/CEX 套利 MVP 扫描器**，运行在 ubuntu-wallet 仓库之中。
+本模块是一个 **DEX/CEX 套利扫描与执行器**，运行在 ubuntu-wallet 仓库之中。
 
 ### 核心目标
 
 | 目标 | 说明 |
 |------|------|
-| 价差发现 | 对比中心化交易所（CEX，如 Binance）与去中心化交易所（DEX，如 Uniswap V3）的买卖盘价格 |
+| 价差发现 | 对比中心化交易所（CEX，如 Binance）与去中心化交易所（DEX，Uniswap V3）的买卖盘价格 |
 | 成本量化 | 自动计算交易费、Gas 费、滑点，得出**净利润** |
 | 风险过滤 | 可配置阈值，过滤掉流动性不足、Gas 过高等高风险机会 |
-| 可扩展性 | 通过抽象基类 `BaseDEXQuote` 轻松接入新 DEX |
+| 链上执行 | 通过 Uniswap V3 SwapRouter02 执行 DEX 侧交易（含 ERC-20 授权、余额校验、Gas 估算） |
+| 链上风控 | Quote TTL 校验、MEV 风险警告、路由元数据验证 |
 
 ### 套利原理
 
@@ -60,19 +60,27 @@ app/
 │   └── dex/
 │       ├── base.py           ✅ Quote 数据类 + BaseDEXQuote 抽象基类
 │       ├── mock_dex.py       ✅ 模拟 DEX（含可配置价差和随机噪声）
-│       └── uniswap_v3.py     🚧 接口占位符（待实现链上调用，下一阶段）
+│       └── uniswap_v3.py     ✅ 真实链上报价（QuoterV2）
 ├── costs/
 │   └── calculator.py         ✅ Gas/滑点/手续费计算
 ├── arbitrage/
 │   └── engine.py             ✅ 双向套利机会计算引擎
-└── risk/
-    └── filters.py            ✅ 可配置风险过滤器
+├── risk/
+│   ├── filters.py            ✅ 可配置风险过滤器
+│   └── chain_risk.py         ✅ 链上风险评估（TTL/MEV/路由校验）
+└── execution/
+    ├── wallet.py             ✅ 私钥加载与账户管理
+    ├── erc20.py              ✅ ERC-20 授权管理
+    └── swap_executor.py      ✅ Uniswap V3 swap 执行器
 
 scripts/
-└── scan_arbitrage.py         ✅ CLI 扫描入口
+└── scan_arbitrage.py         ✅ CLI 扫描+执行入口
 
 tests/
-└── test_arbitrage.py         ✅ 26 个单元测试（无需 API Key，无网络调用）
+└── test_arbitrage.py         ✅ 63 个单元测试（无需 API Key，无网络调用）
+
+requirements-arbitrage.txt    ✅ 最小依赖清单（含 web3）
+```
 
 requirements-arbitrage.txt    ✅ 最小依赖清单（仅套利模块）
 ```
@@ -84,7 +92,8 @@ requirements-arbitrage.txt    ✅ 最小依赖清单（仅套利模块）
 | `BinanceCEXQuote` | ✅ 可用 | 调用 Binance 公开 REST API，无需 API Key |
 | `MockCEXQuote` | ✅ 可用 | 内置模拟，无需网络，适合 CI/离线演示 |
 | `MockDEXQuote` | ✅ 可用 | 模拟 DEX，无需链上连接 |
-| `UniswapV3Quote` | 🚧 占位 | 尚未实现，调用时抛出 `NotImplementedError` |
+| `UniswapV3Quote` | ✅ 可用 | 调用链上 QuoterV2，需 `ETHEREUM_RPC_URL` |
+| `UniswapV3SwapExecutor` | ✅ 可用 | 链上 swap 执行，需 `WALLET_PRIVATE_KEY` |
 
 ### 默认费率参数
 
@@ -94,6 +103,9 @@ requirements-arbitrage.txt    ✅ 最小依赖清单（仅套利模块）
 | DEX 手续费 | 0.3% | Uniswap V3 标准池 |
 | Gas（默认） | 30 Gwei × 150,000 units | 约 $13.5（ETH=$3000） |
 | 最低净利润 | $1.0 | 风险过滤默认值 |
+| 执行滑点保护 | 0.5% | `amountOutMinimum = expected × 99.5%` |
+| Quote TTL | 30 秒 | 超时报价拒绝执行 |
+| 执行 deadline | now+60s | 交易 deadline，过期自动回滚 |
 
 ---
 
@@ -112,14 +124,22 @@ cd ubuntu-wallet     # 进入仓库根目录
 cp .env.example .env
 ```
 
-编辑 `.env`，填入 Binance API Key（**可选**，公开接口无需 Key）：
+编辑 `.env`：
 
 ```dotenv
+# CEX 报价（可选，公开接口无需 Key）
 BINANCE_API_KEY=your_key_here
 BINANCE_API_SECRET=your_secret_here
+
+# 链上报价与执行（--dex uniswap_v3 时必填）
+ETHEREUM_RPC_URL=https://mainnet.infura.io/v3/YOUR_PROJECT_ID
+
+# 链上执行钱包（--execute 时必填）
+# ⚠️ 警告：私钥拥有资金控制权，请勿提交到版本控制
+WALLET_PRIVATE_KEY=0xYOUR_64HEX_PRIVATE_KEY
 ```
 
-> **注意**：若不填写 API Key，扫描器将自动使用 Binance 公开 REST 接口，仅支持行情数据查询，不能下单。
+> **Ethereum RPC 推荐**：[Infura](https://infura.io) 或 [Alchemy](https://alchemy.com)（均有免费套餐）。
 
 ---
 
@@ -142,6 +162,7 @@ pip install -r requirements-arbitrage.txt
 | `ccxt` | 4.2.70 | 统一加密货币交易所 API（CEX 报价） |
 | `python-dotenv` | 1.0.1 | 读取 `.env` 中的 API Key |
 | `requests` | 2.31.0 | HTTP 客户端（CCXT 底层依赖） |
+| `web3` | ≥6.0.0 | Ethereum 交互（UniswapV3Quote + 链上执行） |
 
 ### 方案 B：完整 ML/交易栈
 
@@ -180,28 +201,47 @@ BNB/USDT    BUY_DEX_SELL_CEX      559.8600      569.4067      -1.677%   $-254.49
 Scanned 3 symbol(s) · 6 result(s) · 3 passing filters
 ```
 
-### 🌐 实时扫描（真实 Binance 数据 + 模拟 DEX）
+### 🌐 真实链上报价扫描（Binance + Uniswap V3）
+
+先确保 `.env` 中设置了 `ETHEREUM_RPC_URL`，然后：
 
 ```bash
-python scripts/scan_arbitrage.py --dex mock --show-all
+python scripts/scan_arbitrage.py \
+  --cex binance \
+  --dex uniswap_v3 \
+  --symbols ETH/USDT,BTC/USDT \
+  --amount 10000 \
+  --show-all
 ```
 
-> **说明**：此命令默认使用 `--cex binance`（真实 Binance 订单簿），需要能访问 `api.binance.com`。若网络不可用，见[第 7 节排查指南](#7-常见问题排查)。
+> 这会调用链上 QuoterV2 合约，价格反映真实 Uniswap V3 池深度，需要以太坊 RPC 连接。
 
-**预期输出（真实行情，结果因价差随机而异）：**
+### ⚡ 链上执行 DEX 侧（需要私钥）
 
+```bash
+# 先确认报价（仅扫描）
+python scripts/scan_arbitrage.py \
+  --cex binance --dex uniswap_v3 \
+  --symbols ETH/USDT --amount 5000
+
+# 执行 DEX 侧（⚠️ 真实交易，消耗真实资金）
+python scripts/scan_arbitrage.py \
+  --cex binance --dex uniswap_v3 \
+  --symbols ETH/USDT --amount 5000 \
+  --execute \
+  --slippage-tolerance 0.5
 ```
-Fetching Binance quotes for: ETH/USDT, BTC/USDT, BNB/USDT …
-Fetching mock DEX quotes …
-Symbol      Direction             CEX px        DEX px        Gross%    Net $      Net%     Status
-----------  --------------------  ------------  ------------  --------  ---------  -------  ------------------------
-ETH/USDT    BUY_CEX_SELL_DEX      3,xxx.xxxx    3,xxx.xxxx    +x.xxx%   $+xx.xx    +x.xxx%  BLOCKED_LOW_PROFIT
-...
 
-Scanned 3 symbol(s) · 6 result(s) · 0 passing filters
-```
+**执行流程：**
+1. 扫描 PASS 机会
+2. 链上风险评估（Quote TTL / MEV / 路由元数据校验）
+3. 检查钱包 tokenIn 余额
+4. 若 allowance 不足，自动发送 ERC-20 `approve` 交易
+5. `eth_estimateGas` 干跑（捕获链上回滚）
+6. 签名并广播 `exactInputSingle` 交易
+7. 等待 receipt 并输出结果
 
-> **正常现象**：真实市场中 CEX 与模拟 DEX 的价差通常小于总费用（CEX 0.1% + DEX 0.3% + Gas ~$13.5），因此大部分结果被过滤。实际套利机会需要真实 DEX 路由数据（下一阶段 P0 实现）。
+> **注**：当前仅执行 **DEX 侧**（Uniswap swap）。CEX 侧（Binance 下单）需要额外集成 CEX 订单 API，不在本 PR 范围内。
 
 ### 指定交易对与金额
 
@@ -276,7 +316,9 @@ python scripts/scan_arbitrage.py \
 --max-slippage  最大滑点 %（默认：1.0）
 --min-liquidity 最低流动性（USD，默认：10000）
 --show-all      显示所有机会，包括被过滤的（默认：False）
---demo          使用演示模式：模拟 DEX 价格偏高 ~1.5%，保证有 PASS 结果出现
+--demo          演示模式：模拟 DEX 价格偏高 ~1.5%，保证有 PASS 结果出现
+--execute       执行 DEX 侧链上 swap（需要 ETHEREUM_RPC_URL + WALLET_PRIVATE_KEY）
+--slippage-tolerance  执行时最大可接受滑点 %（默认：0.5）
 ```
 
 ---
@@ -318,6 +360,42 @@ python scripts/scan_arbitrage.py \
 
 ---
 
+## 6.5 链上执行支持规格
+
+### 支持的链与路由器
+
+| 项目 | 值 |
+|------|------|
+| **链** | Ethereum mainnet（chain ID 1） |
+| **DEX 路由器** | Uniswap V3 SwapRouter02 (`0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45`) |
+| **报价合约** | QuoterV2 (`0x61fFE014bA17989E743c5F6cB21bF9697530B21e`) |
+| **Swap 类型** | `exactInputSingle`（单跳，直接 token → token） |
+| **多链支持** | BSC / Arbitrum / Polygon → P3 路线图 |
+
+### 支持的代币
+
+| 代币符号 | 合约地址 | 精度 |
+|---------|---------|------|
+| ETH/WETH | `0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2` | 18 |
+| BTC/WBTC | `0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599` | 8 |
+| USDT | `0xdAC17F958D2ee523a2206206994597C13D831ec7` | 6 |
+| USDC | `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` | 6 |
+| DAI | `0x6B175474E89094C44Da98b954EedeAC495271d0F` | 18 |
+
+### 链上执行安全措施
+
+| 措施 | 说明 |
+|------|------|
+| Quote TTL 校验 | 报价超过 30s 拒绝执行，防止陈旧价格执行 |
+| 余额检查 | 执行前验证钱包 tokenIn 余额是否充足 |
+| ERC-20 授权 | 自动发送 `approve(MAX_UINT256)` 补足授权 |
+| Gas 估算干跑 | `eth_estimateGas` 捕获链上回滚（流动性不足、路由无效等） |
+| 滑点保护 | `amountOutMinimum = expected × (1 - tolerance)`，默认 tolerance=0.5% |
+| 交易 deadline | `now + 60s`，超时后交易自动回滚 |
+| MEV 风险警告 | 净利润 < 0.3% 时发出 MEV 警告（可通过 Flashbots Protect 缓解） |
+
+---
+
 ## 7. 常见问题排查
 
 ### Q1：实时扫描报 `ccxt.NetworkError` 或 `BinanceCEX network error`
@@ -346,7 +424,28 @@ HTTPS_PROXY=http://your-proxy:port \
 
 ---
 
-### Q2：出现 `ModuleNotFoundError: No module named 'ccxt'`
+### Q1b：链上报价失败 `ConnectionError` 或 `ETHEREUM_RPC_URL is not set`
+
+**原因**：`ETHEREUM_RPC_URL` 未配置或 RPC 节点不可达。
+
+**诊断步骤**：
+```bash
+# 验证 RPC 连通性
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  --data '{"jsonrpc":"2.0","method":"net_version","params":[],"id":1}' \
+  $ETHEREUM_RPC_URL
+# 正常返回: {"jsonrpc":"2.0","id":1,"result":"1"}  (mainnet=1)
+```
+
+**解决方法**：
+- 在 `.env` 中设置 `ETHEREUM_RPC_URL=https://mainnet.infura.io/v3/YOUR_KEY`
+- 若无 RPC，注册免费 Infura / Alchemy 账号
+- 若只需测试扫描逻辑，使用 `--dex mock`
+
+---
+
+### Q2：出现 `ModuleNotFoundError: No module named 'ccxt'` 或 `'web3'`
 
 **原因**：未安装依赖。
 
@@ -371,17 +470,26 @@ python scripts/scan_arbitrage.py --cex mock --dex mock --demo
 
 ---
 
-### Q4：`--dex uniswap_v3` 报 `NotImplementedError`
+### Q4：执行时报 `Quote is stale`
 
-**原因**：Uniswap V3 链上接口在本版本（MVP v1.0）中尚未实现，为占位符。
+**原因**：从 DEX 获取报价到执行之间超过了 30 秒 TTL，防止陈旧价格执行。
 
-**现状**：`app/market/dex/uniswap_v3.py` 中已定义正确接口和集成指引（需要 `web3.py` + Quoter 合约 + Ethereum RPC）。
-
-**解决**：使用 `--dex mock` 进行端到端测试。
+**解决**：立即重新运行扫描后再加 `--execute` 执行。
 
 ---
 
-### Q5：交易对格式错误（`BadSymbol` 异常）
+### Q5：执行时报 `Gas estimation failed — swap would likely revert`
+
+**原因**：链上 `eth_estimateGas` 回滚，可能原因：流动性不足、滑点过紧、路由无效或报价已过期。
+
+**诊断**：
+- 降低 `--amount` 减少价格冲击
+- 放宽 `--slippage-tolerance`（如设为 `1.0`）
+- 确认 `ETHEREUM_RPC_URL` 为主网节点
+
+---
+
+### Q6：交易对格式错误（`BadSymbol` 异常）
 
 **原因**：交易对格式不正确（CCXT 要求使用斜杠分隔，如 `ETH/USDT`）。
 
@@ -396,9 +504,9 @@ python scripts/scan_arbitrage.py --cex mock --dex mock --demo
 
 ---
 
-### Q6：没有任何 PASS 结果
+### Q7：没有任何 PASS 结果
 
-**原因**：真实市场中，CEX 与随机模拟 DEX 之间的价差通常小于总手续费（约 0.4% + Gas），属于正常现象。
+**原因**：真实市场中，CEX 与 Uniswap V3 之间的实际价差通常小于总手续费（约 0.4% + Gas），属于正常现象。
 
 **验证步骤**：
 ```bash
@@ -414,14 +522,14 @@ python scripts/scan_arbitrage.py --cex mock --dex mock --min-profit -999 --show-
 
 ---
 
-### Q7：运行测试
+### Q8：运行测试
 
 ```bash
 cd ubuntu-wallet
-python -m unittest tests/test_arbitrage -v
+python -m unittest tests.test_arbitrage -v
 ```
 
-26 个测试均无需网络或 API Key。
+63 个测试均无需网络或 API Key。
 
 ---
 
@@ -438,21 +546,24 @@ cd ubuntu-wallet
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-# 3. 安装依赖
+# 3. 安装依赖（含 web3）
 pip install -r requirements-arbitrage.txt
 
-# 4. 配置 API Key（可选，公开接口无需 Key）
+# 4. 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入 BINANCE_API_KEY / BINANCE_API_SECRET
+# 编辑 .env，填入 BINANCE_API_KEY / ETHEREUM_RPC_URL / WALLET_PRIVATE_KEY
 
 # 5. 验证安装
-python -m unittest tests/test_arbitrage -v
+python -m unittest tests.test_arbitrage -v
 
 # 6. 运行扫描器（离线演示）
 python scripts/scan_arbitrage.py --cex mock --dex mock --demo --show-all
 
-# 7. 运行实时扫描（需要 Binance 网络访问）
-python scripts/scan_arbitrage.py --dex mock --show-all
+# 7. 运行链上报价扫描（需要 Binance + Ethereum RPC）
+python scripts/scan_arbitrage.py --cex binance --dex uniswap_v3 --show-all
+
+# 8. 执行 DEX 侧（需要 WALLET_PRIVATE_KEY，发送真实交易）
+python scripts/scan_arbitrage.py --cex binance --dex uniswap_v3 --execute
 ```
 
 ### Docker 部署（基于现有 Dockerfile 若存在）
@@ -471,6 +582,7 @@ docker run --env-file .env ubuntu-wallet \
 # 每 5 分钟扫描一次，结果追加到日志
 */5 * * * * cd /opt/ubuntu-wallet && \
   .venv/bin/python scripts/scan_arbitrage.py \
+  --cex binance --dex uniswap_v3 \
   --output json >> /var/log/arb_scan.jsonl 2>&1
 ```
 
@@ -488,7 +600,8 @@ Type=simple
 WorkingDirectory=/opt/ubuntu-wallet
 EnvironmentFile=/opt/ubuntu-wallet/.env
 ExecStart=/opt/ubuntu-wallet/.venv/bin/python scripts/scan_arbitrage.py \
-          --symbols ETH/USDT,BTC/USDT,BNB/USDT \
+          --cex binance --dex uniswap_v3 \
+          --symbols ETH/USDT,BTC/USDT \
           --amount 10000 \
           --output json
 Restart=always
@@ -508,8 +621,10 @@ WantedBy=multi-user.target
 | 检查 Binance 手续费 | 每季度 | VIP 等级会降低费率（`CEX_FEE_RATE`） |
 | 监控 Gas 基础费 | 每日 | 链上拥堵时 Gas 费飙升，可通过 `--max-gas` 参数控制 |
 | 更新 CCXT 版本 | 每月 | `pip install -U ccxt`，注意 API 兼容性变更 |
+| 更新 web3 版本 | 每月 | `pip install -U web3`，注意 API 变更 |
 | 轮换 API Key | 每 90 天 | 安全最佳实践，旧 Key 在 `.env` 中替换即可 |
-| 运行单元测试 | 每次发布前 | `python -m unittest tests/test_arbitrage -v` |
+| 轮换 WALLET_PRIVATE_KEY | 按需 | 若怀疑泄露立即替换，确认新钱包余额再停用旧密钥 |
+| 运行单元测试 | 每次发布前 | `python -m unittest tests.test_arbitrage -v` |
 
 ---
 
@@ -520,41 +635,36 @@ WantedBy=multi-user.target
 | 阶段 | 名称 | 状态 |
 |------|------|------|
 | P0 | 需求确认与架构设计 | ✅ 已完成 |
-| P1 | DEX/CEX 扫描器 MVP（本 PR） | ✅ 已完成 |
-| P2 | 真实 DEX 路由与多金额档位报价 | 🔜 下一阶段 |
-| P3 | 模拟盘 | 📋 规划中 |
-| P4 | 半自动执行 | 📋 规划中 |
-| P5 | 强风控、MEV 评估、机会寿命预测 | 📋 长期 |
+| P1 | DEX/CEX 扫描器 MVP | ✅ 已完成 |
+| P2 | 链上报价 + DEX 执行（本 PR） | ✅ 已完成 |
+| P3 | 多链支持（BSC / Arbitrum / Polygon） | 🔜 下一阶段 |
+| P4 | CEX 执行闭环 + 双侧原子套利 | 📋 规划中 |
+| P5 | 高级风控（MEV 保护、Flash Loan） | 📋 规划中 |
+| P6 | 生产化（数据库、Dashboard、监控） | 📋 长期 |
 
 ---
 
-### P2 — 真实 DEX 路由（下一阶段优先）
+### P3 — 多链支持（1–2 个月）
 
-- [ ] **实现 Uniswap V3 链上报价** (`app/market/dex/uniswap_v3.py`)
-  - 集成 `web3.py` + Quoter 合约（`0xb273...5AB6`，Ethereum mainnet）
-  - 支持 0.05% / 0.30% / 1.00% 手续费池
-  - 在 `.env` 中配置 `ETHEREUM_RPC_URL`（Infura / Alchemy）
+- [ ] **支持 BSC** — PancakeSwap V3（`--chain bsc`）
+- [ ] **支持 Arbitrum** — Uniswap V3 on Arbitrum（Gas 费更低）
+- [ ] **支持 Polygon** — QuickSwap
 - [ ] **添加 OKX CEX 数据源** (`app/market/cex/okx.py`)
 - [ ] **实时 Gas 价格查询**（Etherscan Gas Oracle API）
 - [ ] **多金额档位报价**（1k / 10k / 100k USD 分别计算滑点）
 
-### P3 — 多链支持（1–2 个月）
+### P4 — CEX 执行闭环（2–3 个月）
 
-- [ ] **支持 BSC** — PancakeSwap V3
-- [ ] **支持 Arbitrum** — Uniswap V3 on Arbitrum（Gas 费更低）
-- [ ] **支持 Polygon** — QuickSwap
-
-### P4 — 执行层（2–3 个月）
-
-- [ ] **模拟交易执行器** — 在 fork 网络上验证套利路径
+- [ ] **Binance 订单执行** — 通过 CCXT `create_order()` 完成 CEX 侧下单
+- [ ] **双侧原子套利** — 同时提交 DEX swap + CEX 订单，最小化暴露时间
 - [ ] **Telegram / 钉钉告警** — PASS 机会实时推送
 - [ ] **历史回测** — 对接 `python-analyzer/backtest_multi_tf.py`
 
-### P5 — 智能优化（3–6 个月）
+### P5 — 高级风控（3–6 个月）
 
-- [ ] **动态路由** — 自动选择最优费率池
+- [ ] **MEV 保护** — 接入 Flashbots Protect（`eth_sendPrivateTransaction`）
 - [ ] **Flash Loan 支持** — 无本金套利（Aave / dYdX）
-- [ ] **MEV 保护** — 接入 Flashbots / private mempool
+- [ ] **动态路由** — 自动选择最优费率池（0.05% / 0.30% / 1.00%）
 - [ ] **机会寿命预测** — 利用 ML 模型预测套利窗口持续时间
 
 ### P6 — 生产化（6 个月+）
