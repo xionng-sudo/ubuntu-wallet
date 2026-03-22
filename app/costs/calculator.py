@@ -13,7 +13,7 @@ DEX_FEE_RATE: float = 0.003   # 0.3 % Uniswap V3 standard pool
 # ---------------------------------------------------------------------------
 DEFAULT_GAS_GWEI: float = 30.0
 DEFAULT_GAS_UNITS: int = 150_000   # typical Uniswap V3 swap
-ETH_PRICE_USD: float = 3000.0      # fallback; override via argument
+ETH_PRICE_USD: float = 3000.0      # fallback; override via argument or update periodically (see docs/ARBITRAGE_CN.md §9)
 
 
 # ---------------------------------------------------------------------------
