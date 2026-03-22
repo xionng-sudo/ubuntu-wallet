@@ -75,7 +75,7 @@ ubuntu-wallet/
 │
 ├── ml-service/                     # FastAPI 推理服务（端口 9000）
 │   ├── app.py                      # FastAPI 主入口（/predict, /healthz）
-│   ├── model_loader.py             # 模型加载逻辑（支持 current.json 指针）
+│   ├── model_loader.py             # 模型加载逻辑（从 models/current/ 目录加载）
 │   ├── feature_builder.py          # 多周期特征构造 + schema 验证
 │   ├── calibration.py              # 概率校准
 │   ├── prediction_logger.py        # 预测日志（写入 data/predictions_log.jsonl）
@@ -126,9 +126,9 @@ ubuntu-wallet/
 ├── tools/                          # 工具脚本
 │
 ├── models/                         # 模型产物目录（运行时生成，不进 Git）
-│   ├── current.json                # 当前激活模型指针
-│   ├── registry.json               # 模型版本注册表
-│   └── <版本目录>/                 # 各版本模型文件
+│   ├── current/                    # 当前激活模型目录（ml-service 从此目录加载）
+│   ├── registry.json               # 模型版本注册表（记录所有历史版本）
+│   └── archive/<版本目录>/         # 各历史版本模型文件归档
 │
 └── data/                           # 数据目录（运行时生成，不进 Git）
     ├── klines_1h.json              # 1 小时 K 线
@@ -182,7 +182,7 @@ ubuntu-wallet/
 │    ├── POST /predict                            │
 │    ├── GET  /healthz                            │
 │    ├── feature_builder.py（特征构造）            │
-│    ├── model_loader.py（加载 current.json 指针） │
+│    ├── model_loader.py（从 models/current/ 目录加载） │
 │    └── prediction_logger.py（写预测日志）        │
 │              │                                  │
 │              ▼                                  │
@@ -398,7 +398,7 @@ nano .env
 | 目录 | 用途 | 是否进 Git |
 |---|---|---|
 | `data/` | K 线数据、预测日志、模型输入输出文件 | 不进 Git |
-| `models/` | 模型训练产物、current.json、registry.json | 不进 Git |
+| `models/` | 模型训练产物（含 current/ 目录和 registry.json） | 不进 Git |
 | `logs/` | 各服务运行日志（可选，也可通过 journalctl 查看） | 不进 Git |
 | `bin/` | 编译好的 go-collector 二进制文件 | 不进 Git |
 
@@ -429,7 +429,7 @@ COLLECTOR_API_URL=http://localhost:8080
 # ── 路径配置 ──────────────────────────────────────────────
 
 DATA_DIR=./data               # K 线数据、预测日志存储路径
-MODEL_DIR=./models            # 模型产物目录
+# MODEL_DIR=./models/current  # ml-service 默认直接使用 models/current/ 目录（通常无需设置此变量）
 ```
 
 **重要提示：**
@@ -437,7 +437,7 @@ MODEL_DIR=./models            # 模型产物目录
 - **绝对不要将真实 API Key 提交到 Git 仓库。** `.env` 文件已在 `.gitignore` 中排除。
 - 生产环境建议将敏感配置放到 `/etc/ubuntu-wallet/collector.env`（`600` 权限），通过 systemd 的 `EnvironmentFile=` 注入，而不是放在项目目录下的 `.env`。
 - API Key 只需要**读取行情**的权限，不需要交易权限（除非你要运行真实交易脚本）。
-- `MODEL_DIR` 默认指向 `models/`（相对路径），ml-service 启动时会读取 `models/current.json` 确定当前激活的模型版本。
+- `MODEL_DIR` 默认指向 `models/current`（目录），ml-service 启动时直接从该目录加载模型文件。训练脚本每次训练完成后会将模型产物复制到 `models/current/` 目录，并将版本信息写入 `models/registry.json`。
 - 如果 API Key 已经泄露，请立即在交易所管理后台撤销并重新生成。
 
 ---
@@ -569,13 +569,15 @@ cat /tmp/cv_report.csv
 | 文件 | 说明 |
 |---|---|
 | `lightgbm_event_v3.pkl` | LightGBM 基学习器 |
-| `xgboost_event_v3.json` | XGBoost 基学习器 |
+| `lightgbm_event_v3_scaler.pkl` | LightGBM 特征缩放器 |
+| `xgboost_event_v3.json` | XGBoost 基学习器（原生格式） |
+| `xgboost_event_v3_scaler.pkl` | XGBoost 特征缩放器 |
 | `stacking_event_v3.pkl` | 堆叠元模型（Logistic Regression） |
 | `calibration_event_v3.pkl` | 概率校准器（Isotonic Regression） |
 | `feature_columns_event_v3.json` | 特征列名列表（用于 schema 验证） |
 | `model_meta.json` | 模型元信息（版本、训练时间、参数等） |
 
-训练脚本同时会更新 `models/current.json`（激活指针）和 `models/registry.json`（版本注册表）。ml-service 在启动时通过读取 `current.json` 确定要加载哪个版本的模型。
+训练脚本完成后将模型文件归档至 `models/archive/<版本目录>/`，同时复制到 `models/current/`（ml-service 默认从此目录加载），并将版本信息写入 `models/registry.json`。
 
 ---
 
@@ -610,20 +612,23 @@ echo "ml-service 已启动，PID: $!"
 # 检查服务是否启动、模型是否已加载
 curl -s http://127.0.0.1:9000/healthz | jq .
 
-# 期望输出示例：
+# 期望输出示例（字段说明见下表）：
 # {
-#   "status": "ok",
-#   "model_loaded": true,
+#   "ok": true,
+#   "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6",
 #   "calibration_available": true,
-#   "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6"
+#   "calibration_method": "isotonic",
+#   "model_dir": "/home/ubuntu/ubuntu-wallet/models/current",
+#   ...
 # }
 ```
 
 **重要字段说明：**
 
-- `model_loaded: true`：模型已成功加载
+- `ok: true`：服务正常且模型已成功加载（`ok: false` 表示模型未加载）
 - `calibration_available: true`：概率校准器已加载（建议确保此为 true，校准后的置信度更可靠）
 - `model_version`：当前激活的模型版本标识
+- `model_dir`：实际加载模型的目录路径
 
 ### 10.4 发起预测请求（手动测试）
 
@@ -648,9 +653,10 @@ curl -s -X POST http://127.0.0.1:9000/predict \
   "proba_flat": 0.15,
   "signal": "LONG",
   "confidence": 0.73,
+  "calibrated_confidence": 0.71,
+  "calibration_method": "isotonic",
   "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6",
-  "active_model": "event_v3",
-  "as_of_ts": "2026-03-11T19:00:00Z"
+  "active_model": "event_v3"
 }
 ```
 
@@ -719,7 +725,7 @@ python scripts/backtest_event_v3_http.py \
 | `--slippage` | `0.0` | 额外滑点（0 表示不考虑）|
 | `--objective` | `avg_ret_mdd_daily` | 优化目标函数 |
 | `--min-signals-per-week` | `1.0` | 最低信号频率过滤 |
-| `--position-mode` | `single` | 单仓模式，上一笔未平仓时忽略新信号 |
+| `--position-mode` | `single` | 持仓模式（`stack`=默认，每个信号都开仓；`single`=单仓，上一笔未平仓时忽略新信号） |
 
 ### 11.4 多周期方向过滤规则
 
@@ -760,7 +766,7 @@ python scripts/live_trader_eth_perp_simulated.py \
   --tp 0.0175 \
   --sl 0.007 \
   --threshold 0.65 \
-  --horizon-bars 6
+  --horizon 6
 ```
 
 **输出内容**：逐笔模拟交易记录，包含入场时间、信号方向、置信度、出场原因（TP/SL/TIMEOUT）、模拟盈亏等。
@@ -983,7 +989,7 @@ tail -n 5 ~/ubuntu-wallet/data/predictions_log.jsonl | python3 -c \
   "import sys,json; [print(json.dumps(json.loads(l), indent=2, ensure_ascii=False)) for l in sys.stdin]"
 
 # ── 查看模型当前激活版本 ──────────────────────────────────
-cat ~/ubuntu-wallet/models/current.json | jq .
+cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool | grep -E "model_version|trained_at"
 
 # ── 更新代码并重启服务 ────────────────────────────────────
 cd ~/ubuntu-wallet
@@ -1055,10 +1061,11 @@ journalctl -u ml-service.service -n 50 --no-pager
 # 检查模型目录
 ls -lh ~/ubuntu-wallet/models/
 
-# 检查激活指针文件
-cat ~/ubuntu-wallet/models/current.json | jq .
+# 检查 current/ 目录下的模型元信息
+ls ~/ubuntu-wallet/models/current/
+cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool
 
-# 如果 models/ 为空或 current.json 不存在，需要先进行训练
+# 如果 models/current/ 不存在或为空，需要先进行训练
 # 参考第 9 节运行训练脚本
 ```
 

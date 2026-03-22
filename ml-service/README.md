@@ -28,7 +28,7 @@
 | 模型推理 | LightGBM + XGBoost + 堆叠元模型，输出三分类概率 |
 | 概率校准 | Isotonic / Sigmoid 校准，提高置信度可靠性 |
 | 预测日志 | 每次预测结果追加写入 JSONL 日志文件 |
-| 模型热指针 | 通过 `models/current.json` 动态指向当前激活模型版本 |
+| 模型版本管理 | `models/current/` 目录作为当前生产模型，训练后自动更新 |
 | schema 验证 | 在线推理时检测特征漂移 |
 
 ---
@@ -38,7 +38,7 @@
 | 文件 | 说明 |
 |---|---|
 | `app.py` | FastAPI 应用主入口，定义 `/predict`、`/healthz` 等端点 |
-| `model_loader.py` | 模型加载逻辑，支持通过 `current.json` 指针加载版本化模型 |
+| `model_loader.py` | 模型加载逻辑（从 MODEL_DIR 目录直接加载，默认 `models/current/`） |
 | `feature_builder.py` | 多周期特征构造 + schema 验证 |
 | `calibration.py` | 概率校准（Isotonic / Sigmoid） |
 | `prediction_logger.py` | 预测日志写入（JSONL 格式） |
@@ -112,10 +112,18 @@ curl -s http://127.0.0.1:9000/healthz | jq .
 
 ```json
 {
-  "status": "ok",
-  "model_loaded": true,
+  "ok": true,
+  "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6",
   "calibration_available": true,
-  "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6"
+  "calibration_method": "isotonic",
+  "model_dir": "/home/ubuntu/ubuntu-wallet/models/current",
+  "loaded_model_dir": "/home/ubuntu/ubuntu-wallet/models/current",
+  "flags": {
+    "ENABLE_EXOG_FEATURES": "false",
+    "ENABLE_DRIFT_MONITOR": "false",
+    "ENABLE_CALIB_REPORT": "false"
+  },
+  ...
 }
 ```
 
@@ -123,10 +131,12 @@ curl -s http://127.0.0.1:9000/healthz | jq .
 
 | 字段 | 说明 |
 |---|---|
-| `status` | `"ok"` 表示服务正常，`"error"` 表示有异常 |
-| `model_loaded` | `true` 表示模型已成功加载 |
-| `calibration_available` | `true` 表示校准器已加载（建议确保此为 true） |
+| `ok` | `true` 表示服务正常且模型已加载，`false` 表示模型未加载 |
 | `model_version` | 当前激活模型的版本标识符 |
+| `calibration_available` | `true` 表示校准器已加载（建议确保此为 true） |
+| `calibration_method` | 校准方法（`isotonic` / `sigmoid`） |
+| `model_dir` | MODEL_DIR 配置值（默认为 `models/current`） |
+| `flags` | 功能开关状态（ENABLE_EXOG_FEATURES / ENABLE_DRIFT_MONITOR / ENABLE_CALIB_REPORT） |
 
 ---
 
@@ -151,11 +161,14 @@ curl -s -X POST http://127.0.0.1:9000/predict \
   "signal": "LONG",
   "confidence": 0.73,
   "calibrated_confidence": 0.71,
-  "proba_long": 0.73,
-  "proba_short": 0.12,
-  "proba_flat": 0.15,
-  "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6",
-  "ts": "2026-03-11T19:00:00Z"
+  "calibration_method": "isotonic",
+  "p_long": 0.73,
+  "p_short": 0.12,
+  "p_flat": 0.15,
+  "cal_p_long": 0.71,
+  "cal_p_short": 0.11,
+  "cal_p_flat": 0.18,
+  "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6"
 }
 ```
 
@@ -169,27 +182,29 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 
 ml-service 启动时通过以下步骤加载模型：
 
-1. 读取 `models/current.json` 获取当前激活模型目录路径
-2. 从该目录下加载各模型文件：
-   - `lightgbm_event_v3.pkl`
-   - `xgboost_event_v3.json`
+1. 从 `MODEL_DIR`（默认 `models/current/`）目录直接读取模型文件：
+   - `lightgbm_event_v3.pkl` / `lightgbm_event_v3_scaler.pkl`
+   - `xgboost_event_v3.json` / `xgboost_event_v3_scaler.pkl`
    - `stacking_event_v3.pkl`
    - `calibration_event_v3.pkl`
    - `feature_columns_event_v3.json`
    - `model_meta.json`
-3. 同时读取 `models/registry.json` 做交叉校验
+2. 同时在 `models/` 根目录寻找 `registry.json`（如有，用于版本信息查询）
 
-> **说明**：`models/` 目录位于仓库根目录（`~/ubuntu-wallet/models/`），不在 `ml-service/` 内部。服务启动时会根据工作目录的相对路径 `../models` 寻找模型文件。
+> **说明**：`models/current/` 是一个**目录**（不是 JSON 文件），由训练脚本在每次训练完成后自动更新（覆盖替换）。`MODEL_DIR` 默认值为 `ml-service/` 所在目录的上级路径下的 `models/current`。
 
-如果 `current.json` 不存在或模型文件缺失，服务会启动但 `/healthz` 会返回 `model_loaded: false`，`/predict` 会返回错误。
+如果 `models/current/` 不存在或模型文件缺失，服务会启动但 `/healthz` 会返回 `"ok": false`，`/predict` 会返回 503 错误。
 
 **切换模型版本：**
 
-更新 `models/current.json` 指向新模型目录后，重启 ml-service 即可生效：
+使用 `scripts/rollback_model.py` 或手动将模型文件复制到 `models/current/` 后，重启 ml-service 即可生效：
 
 ```bash
-# 查看当前激活模型
-cat ~/ubuntu-wallet/models/current.json | jq .
+# 查看当前激活模型元信息
+cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool | grep -E "model_version|trained_at"
+
+# 查看所有历史版本
+ls ~/ubuntu-wallet/models/archive/ 2>/dev/null || ls ~/ubuntu-wallet/models/
 
 # 重启服务加载新模型
 sudo systemctl restart ml-service.service
@@ -217,9 +232,9 @@ curl -s http://127.0.0.1:9000/healthz | jq .model_version
   "signal": "LONG",
   "confidence": 0.73,
   "calibrated_confidence": 0.71,
+  "calibration_method": "isotonic",
   "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6",
-  "active_model": "event_v3",
-  "as_of_ts": "2026-03-11T19:00:00Z"
+  "active_model": "event_v3"
 }
 ```
 
@@ -287,15 +302,15 @@ RestartSec=3
 
 ## 常见问题
 
-**Q：服务启动后 `/healthz` 返回 `model_loaded: false`**
+**Q：服务启动后 `/healthz` 返回 `"ok": false`**
 
-原因：模型文件缺失或 `models/current.json` 不存在。  
+原因：`models/current/` 目录不存在或其中模型文件缺失。  
 解决：先运行训练脚本生成模型，参考主 README 第 9 节。
 
 ```bash
 # 检查模型目录
 ls -lh ~/ubuntu-wallet/models/
-cat ~/ubuntu-wallet/models/current.json | jq .
+cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool | grep -E "model_version|trained_at"
 ```
 
 **Q：`uvicorn` 命令找不到**

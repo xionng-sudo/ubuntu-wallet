@@ -229,7 +229,7 @@
   - 从训练模型目录导出 / 验证 `feature_columns_event_v3.json` 特征 schema
   - 支持 `--rebuild`（训练 / walk-forward 路径重建）与 `--validate-inference-row`（在线推理单行特征契约检查）
 - `rollback_model.py` *(P0-2 新增)*
-  - 基于 `models/registry.json` + `models/current.json` 的一键式模型回滚脚本，支持 `--dry-run` 预览
+  - 基于 `models/registry.json` + `models/current/`（目录制指针）的一键式模型回滚脚本，支持 `--dry-run` 预览
 - `eth_perp_engine_binance.py`
   - ETH 永续风险与执行引擎外壳
 - `live_trader_eth_perp_binance.py`
@@ -856,7 +856,7 @@ python python-analyzer/train_event_stack_v3.py \
 - model_meta.json
 - `feature_columns_event_v3.json`
 - `registry.json`
-- `current.json`
+- `current/`（目录）
 - metrics 输出
 
 ## 9.5 上线前验证
