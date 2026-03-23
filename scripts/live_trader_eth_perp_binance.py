@@ -22,17 +22,24 @@ ETHUSDT 永续合约实盘骨架（event_v3 1h，DRY-RUN 版，不依赖 binance
 
 from __future__ import annotations
 
+import argparse
 import os
+import sys
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
+from typing import List, Optional
 
 import requests
 from dotenv import load_dotenv
 
-from eth_perp_engine_binance import EthPerpStrategyEngineBinance, Side
-from mt_trend_utils import MTTrendContext
-from backtest_event_v3_http import load_klines_1h
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from eth_perp_engine_binance import EthPerpStrategyEngineBinance, Side  # noqa: E402
+from mt_trend_utils import MTTrendContext  # noqa: E402
+from backtest_event_v3_http import load_klines_1h  # noqa: E402
+from mt_filter import mt_gate, gate_allows, gate_is_strong, exec_confirm_15m, ENTER  # noqa: E402
 
 # 加载 .env
 load_dotenv()
@@ -40,7 +47,7 @@ load_dotenv()
 ML_SERVICE_URL = "http://127.0.0.1:9000/predict"
 SYMBOL = "ETHUSDT"
 
-# 软过滤权重
+# 软过滤权重（用于 legacy 模式）
 WEIGHT_NEUTRAL = 0.85
 WEIGHT_REVERSE = 0.70
 
@@ -55,23 +62,52 @@ def _current_hour_bar_close() -> datetime:
     return now.replace(minute=0, second=0, microsecond=0)
 
 
-def call_ml_service(as_of_ts: str) -> dict:
+def call_ml_service(as_of_ts: str, base_url: str = ML_SERVICE_URL) -> dict:
     payload = {"interval": "1h", "as_of_ts": as_of_ts}
-    r = requests.post(ML_SERVICE_URL, json=payload, timeout=10)
+    r = requests.post(base_url, json=payload, timeout=10)
     r.raise_for_status()
     return r.json()
 
 
-def apply_multi_timeframe_filter(side_str: str, ts: datetime, mt_ctx: MTTrendContext) -> tuple[str, float]:
+def _fetch_klines_15m(data_dir: str) -> List[dict]:
+    """尝试从 data_dir/klines_15m.json 加载 15m K 线，失败时返回空列表。"""
+    path = os.path.join(data_dir, "klines_15m.json")
+    try:
+        return load_klines_1h(path)
+    except Exception:
+        return []
+
+
+def apply_multi_timeframe_filter(
+    side_str: str,
+    ts: datetime,
+    mt_ctx: MTTrendContext,
+    use_layered: bool = False,
+) -> tuple:
     """
-    过滤规则：
-    - 4h 必须同向（硬过滤）
-    - 1d 作为软过滤
-    - 返回 (side, weight)
+    过滤规则（支持两种模式）：
+
+    use_layered=False（默认，保持原有行为）:
+      - 4h 必须同向（硬过滤）
+      - 1d 作为软过滤，决定权重
+      - 返回 (side, weight)
+
+    use_layered=True（新分层 gate）:
+      - 使用统一 mt_gate：ALLOW_STRONG / ALLOW_WEAK / REJECT
+      - ALLOW_STRONG -> weight=1.0; ALLOW_WEAK -> weight=WEIGHT_NEUTRAL
+      - 返回 (side, weight)
     """
     t4 = mt_ctx.trend_4h_at(ts)
     t1d = mt_ctx.trend_1d_at(ts)
 
+    if use_layered:
+        gate = mt_gate(side_str, t4, t1d)
+        if not gate_allows(gate):
+            return "FLAT", 0.0
+        weight = 1.0 if gate_is_strong(gate) else WEIGHT_NEUTRAL
+        return side_str, weight
+
+    # Legacy behavior (original)
     if side_str == "LONG":
         if t4 != "UP":
             return "FLAT", 0.0
@@ -96,6 +132,13 @@ def apply_multi_timeframe_filter(side_str: str, ts: datetime, mt_ctx: MTTrendCon
 
 
 def main():
+    ap = argparse.ArgumentParser(description="DRY-RUN ETHUSDT perp trader (event_v3, 1h)")
+    ap.add_argument("--use-layered-gate", action="store_true",
+                    help="Use unified mt_gate (ALLOW_STRONG/ALLOW_WEAK/REJECT) instead of legacy filter")
+    ap.add_argument("--use-15m-confirm", action="store_true",
+                    help="Enable 15m execution confirmation layer (requires data/klines_15m.json)")
+    args = ap.parse_args()
+
     # 这里只是 DRY-RUN，不强依赖真实 Binance 连接
     api_key = os.getenv("BINANCE_API_KEY", "")
     api_secret = os.getenv("BINANCE_API_SECRET", "")
@@ -120,7 +163,16 @@ def main():
 
     last_bar_close: Optional[datetime] = None
 
-    print("Starting DRY-RUN ETHUSDT perp trader (event_v3, 1h, max 2 positions, same direction only)...")
+    mode_desc = []
+    if args.use_layered_gate:
+        mode_desc.append("layered-gate")
+    if args.use_15m_confirm:
+        mode_desc.append("15m-confirm")
+    mode_str = "+".join(mode_desc) if mode_desc else "legacy"
+    print(
+        f"Starting DRY-RUN ETHUSDT perp trader "
+        f"(event_v3, 1h, max 2 positions, same direction only, filter={mode_str})..."
+    )
 
     while True:
         try:
@@ -141,7 +193,7 @@ def main():
             as_of_ts = bar_close.isoformat().replace("+00:00", "Z")
             print(f"[{_now_utc().isoformat()}] Processing bar_close={as_of_ts}")
 
-            # 1) 调用 ml-service 获取���测
+            # 1) 调用 ml-service 获取预测
             j = call_ml_service(as_of_ts)
 
             # 2) 直接使用服务端 signal
@@ -151,7 +203,18 @@ def main():
             cal_conf = j.get("calibrated_confidence")
 
             # 3) 多周期过滤 + 软权重
-            side_str, weight = apply_multi_timeframe_filter(side_str, bar_close, mt_ctx)
+            side_str, weight = apply_multi_timeframe_filter(
+                side_str, bar_close, mt_ctx, use_layered=args.use_layered_gate
+            )
+
+            # 4) 可选：15m 执行确认层（不改变方向，只决定是否入场）
+            exec_result = ENTER
+            if side_str in ("LONG", "SHORT") and args.use_15m_confirm:
+                klines_15m = _fetch_klines_15m(data_dir)
+                exec_result = exec_confirm_15m(side_str, klines_15m, enabled=True)
+                if exec_result != ENTER:
+                    print(f"  [15m confirm] side={side_str} exec_result={exec_result} -> skipping")
+                    side_str = "FLAT"
 
             if side_str == "LONG":
                 side = Side.LONG
@@ -161,12 +224,12 @@ def main():
                 side = Side.FLAT
 
             print(
-                f"  signal side={side_str} weight={weight:.2f} "
+                f"  signal side={side_str} weight={weight:.2f} exec={exec_result} "
                 f"confidence={confidence} cal_conf={cal_conf} "
                 f"model_version={model_version} price=0.0"
             )
 
-            # 4) 交给风控引擎，让它依据最多2仓 + 同方向加仓 + 熔断决定是否开仓
+            # 5) 交给风控引擎，让它依据最多2仓 + 同方向加仓 + 熔断决定是否开仓
             engine.on_new_signal(bar_close, side, 0.0, weight=weight)
 
             # 平仓逻辑暂不实现，避免误操作；将来参考 backtest_event_v3_http.py 的 simulate_trade 来做 TP/SL/horizon 监控

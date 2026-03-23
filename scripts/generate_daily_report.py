@@ -75,6 +75,7 @@ from backtest_event_v3_http import (  # noqa: E402
     decide_side,
     _trend_series,
 )
+from mt_filter import mt_gate, gate_allows  # noqa: E402
 
 
 def _to_utc_dt(s: str) -> datetime:
@@ -162,17 +163,25 @@ def _mt_filter_side(
     Apply MT filter and return final side.
 
     mode:
-      - strict:  requires 4h same-direction confirmation
-      - relaxed: rejects only on strong opposite direction (allows NEUTRAL)
-      - regime:  1d is dominant regime; do not let 4h veto 1d direction
+      - strict:   requires 4h same-direction confirmation
+      - relaxed:  rejects only on strong opposite direction (allows NEUTRAL)
+      - regime:   1d is dominant regime; do not let 4h veto 1d direction
       - conflict: if 1d and 4h conflict, reject all trades; otherwise fall back to relaxed
+      - layered:  uses unified mt_gate (ALLOW_STRONG / ALLOW_WEAK / REJECT from mt_filter.py)
     """
     mode = (mode or "strict").lower().strip()
     if side_initial not in ("LONG", "SHORT"):
         return side_initial
 
-    if mode not in ("strict", "relaxed", "regime", "conflict"):
+    if mode not in ("strict", "relaxed", "regime", "conflict", "layered"):
         raise ValueError(f"Unknown --mt-filter-mode: {mode}")
+
+    if mode == "layered":
+        gate = mt_gate(side_initial, t4, t1d)
+        if not gate_allows(gate):
+            mt_reject_reasons[f"layered_reject_{side_initial.lower()}"] += 1
+            return "FLAT"
+        return side_initial
 
     def _strict() -> str:
         if side_initial == "LONG":
@@ -618,9 +627,13 @@ def main() -> int:
     ap.add_argument("--no-mt-filter", action="store_true", help="Disable 4h/1d multi-timeframe filter")
     ap.add_argument(
         "--mt-filter-mode",
-        choices=["strict", "relaxed", "regime", "conflict"],
+        choices=["strict", "relaxed", "regime", "conflict", "layered"],
         default="conflict",
-        help="MT filter mode (default: conflict). conflict rejects trades when 1d and 4h conflict; otherwise uses relaxed.",
+        help=(
+            "MT filter mode (default: conflict). "
+            "conflict rejects trades when 1d and 4h conflict; otherwise uses relaxed. "
+            "layered uses the unified mt_gate (ALLOW_STRONG / ALLOW_WEAK / REJECT)."
+        ),
     )
 
     ap.add_argument("--report-dir", default="data/reports", help="Directory to write report files (default: data/reports)")
