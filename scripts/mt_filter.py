@@ -78,14 +78,16 @@ CANCEL = "CANCEL"
 
 def mt_gate(side: str, t4: str, t1d: str) -> str:
     """
+    Unified 4h/1d multi-timeframe gate.
     统一 4h/1d 多周期 gate。
 
-    参数：
-        side : 信号方向，'LONG' 或 'SHORT'（其他返回 REJECT）
-        t4   : 4h 趋势标签，'UP' / 'DOWN' / 'NEUTRAL'
-        t1d  : 1d 趋势标签，'UP' / 'DOWN' / 'NEUTRAL'
+    Args:
+        side : Signal direction — 'LONG' or 'SHORT' (other values return REJECT).
+               信号方向，'LONG' 或 'SHORT'（其他返回 REJECT）
+        t4   : 4h trend label — 'UP' / 'DOWN' / 'NEUTRAL'
+        t1d  : 1d trend label — 'UP' / 'DOWN' / 'NEUTRAL'
 
-    返回：
+    Returns:
         ALLOW_STRONG | ALLOW_WEAK | REJECT
     """
     if side == "LONG":
@@ -189,17 +191,21 @@ def exec_confirm_15m(
     enabled: bool = True,
 ) -> str:
     """
-    15m 执行确认层。
+    15m execution confirmation layer (does not change 1h signal direction).
+    15m 执行确认层（不改变 1h 主模型信号方向，只决定是否入场）。
 
-    参数：
-        side        : 1h 主模型决策方向，'LONG' 或 'SHORT'
-        klines_15m  : 最新一批 15m K 线列表，每项含 'close' 字段
-                      建议至少传入 max(ema_period, rsi_period+1) + 5 根
-        ema_period  : EMA 周期（默认 20）
-        rsi_period  : RSI 周期（默认 14）
-        enabled     : 若 False，直接返回 ENTER（跳过确认逻辑）
+    Args:
+        side        : Direction from 1h model — 'LONG' or 'SHORT'.
+                      1h 主模型决策方向，'LONG' 或 'SHORT'
+        klines_15m  : Recent 15m klines, each dict must have a 'close' field.
+                      Recommend at least max(ema_period, rsi_period+1) + 5 bars.
+                      最新一批 15m K 线列表，每项含 'close' 字段
+        ema_period  : EMA period (default 20).  EMA 周期（默认 20）
+        rsi_period  : RSI period (default 14).  RSI 周期（默认 14）
+        enabled     : If False, return ENTER immediately (skip confirmation).
+                      若 False，直接返回 ENTER（跳过确认逻辑）
 
-    返回：
+    Returns:
         ENTER | WAIT | CANCEL
     """
     if not enabled:
