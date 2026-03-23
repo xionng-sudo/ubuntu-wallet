@@ -3,7 +3,7 @@
 
 Usage:
   python scripts/report_drift.py --help
-  python scripts/report_drift.py --train-stats data/models/current/train_feature_stats.json \\
+  python scripts/report_drift.py --train-stats models/current/train_feature_stats.json \\
       --log-path data/predictions_log.jsonl --output-dir data/reports
 
 Controlled by ENABLE_DRIFT_MONITOR env var. If set to "false", exits 0 with no-op message.
