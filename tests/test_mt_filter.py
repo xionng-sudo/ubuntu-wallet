@@ -190,7 +190,158 @@ class TestExecConfirm15m(unittest.TestCase):
         self.assertIn(result, (ENTER, WAIT, CANCEL))  # just verify it returns a valid value
 
 
-class TestEmaRsi(unittest.TestCase):
+class TestMtGateInvalidTrend(unittest.TestCase):
+    """mt_gate behavior with non-standard / invalid trend values.
+
+    mt_gate uses strict equality checks (e.g., t1d == "DOWN").
+    Any unrecognised trend string will not match the ALLOW conditions
+    and will fall through to the default REJECT — safe / conservative.
+    """
+
+    def test_long_invalid_t4_rejects(self):
+        # "up" (lowercase) is not "UP", so ALLOW conditions never fire
+        self.assertEqual(mt_gate("LONG", "up", "UP"), REJECT)
+
+    def test_long_invalid_t1d_rejects(self):
+        self.assertEqual(mt_gate("LONG", "UP", "up"), REJECT)
+
+    def test_long_both_invalid_rejects(self):
+        self.assertEqual(mt_gate("LONG", "INVALID", "INVALID"), REJECT)
+
+    def test_short_invalid_t4_rejects(self):
+        self.assertEqual(mt_gate("SHORT", "down", "DOWN"), REJECT)
+
+    def test_short_invalid_t1d_rejects(self):
+        self.assertEqual(mt_gate("SHORT", "DOWN", "down"), REJECT)
+
+    def test_long_empty_trend_rejects(self):
+        self.assertEqual(mt_gate("LONG", "", ""), REJECT)
+
+    def test_short_empty_trend_rejects(self):
+        self.assertEqual(mt_gate("SHORT", "", ""), REJECT)
+
+
+class TestExecConfirm15mScoreBoundary(unittest.TestCase):
+    """
+    Explicit score-boundary tests for exec_confirm_15m.
+
+    The scoring system awards +1 per fulfilled condition (3 total):
+      LONG:  close > EMA20 (+1)  |  RSI > 50 (+1)  |  last > prev (+1)
+      SHORT: close < EMA20 (+1)  |  RSI < 50 (+1)  |  last < prev (+1)
+
+    score=3 → ENTER, score=2 → ENTER, score=1 → WAIT, score=0 → CANCEL
+    """
+
+    def _klines(self, closes):
+        return [{"close": c} for c in closes]
+
+    # ------------------------------------------------------------------ #
+    # LONG score boundaries                                               #
+    # ------------------------------------------------------------------ #
+
+    def test_long_score3_enter(self):
+        """Steadily rising series: all 3 LONG conditions true → score=3 → ENTER."""
+        klines = self._klines([100 + i * 0.5 for i in range(30)])
+        self.assertEqual(exec_confirm_15m("LONG", klines), ENTER)
+
+    def test_long_score2_enter(self):
+        """
+        28 up-bars then 1 down-tick:
+          - close > EMA20 (still above MA from the uptrend)       → +1
+          - RSI > 50 (28 wins vs 1 loss in the window)            → +1
+          - last < prev (down-tick)                               → 0
+        Score = 2 → ENTER
+        """
+        rises = [100 + i * 0.5 for i in range(29)]   # 100 … 114.0
+        # 113.5 < 114.0: last bar ticks down, but price still well above EMA
+        klines = self._klines(rises + [113.5])
+        self.assertEqual(exec_confirm_15m("LONG", klines), ENTER)
+
+    def test_long_score1_wait(self):
+        """
+        28 down-bars then 1 up-tick:
+          - close < EMA20 (price below MA from the downtrend)     → 0
+          - RSI < 50 (28 losses vs 1 gain)                        → 0
+          - last > prev (the one up-tick)                         → +1
+        Score = 1 → WAIT
+        """
+        falls = [200 - i * 0.5 for i in range(29)]   # 200 … 186.0
+        # 186.5 > 186.0: last bar ticks up, but price still below EMA
+        klines = self._klines(falls + [186.5])
+        self.assertEqual(exec_confirm_15m("LONG", klines), WAIT)
+
+    def test_long_score0_cancel(self):
+        """Steadily falling series: all 3 LONG conditions false → score=0 → CANCEL."""
+        klines = self._klines([200 - i * 0.5 for i in range(30)])
+        self.assertEqual(exec_confirm_15m("LONG", klines), CANCEL)
+
+    # ------------------------------------------------------------------ #
+    # SHORT score boundaries                                              #
+    # ------------------------------------------------------------------ #
+
+    def test_short_score3_enter(self):
+        """Steadily falling series: all 3 SHORT conditions true → score=3 → ENTER."""
+        klines = self._klines([200 - i * 0.5 for i in range(30)])
+        self.assertEqual(exec_confirm_15m("SHORT", klines), ENTER)
+
+    def test_short_score2_enter(self):
+        """
+        28 down-bars then 1 up-tick:
+          - close < EMA20 (still below MA from the downtrend)     → +1
+          - RSI < 50 (28 losses vs 1 gain)                        → +1
+          - last > prev (up-tick)                                 → 0
+        Score = 2 → ENTER
+        """
+        falls = [200 - i * 0.5 for i in range(29)]
+        klines = self._klines(falls + [186.5])  # 186.5 > 186.0: up-tick
+        self.assertEqual(exec_confirm_15m("SHORT", klines), ENTER)
+
+    def test_short_score1_wait(self):
+        """
+        28 up-bars then 1 down-tick:
+          - close > EMA20 (above MA from the uptrend)             → 0
+          - RSI > 50 (28 gains vs 1 loss)                         → 0
+          - last < prev (the one down-tick)                       → +1
+        Score = 1 → WAIT
+        """
+        rises = [100 + i * 0.5 for i in range(29)]
+        klines = self._klines(rises + [113.5])  # 113.5 < 114.0: down-tick
+        self.assertEqual(exec_confirm_15m("SHORT", klines), WAIT)
+
+    def test_short_score0_cancel(self):
+        """Steadily rising series: all 3 SHORT conditions false → score=0 → CANCEL."""
+        klines = self._klines([100 + i * 0.5 for i in range(30)])
+        self.assertEqual(exec_confirm_15m("SHORT", klines), CANCEL)
+
+    # ------------------------------------------------------------------ #
+    # enabled=False bypass (also covered in TestExecConfirm15m but      #
+    # repeated here to confirm it short-circuits before any scoring)     #
+    # ------------------------------------------------------------------ #
+
+    def test_disabled_bypasses_scoring_for_long(self):
+        """enabled=False must return ENTER regardless of price data."""
+        klines = self._klines([200 - i * 0.5 for i in range(30)])  # bearish → would CANCEL
+        self.assertEqual(exec_confirm_15m("LONG", klines, enabled=False), ENTER)
+
+    def test_disabled_bypasses_scoring_for_short(self):
+        """enabled=False must return ENTER regardless of price data."""
+        klines = self._klines([100 + i * 0.5 for i in range(30)])  # bullish → would CANCEL
+        self.assertEqual(exec_confirm_15m("SHORT", klines, enabled=False), ENTER)
+
+    # ------------------------------------------------------------------ #
+    # Insufficient 15m data                                               #
+    # ------------------------------------------------------------------ #
+
+    def test_insufficient_data_zero_bars_wait(self):
+        """0 bars → WAIT (conservative: do not cancel, but do not enter)."""
+        self.assertEqual(exec_confirm_15m("LONG", [], enabled=True), WAIT)
+
+    def test_insufficient_data_one_bar_wait(self):
+        """1 bar → WAIT (need at least 2 to compute prev vs latest)."""
+        self.assertEqual(exec_confirm_15m("LONG", [{"close": 100.0}], enabled=True), WAIT)
+        self.assertEqual(exec_confirm_15m("SHORT", [{"close": 100.0}], enabled=True), WAIT)
+
+
     """Internal _ema and _rsi helpers."""
 
     def test_ema_empty(self):

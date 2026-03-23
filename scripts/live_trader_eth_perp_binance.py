@@ -133,10 +133,28 @@ def apply_multi_timeframe_filter(
 
 def main():
     ap = argparse.ArgumentParser(description="DRY-RUN ETHUSDT perp trader (event_v3, 1h)")
-    ap.add_argument("--use-layered-gate", action="store_true",
-                    help="Use unified mt_gate (ALLOW_STRONG/ALLOW_WEAK/REJECT) instead of legacy filter")
-    ap.add_argument("--use-15m-confirm", action="store_true",
-                    help="Enable 15m execution confirmation layer (requires data/klines_15m.json)")
+    ap.add_argument(
+        "--use-layered-gate",
+        action="store_true",
+        help=(
+            "Use unified mt_gate (ALLOW_STRONG/ALLOW_WEAK/REJECT) instead of legacy filter. "
+            "Default: OFF (legacy behavior unchanged). "
+            "Only opt in when you are ready to validate the new gate in Dry-Run. "
+            "NOTE: backtest/evaluate scripts do not yet support layered gate by default; "
+            "use --mt-filter-mode layered on those scripts for a consistent comparison."
+        ),
+    )
+    ap.add_argument(
+        "--use-15m-confirm",
+        action="store_true",
+        help=(
+            "Enable 15m execution confirmation layer (requires data/klines_15m.json). "
+            "Default: OFF (no 15m confirmation). "
+            "WARNING: backtest/evaluate scripts do not support 15m confirmation; "
+            "enabling this creates a live vs backtest evaluation gap. "
+            "Recommended only for Dry-Run observation, not production yet."
+        ),
+    )
     args = ap.parse_args()
 
     # 这里只是 DRY-RUN，不强依赖真实 Binance 连接

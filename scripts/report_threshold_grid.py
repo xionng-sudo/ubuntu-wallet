@@ -300,9 +300,11 @@ def main() -> int:
         choices=["symmetric", "layered"],
         default="symmetric",
         help=(
-            "MT filter mode when filter is enabled (default: symmetric). "
+            "MT filter mode when filter is enabled (default: symmetric = original behavior, unchanged). "
             "'symmetric' matches backtest Scheme B: 4h same-direction required, 1d not opposite. "
-            "'layered' uses unified mt_gate: ALLOW_STRONG / ALLOW_WEAK / REJECT."
+            "'layered' uses unified mt_gate (ALLOW_STRONG / ALLOW_WEAK / REJECT); "
+            "slightly more permissive — allows 4h=NEUTRAL+1d=same-direction as ALLOW_WEAK. "
+            "Only use 'layered' when explicitly opting in for comparison or gradual rollout."
         ),
     )
 

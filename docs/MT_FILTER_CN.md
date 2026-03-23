@@ -223,9 +223,67 @@ if gate_allows(gate_result):
 
 ---
 
-## 6. 扩展建议
+## 7. 推荐使用方式（Recommended Usage Guidance）
 
-### 6.1 利用 ALLOW_STRONG / ALLOW_WEAK 做差异化仓位
+### 7.1 当前阶段推荐配置
+
+| 链路 | 推荐配置 | 说明 |
+|------|---------|------|
+| 回测 `backtest_event_v3_http.py` | `--mt-filter-mode long_only`（默认，不变） | 保持原有口径，便于历史对比 |
+| 日志评估 `evaluate_from_logs.py` | `--mt-filter-mode symmetric`（默认，不变） | 与回测 Scheme B 口径对齐 |
+| 阈值网格 `report_threshold_grid.py` | `--mt-filter-mode symmetric`（默认，不变） | 与回测 Scheme B 口径对齐 |
+| 日报 `generate_daily_report.py` | `--mt-filter-mode conflict`（默认，不变） | 生产稳定配置 |
+| 实盘 Dry-Run `live_trader_eth_perp_binance.py` | 可尝试 `--use-layered-gate` | 先在 Dry-Run 中灰度验证后再决定是否推广 |
+| 实盘真实开仓 | 暂不推荐 `--use-layered-gate` 或 `--use-15m-confirm` | 需完成 Dry-Run 统计验证 |
+
+**一句话原则**：
+
+> 默认行为 = 原有逻辑，只有显式传入 `--mt-filter-mode layered` 或 `--use-layered-gate / --use-15m-confirm` 才启用新逻辑。
+
+---
+
+### 7.2 ⚠️ 15m 执行确认层的接入范围（重要）
+
+**当前版本（v1.0）15m 执行确认层（`exec_confirm_15m`）仅接入了 `live_trader_eth_perp_binance.py`**。
+
+| 脚本 | 是否支持 15m confirm |
+|------|-------------------|
+| `live_trader_eth_perp_binance.py` | ✅ 可选，`--use-15m-confirm` |
+| `backtest_event_v3_http.py` | ❌ 尚未接入 |
+| `evaluate_from_logs.py` | ❌ 尚未接入 |
+| `report_threshold_grid.py` | ❌ 尚未接入 |
+| `generate_daily_report.py` | ❌ 尚未接入 |
+
+**后果**：若在实盘中开启 `--use-15m-confirm`，回测与实盘将存在**口径差异**——回测不会过滤 15m 逆向入场，实盘会。这会导致信号覆盖率和效果归因的解读存在偏差。
+
+**建议**：
+1. v1.0 阶段：仅在 Dry-Run 实盘中灰度开启 `--use-15m-confirm`，观察信号覆盖变化。
+2. 后续版本：在 `backtest_event_v3_http.py` 和 `evaluate_from_logs.py` 中补充 15m confirm 回测支持（通过加载 `data/klines_15m.json`），以关闭回测/实盘口径差异。
+
+---
+
+### 7.3 layered 模式的验证建议
+
+开启 `--mt-filter-mode layered` 后，建议与 `symmetric` 模式进行对比，重点关注：
+
+| 指标 | 关注方向 |
+|------|---------|
+| coverage（交易数/预测数） | layered 应略高于 symmetric（因放宽 4h=NEUTRAL 情况） |
+| win rate（胜率） | 若 win rate 明显下降，说明新放行的信号质量较差 |
+| avg return（平均收益） | 综合收益是否提升 |
+| max drawdown（最大回撤） | 不应因放宽过滤而显著恶化 |
+| timeout ratio（超时比例） | 较高 timeout 说明新放行信号方向感不足 |
+| ALLOW_WEAK vs ALLOW_STRONG 分布 | 弱放行信号的 win rate 是否低于强放行 |
+
+**核心判断**：`layered` 放宽的「4h 中性 + 1d 同向」信号，究竟是在**提纯**（保留高质量信号）还是**放宽过度**（引入更多噪声）？
+
+建议先通过 `report_threshold_grid.py --mt-filter-mode layered` 与 `--mt-filter-mode symmetric` 对比运行，输出两份报表做横向比较，再决定是否在生产中推广。
+
+---
+
+## 8. 扩展建议
+
+### 8.1 利用 ALLOW_STRONG / ALLOW_WEAK 做差异化仓位
 ```python
 from mt_filter import mt_gate, ALLOW_STRONG, ALLOW_WEAK
 
@@ -236,7 +294,9 @@ elif gate == ALLOW_WEAK:
     position_size = normal_size * 0.7  # 弱放行用更小仓位
 ```
 
-### 6.2 未来扩展点
+### 8.2 未来扩展点
 - 为 `mt_gate` 增加趋势强度参数（基于 ADX 或 EMA spread）
 - 为 `exec_confirm_15m` 增加 higher-low / pullback 确认
 - 将 4h/1d/15m 趋势特征正式并入模型训练
+- 在 `backtest_event_v3_http.py` 等脚本中补充 15m confirm 回测支持，消除回测/实盘口径差异
+

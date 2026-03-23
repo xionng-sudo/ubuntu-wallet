@@ -630,9 +630,12 @@ def main() -> int:
         choices=["strict", "relaxed", "regime", "conflict", "layered"],
         default="conflict",
         help=(
-            "MT filter mode (default: conflict). "
+            "MT filter mode (default: conflict = original production behavior, unchanged). "
             "conflict rejects trades when 1d and 4h conflict; otherwise uses relaxed. "
-            "layered uses the unified mt_gate (ALLOW_STRONG / ALLOW_WEAK / REJECT)."
+            "strict/relaxed/regime are alternative legacy modes. "
+            "layered uses the unified mt_gate (ALLOW_STRONG / ALLOW_WEAK / REJECT); "
+            "slightly more permissive — allows 4h=NEUTRAL+1d=same-direction as ALLOW_WEAK. "
+            "Only use 'layered' when explicitly opting in for comparison or gradual rollout."
         ),
     )
 
