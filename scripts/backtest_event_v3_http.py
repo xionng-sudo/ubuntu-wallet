@@ -30,7 +30,7 @@ Outputs:
 
 Debug / alignment:
 - --side-source signal|probs
-- --mt-filter-mode off|long_only|symmetric
+- --mt-filter-mode off|long_only|symmetric|layered
 - --debug-best prints side-count diagnostics for the best config
 """
 
@@ -48,6 +48,14 @@ from datetime import date, datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
+import os as _os
+import sys as _sys
+_SCRIPT_DIR = _os.path.dirname(_os.path.abspath(__file__))
+if _SCRIPT_DIR not in _sys.path:
+    _sys.path.insert(0, _SCRIPT_DIR)
+
+from mt_filter import mt_gate, gate_allows  # noqa: E402
 
 
 def _to_utc_dt(ts: Any) -> datetime:
@@ -567,6 +575,12 @@ def apply_mt_filter(
                 return "FLAT", t4, t1d, "short_t1d_up"
             return side, t4, t1d, None
 
+    if mode == "layered":
+        gate = mt_gate(side, t4, t1d)
+        if gate_allows(gate):
+            return side, t4, t1d, None
+        return "FLAT", t4, t1d, f"layered_reject_{side.lower()}"
+
     raise ValueError(f"Unknown mt filter mode: {mode}")
 
 
@@ -630,7 +644,7 @@ def main() -> int:
     ap.add_argument("--sleep-ms", type=int, default=0)
 
     ap.add_argument("--side-source", choices=["signal", "probs"], default="probs")
-    ap.add_argument("--mt-filter-mode", choices=["off", "long_only", "symmetric"], default="long_only")
+    ap.add_argument("--mt-filter-mode", choices=["off", "long_only", "symmetric", "layered"], default="long_only")
     ap.add_argument("--debug-best", action="store_true")
 
     args = ap.parse_args()

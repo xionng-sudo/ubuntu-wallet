@@ -17,9 +17,15 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import sys
 from bisect import bisect_right
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
 
 from backtest_event_v3_http import (
     load_klines_1h,
@@ -29,6 +35,7 @@ from backtest_event_v3_http import (
     _sma,
     _trend_series,
 )
+from mt_filter import mt_gate, gate_allows  # noqa: E402
 
 
 def _to_utc_dt(s: str) -> datetime:
@@ -117,6 +124,18 @@ def main() -> int:
     ap.add_argument("--horizon-bars", type=int, default=6)
     ap.add_argument("--tie-breaker", choices=["SL", "TP"], default="SL")
     ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
+    ap.add_argument(
+        "--mt-filter-mode",
+        choices=["symmetric", "layered"],
+        default="symmetric",
+        help=(
+            "MT filter mode (default: symmetric = original behavior, unchanged from before this PR). "
+            "'symmetric' matches backtest Scheme B: 4h same-direction required, 1d not opposite. "
+            "'layered' uses the unified mt_gate (ALLOW_STRONG / ALLOW_WEAK / REJECT); "
+            "slightly more permissive — allows 4h=NEUTRAL+1d=same-direction as ALLOW_WEAK. "
+            "Only use 'layered' when explicitly opting in for comparison or gradual rollout."
+        ),
+    )
 
     args = ap.parse_args()
 
@@ -205,21 +224,21 @@ def main() -> int:
 
         side = decide_side(eff_p_long, eff_p_short, args.threshold)
 
-        # Multi-timeframe filter (Scheme B, consistent with backtest)
-        if side == "LONG":
+        # Multi-timeframe filter
+        if side in ("LONG", "SHORT"):
             t4 = trend_4h_at(ts)
             t1d = trend_1d_at(ts)
-            if t4 != "UP":
-                side = "FLAT"
-            elif t1d == "DOWN":
-                side = "FLAT"
-        elif side == "SHORT":
-            t4 = trend_4h_at(ts)
-            t1d = trend_1d_at(ts)
-            if t4 != "DOWN":
-                side = "FLAT"
-            elif t1d == "UP":
-                side = "FLAT"
+            if args.mt_filter_mode == "layered":
+                if not gate_allows(mt_gate(side, t4, t1d)):
+                    side = "FLAT"
+            else:
+                # symmetric (default): Scheme B consistent with backtest
+                if side == "LONG":
+                    if t4 != "UP" or t1d == "DOWN":
+                        side = "FLAT"
+                else:  # SHORT
+                    if t4 != "DOWN" or t1d == "UP":
+                        side = "FLAT"
 
         if side == "FLAT":
             skipped_side_flat += 1

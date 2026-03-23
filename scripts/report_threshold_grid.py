@@ -54,6 +54,7 @@ from backtest_event_v3_http import (
     _sma,
     _trend_series,
 )
+from mt_filter import mt_gate, gate_allows  # noqa: E402
 
 
 def _to_utc_dt(s: str) -> datetime:
@@ -130,6 +131,7 @@ def _run_one_threshold(
     tie_breaker: str,
     timeout_exit: str,
     mt_filter: bool,
+    mt_filter_mode: str = "symmetric",
 ) -> Dict[str, Any]:
     """Run simulation for a single threshold value and return stats dict."""
 
@@ -169,17 +171,20 @@ def _run_one_threshold(
 
         side = decide_side(eff_p_long, eff_p_short, threshold)
 
-        if mt_filter and side != "FLAT":
-            if side == "LONG":
-                if trend_4h_at(ts) != "UP":
+        if mt_filter and side in ("LONG", "SHORT"):
+            t4 = trend_4h_at(ts)
+            t1d = trend_1d_at(ts)
+            if mt_filter_mode == "layered":
+                if not gate_allows(mt_gate(side, t4, t1d)):
                     side = "FLAT"
-                elif trend_1d_at(ts) == "DOWN":
-                    side = "FLAT"
-            elif side == "SHORT":
-                if trend_4h_at(ts) != "DOWN":
-                    side = "FLAT"
-                elif trend_1d_at(ts) == "UP":
-                    side = "FLAT"
+            else:
+                # symmetric (default): Scheme B
+                if side == "LONG":
+                    if t4 != "UP" or t1d == "DOWN":
+                        side = "FLAT"
+                else:  # SHORT
+                    if t4 != "DOWN" or t1d == "UP":
+                        side = "FLAT"
 
         if side == "FLAT":
             skipped_flat += 1
@@ -290,6 +295,18 @@ def main() -> int:
 
     ap.add_argument("--no-mt-filter", action="store_true",
                     help="Disable 4h/1d multi-timeframe filter (default: filter is enabled)")
+    ap.add_argument(
+        "--mt-filter-mode",
+        choices=["symmetric", "layered"],
+        default="symmetric",
+        help=(
+            "MT filter mode when filter is enabled (default: symmetric = original behavior, unchanged). "
+            "'symmetric' matches backtest Scheme B: 4h same-direction required, 1d not opposite. "
+            "'layered' uses unified mt_gate (ALLOW_STRONG / ALLOW_WEAK / REJECT); "
+            "slightly more permissive — allows 4h=NEUTRAL+1d=same-direction as ALLOW_WEAK. "
+            "Only use 'layered' when explicitly opting in for comparison or gradual rollout."
+        ),
+    )
 
     ap.add_argument("--output-json", default=None, help="Write JSON report to this file path")
     ap.add_argument("--output-csv", default=None, help="Write CSV report to this file path")
@@ -377,6 +394,7 @@ def main() -> int:
             tie_breaker=args.tie_breaker,
             timeout_exit=args.timeout_exit,
             mt_filter=mt_filter,
+            mt_filter_mode=args.mt_filter_mode,
         )
         rows.append(row)
 
@@ -392,6 +410,7 @@ def main() -> int:
     print(
         f"  tp={args.tp*100:.2f}%  sl={args.sl*100:.2f}%  fee={args.fee*100:.4f}%"
         f"  horizon={args.horizon_bars}  mt_filter={mt_filter}"
+        f"  mt_filter_mode={args.mt_filter_mode if mt_filter else 'off'}"
     )
     print(sep)
     hdr = (
