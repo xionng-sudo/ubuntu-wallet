@@ -347,7 +347,7 @@ def train_event_v3(
         _valid_vals = _col_series.dropna()
         _train_stats[_col] = {
             "mean": round(float(_valid_vals.mean()), 6) if not _valid_vals.empty else 0.0,
-            "std": round(float(_valid_vals.std(ddof=0)), 6) if not _valid_vals.empty else 0.0,
+            "std": round(float(_valid_vals.std(ddof=0)), 6) if not _valid_vals.empty else 0.0,  # population std
             "missing_rate": round(float(_col_series.isna().sum()) / _n_total, 6) if _n_total > 0 else 0.0,
         }
     _train_stats_path = os.path.join(model_dir, "train_feature_stats.json")
