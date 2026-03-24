@@ -17,13 +17,14 @@
 7. [配置说明（.env）](#7-配置说明env)
 8. [数据采集（Go Collector）](#8-数据采集go-collector)
 9. [模型训练（Python Analyzer）](#9-模型训练python-analyzer)
-10. [推理服务（ML Service）](#10-推理服务ml-service)
-11. [回测说明](#11-回测说明)
-12. [模拟运行与日志评估](#12-模拟运行与日志评估)
-13. [生产部署（systemd）](#13-生产部署systemd)
-14. [常用命令汇总](#14-常用命令汇总)
-15. [故障排查](#15-故障排查)
-16. [风险提示与免责声明](#16-风险提示与免责声明)
+10. [**多币种架构（Multi-Symbol）**](#10-多币种架构multi-symbol)
+11. [推理服务（ML Service）](#11-推理服务ml-service)
+12. [回测说明](#12-回测说明)
+13. [模拟运行与日志评估](#13-模拟运行与日志评估)
+14. [生产部署（systemd）](#14-生产部署systemd)
+15. [常用命令汇总](#15-常用命令汇总)
+16. [故障排查](#16-故障排查)
+17. [风险提示与免责声明](#17-风险提示与免责声明)
 
 ---
 
@@ -51,6 +52,9 @@ ubuntu-wallet/
 ├── README.md                       # 本文档
 ├── README_backtest_event_v3_1h.md  # event_v3 1h 策略回测详细记录
 │
+├── configs/                        # 多币种配置（新）
+│   └── symbols.yaml                # 每币种 enabled/threshold/tp/sl/horizon/calibration
+│
 ├── go-collector/                   # Go 数据采集服务
 │   ├── main.go                     # HTTP API 服务主入口
 │   ├── go.mod / go.sum             # Go 模块定义
@@ -69,7 +73,7 @@ ubuntu-wallet/
 │   ├── calibration_report.py       # 校准报告生成
 │   ├── backtest_multi_tf.py        # 多周期回测工具
 │   ├── technical_analysis.py       # 技术指标计算（20+ 种）
-│   ├── config.py                   # 配置
+│   ├── config.py                   # 配置（SYMBOL 从 $SYMBOL 环境变量读取）
 │   ├── requirements.txt            # Python 依赖
 │   └── ...
 │
@@ -83,15 +87,17 @@ ubuntu-wallet/
 │   └── README.md                   # 服务说明
 │
 ├── scripts/                        # 运行、回测、评估脚本
+│   ├── symbol_paths.py             # 每币种路径与配置辅助模块（新）
+│   ├── train_symbol.sh             # 按币种训练便捷包装脚本（新）
 │   ├── backtest_event_v3_http.py   # 三重障碍回测 + 参数网格搜索
-│   ├── evaluate_from_logs.py       # 基于预测日志的事后评估
+│   ├── evaluate_from_logs.py       # 基于预测日志的事后评估（支持 --symbol）
 │   ├── live_trader_eth_perp_simulated.py  # 模拟交易（历史回放）
 │   ├── live_trader_eth_perp_binance.py    # Binance DRY-RUN / 真实交易
 │   ├── mt_trend_utils.py           # 多周期趋势过滤工具
 │   ├── rollback_model.py           # 模型版本回滚
 │   ├── generate_daily_report.py    # 日报生成
 │   ├── export_feature_schema.py    # 导出特征 schema
-│   ├── report_drift.py             # 特征漂移报告
+│   ├── report_drift.py             # 特征漂移报告（支持 --symbol）
 │   ├── analysis_tool.py            # 分析工具
 │   ├── install.sh                  # 一键安装脚本
 │   ├── run.sh                      # 服务运行管理
@@ -120,22 +126,31 @@ ubuntu-wallet/
 │   └── ROADMAP_ISSUES_CN.md        # 路线图与已知问题
 │
 ├── tests/                          # 测试文件
+│   ├── test_multi_symbol.py        # 多币种路径与配置测试（新）
 │   ├── test_p0_pointer_and_schema.py  # 模型指针与 schema 回归测试
 │   └── verify_system.sh            # 系统验证脚本
 │
 ├── tools/                          # 工具脚本
 │
 ├── models/                         # 模型产物目录（运行时生成，不进 Git）
-│   ├── current/                    # 当前激活模型目录（ml-service 从此目录加载）
-│   ├── registry.json               # 模型版本注册表（记录所有历史版本）
-│   └── archive/<版本目录>/         # 各历史版本模型文件归档
+│   ├── BTCUSDT/                    # 每币种独立模型目录（多币种模式）
+│   │   ├── current/                # 当前激活模型
+│   │   ├── archive/                # 版本归档
+│   │   └── registry.json           # 版本注册表
+│   ├── ETHUSDT/                    # （其他币种同上）
+│   └── current/                    # 单币种兼容路径（向后兼容保留）
 │
 └── data/                           # 数据目录（运行时生成，不进 Git）
-    ├── klines_1h.json              # 1 小时 K 线
-    ├── klines_4h.json              # 4 小时 K 线
-    ├── klines_1d.json              # 日线 K 线
-    └── predictions_log.jsonl       # 预测日志（JSONL 格式）
+    ├── BTCUSDT/                    # 每币种独立数据目录（多币种模式）
+    │   ├── klines_1h.json
+    │   ├── klines_4h.json
+    │   ├── klines_1d.json
+    │   ├── predictions_log.jsonl
+    │   └── reports/
+    ├── ETHUSDT/                    # （其他币种同上）
+    └── predictions_log.jsonl       # 单币种兼容路径（向后兼容保留）
 ```
+
 
 ---
 
@@ -581,9 +596,133 @@ cat /tmp/cv_report.csv
 
 ---
 
-## 10. 推理服务（ML Service）
+## 10. 多币种架构（Multi-Symbol）
 
-### 10.1 职责说明
+本仓库支持以下交易对独立训练与运行，采用「**共享代码 + 每币种独立数据/模型目录**」的架构：
+
+| 交易对 | 阶段 | 默认启用 |
+|--------|------|---------|
+| BTCUSDT | Phase 1 | ✅ |
+| ETHUSDT | Phase 1 | ✅ |
+| SOLUSDT | Phase 1 | ✅ |
+| BNBUSDT | Phase 1 | ✅ |
+| XRPUSDT | Phase 2 | ❌（待激活）|
+| DOGEUSDT | Phase 2 | ❌（待激活）|
+| ADAUSDT | Phase 2 | ❌（待激活）|
+
+### 10.1 目录隔离原则
+
+每个币种有独立的数据目录和模型目录，不相互干扰：
+
+```
+data/
+  BTCUSDT/
+    klines_1h.json
+    klines_4h.json
+    klines_1d.json
+    predictions_log.jsonl
+    reports/
+  ETHUSDT/
+    ...
+
+models/
+  BTCUSDT/
+    current/          ← 当前激活模型产物
+    archive/          ← 版本归档
+    registry.json     ← 版本注册表
+  ETHUSDT/
+    ...
+```
+
+### 10.2 每币种配置（configs/symbols.yaml）
+
+所有币种的参数（阈值、TP/SL、horizon、校准方式）集中在 `configs/symbols.yaml`：
+
+```yaml
+symbols:
+  BTCUSDT:
+    enabled: true
+    interval: "1h"
+    threshold: 0.65
+    tp: 0.0175
+    sl: 0.009
+    horizon: 12
+    calibration: "isotonic"
+  # ... 其他币种
+```
+
+要启用 Phase 2 币种，将对应 `enabled: false` 改为 `enabled: true` 即可。
+
+### 10.3 按币种训练
+
+```bash
+# 使用便捷包装脚本（自动从 configs/symbols.yaml 读取参数）
+bash scripts/train_symbol.sh BTCUSDT
+bash scripts/train_symbol.sh ETHUSDT
+
+# 或手工指定路径（完整控制）
+SYMBOL=BTCUSDT
+python python-analyzer/train_event_stack_v3.py \
+  --data-dir  data/${SYMBOL} \
+  --model-dir models/${SYMBOL} \
+  --horizon   12 \
+  --tp-pct    0.0175 \
+  --sl-pct    0.009 \
+  --calibration isotonic
+```
+
+### 10.4 按币种评估日志
+
+```bash
+SYMBOL=BTCUSDT
+python scripts/evaluate_from_logs.py \
+  --symbol ${SYMBOL}
+# 路径和参数自动从 configs/symbols.yaml 派生
+
+# 也可手工指定全部参数（向后兼容）：
+python scripts/evaluate_from_logs.py \
+  --symbol ${SYMBOL} \
+  --log-path  data/${SYMBOL}/predictions_log.jsonl \
+  --data-dir  data/${SYMBOL} \
+  --threshold 0.65 --tp 0.0175 --sl 0.009 --horizon-bars 12
+```
+
+### 10.5 按币种 Drift 监控
+
+```bash
+SYMBOL=BTCUSDT
+ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py \
+  --symbol ${SYMBOL}
+# 等价于：
+#   --train-stats models/${SYMBOL}/current/train_feature_stats.json
+#   --log-path    data/${SYMBOL}/predictions_log.jsonl
+#   --output-dir  data/${SYMBOL}/reports
+```
+
+### 10.6 合法的单币种向后兼容路径
+
+旧的单币种方式（不带 `--symbol`）依然有效：
+
+```bash
+# 旧式（仍然支持）
+python scripts/report_drift.py \
+  --train-stats models/current/train_feature_stats.json \
+  --log-path    data/predictions_log.jsonl \
+  --output-dir  data/reports
+```
+
+### 10.7 查看当前活跃模型
+
+```bash
+SYMBOL=BTCUSDT
+cat models/${SYMBOL}/current/model_meta.json | python3 -m json.tool
+```
+
+---
+
+## 11. 推理服务（ML Service）
+
+### 11.1 职责说明
 
 `ml-service/` 是基于 FastAPI 的在线推理服务，提供以下功能：
 
@@ -591,7 +730,7 @@ cat /tmp/cv_report.csv
 - 记录每次预测到 `data/predictions_log.jsonl`
 - 提供 `/healthz` 接口，报告模型状态
 
-### 10.2 启动推理服务
+### 11.2 启动推理服务
 
 ```bash
 cd ~/ubuntu-wallet/ml-service
@@ -606,7 +745,7 @@ nohup uvicorn app:app --host 127.0.0.1 --port 9000 \
 echo "ml-service 已启动，PID: $!"
 ```
 
-### 10.3 健康检查
+### 11.3 健康检查
 
 ```bash
 # 检查服务是否启动、模型是否已加载
@@ -630,7 +769,7 @@ curl -s http://127.0.0.1:9000/healthz | jq .
 - `model_version`：当前激活的模型版本标识
 - `model_dir`：实际加载模型的目录路径
 
-### 10.4 发起预测请求（手动测试）
+### 11.4 发起预测请求（手动测试）
 
 ```bash
 # 手动调用 /predict 接口（通常由 go-collector 自动调用）
@@ -639,7 +778,7 @@ curl -s -X POST http://127.0.0.1:9000/predict \
   -d '{"symbol": "BTCUSDT", "interval": "1h"}' | jq .
 ```
 
-### 10.5 预测日志格式
+### 11.5 预测日志格式
 
 每次预测结果会追加写入 `data/predictions_log.jsonl`，每行一条记录：
 
@@ -673,9 +812,9 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 
 ---
 
-## 11. 回测说明
+## 12. 回测说明
 
-### 11.1 脚本说明
+### 12.1 脚本说明
 
 回测脚本 `scripts/backtest_event_v3_http.py` 实现了三重障碍法回测：
 
@@ -685,7 +824,7 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 - 支持参数网格搜索（`--thresholds`、`--tp-grid`、`--sl-grid`）
 - 内置多周期方向过滤（4h/1d 趋势约束，方案 B）
 
-### 11.2 完整回测命令（网格搜索）
+### 12.2 完整回测命令（网格搜索）
 
 ```bash
 cd ~/ubuntu-wallet
@@ -708,7 +847,7 @@ python scripts/backtest_event_v3_http.py \
   --position-mode single
 ```
 
-### 11.3 参数说明
+### 12.3 参数说明
 
 | 参数 | 示例值 | 说明 |
 |---|---|---|
@@ -727,7 +866,7 @@ python scripts/backtest_event_v3_http.py \
 | `--min-signals-per-week` | `1.0` | 最低信号频率过滤 |
 | `--position-mode` | `single` | 持仓模式（`stack`=默认，每个信号都开仓；`single`=单仓，上一笔未平仓时忽略新信号） |
 
-### 11.4 多周期方向过滤规则
+### 12.4 多周期方向过滤规则
 
 脚本内部实现了基于 4h/1d K 线的趋势过滤（方案 B）：
 
@@ -735,7 +874,7 @@ python scripts/backtest_event_v3_http.py \
 - **做空条件**：4h 趋势必须为 DOWN，且 1d 趋势不能为 UP
 - 趋势判断基于 SMA(5) 与 SMA(20) 的相对位置（容忍区间 0.1%）
 
-### 11.5 当前推荐参数
+### 12.5 当前推荐参数
 
 详细回测记录见 [README_backtest_event_v3_1h.md](README_backtest_event_v3_1h.md)。
 
@@ -750,9 +889,9 @@ python scripts/backtest_event_v3_http.py \
 
 ---
 
-## 12. 模拟运行与日志评估
+## 13. 模拟运行与日志评估
 
-### 12.1 模拟交易（历史回放）
+### 13.1 模拟交易（历史回放）
 
 `scripts/live_trader_eth_perp_simulated.py` 基于历史 K 线数据回放，模拟完整的交易逻辑（入场、出场、风控）：
 
@@ -771,7 +910,7 @@ python scripts/live_trader_eth_perp_simulated.py \
 
 **输出内容**：逐笔模拟交易记录，包含入场时间、信号方向、置信度、出场原因（TP/SL/TIMEOUT）、模拟盈亏等。
 
-### 12.2 基于预测日志的事后评估
+### 13.2 基于预测日志的事后评估
 
 `scripts/evaluate_from_logs.py` 读取线上预测日志，结合真实 K 线数据计算事后收益指标：
 
@@ -811,9 +950,9 @@ python scripts/evaluate_from_logs.py \
 
 ---
 
-## 13. 生产部署（systemd）
+## 14. 生产部署（systemd）
 
-### 13.1 前提条件
+### 14.1 前提条件
 
 ```bash
 # 确认部署路径（systemd 服务单元硬编码此路径）
@@ -822,7 +961,7 @@ ls /home/ubuntu/ubuntu-wallet/bin/go-collector      # go-collector 二进制
 ls /home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/python  # Python venv
 ```
 
-### 13.2 配置敏感环境变量
+### 14.2 配置敏感环境变量
 
 生产环境将 API Key 等敏感信息放到 `/etc/ubuntu-wallet/`：
 
@@ -842,7 +981,7 @@ sudo chown root:root /etc/ubuntu-wallet/collector.env
 sudo nano /etc/ubuntu-wallet/collector.env
 ```
 
-### 13.3 部署 Go Collector 服务
+### 14.3 部署 Go Collector 服务
 
 ```bash
 # 复制服务单元文件
@@ -865,7 +1004,7 @@ journalctl -u go-collector.service -f --no-pager
 curl -s http://127.0.0.1:8080/api/healthz | jq .
 ```
 
-### 13.4 部署 ML Service 服务
+### 14.4 部署 ML Service 服务
 
 ```bash
 # 复制服务单元文件
@@ -888,7 +1027,7 @@ journalctl -u ml-service.service -f --no-pager
 curl -s http://127.0.0.1:9000/healthz | jq .
 ```
 
-### 13.5 部署定时评估服务（可选）
+### 14.5 部署定时评估服务（可选）
 
 ```bash
 # 复制评估服务和定时器
@@ -904,7 +1043,7 @@ sudo systemctl enable --now evaluate-predictions.timer
 systemctl list-timers --all | grep evaluate
 ```
 
-### 13.6 部署健康检查定时器（可选）
+### 14.6 部署健康检查定时器（可选）
 
 每分钟检查 go-collector 健康状态，异常时自动重启并发送 Telegram 告警：
 
@@ -927,7 +1066,7 @@ journalctl -u check-go-collector.service -n 50 --no-pager
 
 > 详细部署步骤请参考 [systemd/DEPLOY-NEW-SERVER.md](systemd/DEPLOY-NEW-SERVER.md)。
 
-### 13.7 其他可选定时服务
+### 14.7 其他可选定时服务
 
 仓库还包含以下定时服务，部署方式与上述一致（参考 [docs/DEPLOY_CN.md](docs/DEPLOY_CN.md) 中的详细说明）：
 
@@ -939,7 +1078,7 @@ journalctl -u check-go-collector.service -n 50 --no-pager
 
 ---
 
-## 14. 常用命令汇总
+## 15. 常用命令汇总
 
 ```bash
 # ── 服务状态查看 ─────────────────────────────────────────
@@ -1010,9 +1149,9 @@ sudo systemctl restart ml-service.service
 
 ---
 
-## 15. 故障排查
+## 16. 故障排查
 
-### 15.1 端口已被占用
+### 16.1 端口已被占用
 
 ```bash
 # 检查 8080 / 9000 端口是否被占用
@@ -1023,7 +1162,7 @@ lsof -i :8080
 lsof -i :9000
 ```
 
-### 15.2 go-collector 无法启动
+### 16.2 go-collector 无法启动
 
 ```bash
 # 检查二进制文件是否存在且有执行权限
@@ -1045,7 +1184,7 @@ cat ~/ubuntu-wallet/.env
 journalctl -u go-collector.service -n 50 --no-pager
 ```
 
-### 15.3 ml-service 无法启动
+### 16.3 ml-service 无法启动
 
 ```bash
 # 检查 venv 是否存在
@@ -1065,7 +1204,7 @@ deactivate
 journalctl -u ml-service.service -n 50 --no-pager
 ```
 
-### 15.4 模型文件缺失
+### 16.4 模型文件缺失
 
 ```bash
 # 检查模型目录
@@ -1079,7 +1218,7 @@ cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool
 # 参考第 9 节运行训练脚本
 ```
 
-### 15.5 Python 依赖问题
+### 16.5 Python 依赖问题
 
 ```bash
 # 重新安装依赖
@@ -1094,7 +1233,7 @@ python -c "import lightgbm; print('LightGBM 版本:', lightgbm.__version__)"
 sudo apt install -y libgomp1
 ```
 
-### 15.6 健康检查失败
+### 16.6 健康检查失败
 
 ```bash
 # 确认服务进程是否在运行
@@ -1110,7 +1249,7 @@ journalctl -u go-collector.service -n 50 --no-pager
 journalctl -u ml-service.service -n 50 --no-pager
 ```
 
-### 15.7 Go 构建问题
+### 16.7 Go 构建问题
 
 ```bash
 # 确认 Go 版本（需要 1.21+）
@@ -1123,7 +1262,7 @@ go mod tidy
 go build -o ../bin/go-collector .
 ```
 
-### 15.8 数据文件不更新
+### 16.8 数据文件不更新
 
 ```bash
 # 确认 go-collector 正在运行
@@ -1139,7 +1278,7 @@ curl -s http://127.0.0.1:8080/api/healthz | jq .
 
 ---
 
-## 16. 风险提示与免责声明
+## 17. 风险提示与免责声明
 
 **请在使用本系统前仔细阅读以下说明：**
 

@@ -70,7 +70,6 @@ class TestSymbolPathsDefaults(unittest.TestCase):
 
     def test_data_dir_respects_env_override(self) -> None:
         """DATA_DIR env var must be used as the base when no explicit override."""
-        import importlib
         import symbol_paths  # type: ignore[import]
         orig = os.environ.get("DATA_DIR")
         try:

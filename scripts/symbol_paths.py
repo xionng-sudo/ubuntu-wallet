@@ -146,7 +146,7 @@ def get_symbol_data_dir(
     symbol: str,
     base_data_dir: Optional[str] = None,
 ) -> str:
-    """Return the per-symbol data directory: ``<base_data_dir>/<SYMBOL>/``.
+    """Return the per-symbol data directory: ``<base_data_dir>/<SYMBOL>``.
 
     Args:
         symbol: Trading pair, e.g. ``"BTCUSDT"``.
@@ -163,7 +163,7 @@ def get_symbol_model_dir(
     symbol: str,
     base_model_dir: Optional[str] = None,
 ) -> str:
-    """Return the per-symbol model directory: ``<base_model_dir>/<SYMBOL>/``.
+    """Return the per-symbol model directory: ``<base_model_dir>/<SYMBOL>``.
 
     Args:
         symbol: Trading pair, e.g. ``"BTCUSDT"``.

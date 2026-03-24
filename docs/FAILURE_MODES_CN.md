@@ -820,3 +820,99 @@ systemd 运行用户和手工用户不同。
 ### 影响评估
 - 校准报告为**分析工具**，不影响推理服务
 - 可安全设置 `ENABLE_CALIB_REPORT=false`
+
+---
+
+# 14. 多币种故障模式
+
+## 14.1 某币种模型目录不存在
+
+### 故障现象
+- `train_symbol.sh XRPUSDT` 报错"klines 文件不存在"或训练样本极少
+- `models/XRPUSDT/current/` 不存在
+
+### 原因
+- go-collector 尚未采集该币种的 K 线数据
+- 数据积累不足（通常需要 ≥ 1000 根 1h K 线）
+
+### 处理步骤
+```bash
+SYMBOL=XRPUSDT
+# 1. 检查数据是否存在
+ls -lah ~/ubuntu-wallet/data/${SYMBOL}/klines_1h.json 2>/dev/null || echo "数据文件不存在"
+
+# 2. 确认 configs/symbols.yaml 是否已启用该币种
+python3 -c "
+import sys; sys.path.insert(0,'scripts')
+from symbol_paths import get_symbol_config
+print(get_symbol_config('${SYMBOL}'))
+"
+
+# 3. 如果数据文件不存在，请先等待 go-collector 完成数据采集
+# 然后重新执行训练
+bash ~/ubuntu-wallet/scripts/train_symbol.sh ${SYMBOL}
+```
+
+### 影响评估
+- 该币种无法完成训练；其他已启用币种不受影响（目录完全隔离）
+
+---
+
+## 14.2 Drift Monitor 找不到某币种 train_feature_stats.json
+
+### 故障现象
+```
+ERROR: train-stats file not found: models/BTCUSDT/current/train_feature_stats.json
+```
+
+### 原因
+- 该币种尚未训练，或 `models/BTCUSDT/current/` 不存在
+
+### 处理步骤
+```bash
+SYMBOL=BTCUSDT
+# 检查 current/ 目录是否存在
+ls ~/ubuntu-wallet/models/${SYMBOL}/current/ 2>/dev/null || echo "current 目录不存在"
+
+# 如果不存在，重新训练
+bash ~/ubuntu-wallet/scripts/train_symbol.sh ${SYMBOL}
+```
+
+---
+
+## 14.3 configs/symbols.yaml 解析失败
+
+### 故障现象
+```
+ImportError: PyYAML is required to load configs/symbols.yaml
+```
+
+### 处理步骤
+```bash
+# 安装 PyYAML
+pip install pyyaml
+
+# 或在 venv 中安装
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
+pip install pyyaml
+```
+
+---
+
+## 14.4 某币种数据与另一币种混淆
+
+### 预防措施
+- 所有脚本通过 `--symbol` 参数严格区分数据路径
+- `scripts/symbol_paths.py` 中的路径函数总是将币种名作为子目录
+- 永远不要将 `data/BTCUSDT/` 的文件手动复制到 `data/ETHUSDT/`
+
+### 排查
+```bash
+# 检查某个日志文件中的 symbol 字段
+head -3 ~/ubuntu-wallet/data/BTCUSDT/predictions_log.jsonl | python3 -c "
+import sys, json
+for line in sys.stdin:
+    row = json.loads(line)
+    print('symbol:', row.get('symbol'), 'interval:', row.get('interval'))
+"
+```

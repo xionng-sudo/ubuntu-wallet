@@ -348,3 +348,71 @@ uvicorn app:app --host 127.0.0.1 --port 9001
 
 原因：模型训练时的特征列与当前数据不一致（特征漂移）。  
 解决：重新训练模型，或检查 `feature_columns_event_v3.json` 中的特征列是否与当前 K 线数据对齐。
+
+---
+
+## 多币种配置说明
+
+ml-service 本身不直接管理多个符号；它从 `MODEL_DIR` 加载一个模型。
+多币种支持通过「**每币种独立部署**」或「**路由层**」实现。
+
+### 当前推荐方式：每币种独立 ml-service 实例
+
+每个激活币种可以运行一个 ml-service 实例，各实例监听不同端口，指向不同的模型目录：
+
+```bash
+# BTCUSDT 实例（端口 9001）
+MODEL_DIR=~/ubuntu-wallet/models/BTCUSDT/current \
+  uvicorn app:app --host 127.0.0.1 --port 9001
+
+# ETHUSDT 实例（端口 9002）
+MODEL_DIR=~/ubuntu-wallet/models/ETHUSDT/current \
+  uvicorn app:app --host 127.0.0.1 --port 9002
+```
+
+### 每币种配置（configs/symbols.yaml）
+
+所有币种的 threshold/tp/sl/horizon/calibration 参数集中在仓库根目录的 `configs/symbols.yaml`：
+
+```yaml
+symbols:
+  BTCUSDT:
+    enabled: true
+    interval: "1h"
+    threshold: 0.65
+    tp: 0.0175
+    sl: 0.009
+    horizon: 12
+    calibration: "isotonic"
+  ETHUSDT:
+    enabled: true
+    # ... 类似配置
+```
+
+使用 Python 读取这些配置：
+
+```python
+import sys
+sys.path.insert(0, "/path/to/ubuntu-wallet/scripts")
+from symbol_paths import get_symbol_config, get_symbol_model_dir
+
+cfg = get_symbol_config("BTCUSDT")
+model_dir = get_symbol_model_dir("BTCUSDT")
+```
+
+### 模型目录布局（多币种模式）
+
+```
+models/
+  BTCUSDT/
+    current/    ← MODEL_DIR for BTCUSDT instance
+    archive/
+    registry.json
+  ETHUSDT/
+    current/    ← MODEL_DIR for ETHUSDT instance
+    ...
+```
+
+### 向后兼容
+
+现有单币种部署（`MODEL_DIR=models/current`）不受影响；多币种为可选扩展。
