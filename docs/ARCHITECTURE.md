@@ -125,9 +125,10 @@ The system is designed for **simulated / research operation**. Live order execut
 - Polls Binance exchange API on a configurable interval (default every 60 seconds).
 - Downloads OHLCV candles for **multiple symbols** (Phase 1: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT; Phase 2 optional: XRPUSDT, DOGEUSDT, ADAUSDT) and writes per-symbol kline files:
   - `data/<SYMBOL>/klines_1h.json`, `klines_4h.json`, `klines_1d.json`, `klines_15m.json`
-  - The **first configured symbol** (default: BTCUSDT) additionally writes `klines_1m.json`, `klines_5m.json`
+  - The **primary symbol** (default: ETHUSDT; set via `PRIMARY_SYMBOL` env) additionally writes `klines_1m.json`, `klines_5m.json`
 - Configure symbols via `SYMBOLS=BTCUSDT,ETHUSDT,...` or `ENABLE_PHASE2_SYMBOLS=true` env vars.
-- Legacy root-level `data/klines_*.json` writes for the first configured symbol are maintained for backward compatibility (`LEGACY_ETHUSDT_COMPAT=true`, the default); set to `false` after migrating consumers.
+- Configure the primary symbol explicitly with `PRIMARY_SYMBOL=ETHUSDT` (defaults to ETHUSDT for backward compatibility; must be present in the enabled symbol list).
+- Legacy root-level `data/klines_*.json` mirrors the **primary symbol** data (`LEGACY_ETHUSDT_COMPAT=true`, the default); these files always reflect PRIMARY_SYMBOL (ETHUSDT by default), preserving the semantics that existed before multi-symbol support. Set to `false` after migrating consumers to `data/<SYMBOL>/klines_*.json`.
 - Tracks Binance futures leaderboard (top 50 traders), writing `data/traders.json`.
 - Computes over 70 technical features per bar in `features/` (SMA, EMA, MACD, RSI, ATR, Bollinger, volatility, returns).
 - Calls `ml-service /predict` and publishes the result to `data/signals.json` and via the `/signals` HTTP endpoint.
@@ -274,15 +275,16 @@ ubuntu-wallet/
 ```
 go-collector wakes up
    └─► Resolve symbols from SYMBOLS env (default: BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT)
+   └─► Resolve primary symbol from PRIMARY_SYMBOL env (default: ETHUSDT)
    └─► For each symbol:
          └─► Binance REST: 15m/1h/4h/1d OHLCV candles
          └─► Write data/<SYMBOL>/klines_{15m,1h,4h,1d}.json
    └─► Primary symbol only: also fetch 1m/5m candles
-   └─► Legacy compat: also write data/klines_{1h,4h,1d}.json (LEGACY_ETHUSDT_COMPAT=true)
+   └─► Legacy compat: also write data/klines_{1h,4h,1d}.json mirroring PRIMARY_SYMBOL (LEGACY_ETHUSDT_COMPAT=true)
    └─► Binance REST: top-50 leaderboard traders
    └─► OKX REST: funding rates / derivatives data
    └─► Write data/traders.json
-   └─► Compute 70+ technical features for latest bar
+   └─► Compute 70+ technical features for latest bar (using primary symbol klines)
    └─► POST http://127.0.0.1:9000/predict
          └─► Receive {signal, confidence, ...}
    └─► Write data/signals.json

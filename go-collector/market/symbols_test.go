@@ -102,3 +102,74 @@ func TestDefaultWriterConfigNoHardcodedSymbol(t *testing.T) {
 		t.Error("DefaultWriterConfig should not hardcode ETHUSDT as Symbol; caller must set it")
 	}
 }
+
+// ── ResolvePrimarySymbol tests ──────────────────────────────────────────────
+
+func TestResolvePrimarySymbol_DefaultETHUSDT(t *testing.T) {
+	os.Unsetenv("PRIMARY_SYMBOL")
+	syms := []string{"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"}
+	got, err := ResolvePrimarySymbol(syms)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "ETHUSDT" {
+		t.Errorf("ResolvePrimarySymbol() = %q, want %q", got, "ETHUSDT")
+	}
+}
+
+func TestResolvePrimarySymbol_ExplicitEnv(t *testing.T) {
+	os.Setenv("PRIMARY_SYMBOL", "BTCUSDT")
+	defer os.Unsetenv("PRIMARY_SYMBOL")
+	syms := []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+	got, err := ResolvePrimarySymbol(syms)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "BTCUSDT" {
+		t.Errorf("ResolvePrimarySymbol() = %q, want %q", got, "BTCUSDT")
+	}
+}
+
+func TestResolvePrimarySymbol_ExplicitEnvLowercase(t *testing.T) {
+	os.Setenv("PRIMARY_SYMBOL", "ethusdt")
+	defer os.Unsetenv("PRIMARY_SYMBOL")
+	syms := []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+	got, err := ResolvePrimarySymbol(syms)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "ETHUSDT" {
+		t.Errorf("ResolvePrimarySymbol() = %q, want %q", got, "ETHUSDT")
+	}
+}
+
+func TestResolvePrimarySymbol_ExplicitEnvNotInList(t *testing.T) {
+	os.Setenv("PRIMARY_SYMBOL", "XRPUSDT")
+	defer os.Unsetenv("PRIMARY_SYMBOL")
+	syms := []string{"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+	_, err := ResolvePrimarySymbol(syms)
+	if err == nil {
+		t.Error("expected error when PRIMARY_SYMBOL is not in enabled symbols, got nil")
+	}
+}
+
+func TestResolvePrimarySymbol_NoETHUSDTFallsBackToFirst(t *testing.T) {
+	os.Unsetenv("PRIMARY_SYMBOL")
+	// ETHUSDT intentionally absent – operator has restricted to BTC/SOL only.
+	syms := []string{"BTCUSDT", "SOLUSDT"}
+	got, err := ResolvePrimarySymbol(syms)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "BTCUSDT" {
+		t.Errorf("ResolvePrimarySymbol() = %q, want %q (first symbol)", got, "BTCUSDT")
+	}
+}
+
+func TestResolvePrimarySymbol_EmptyList(t *testing.T) {
+	os.Unsetenv("PRIMARY_SYMBOL")
+	_, err := ResolvePrimarySymbol([]string{})
+	if err == nil {
+		t.Error("expected error for empty symbol list, got nil")
+	}
+}
