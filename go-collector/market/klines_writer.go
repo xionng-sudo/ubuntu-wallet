@@ -32,15 +32,26 @@ type WriterConfig struct {
 	Every     time.Duration
 }
 
+// DefaultWriterConfig returns a baseline WriterConfig for the given dataDir.
+// Symbol is intentionally left empty – the caller must set it (or use
+// DefaultWriterConfigForSymbol which sets a concrete symbol and the matching
+// per-symbol DataDir automatically).
 func DefaultWriterConfig(dataDir string) WriterConfig {
 	return WriterConfig{
-		Symbol:   "ETHUSDT",
 		Interval: "1h",
 		Limit:    500,
 		DataDir:  dataDir,
 		Filename: "klines_1h.json",
 		Every:    60 * time.Second,
 	}
+}
+
+// DefaultWriterConfigForSymbol returns a WriterConfig where DataDir is already
+// scoped to data/<symbol>/ so the file lands at data/<SYMBOL>/klines_1h.json.
+func DefaultWriterConfigForSymbol(dataDir, symbol string) WriterConfig {
+	cfg := DefaultWriterConfig(SymbolDataDir(dataDir, symbol))
+	cfg.Symbol = symbol
+	return cfg
 }
 
 func RunKlinesWriter(ctx context.Context, f Fetcher, cfg WriterConfig) error {
