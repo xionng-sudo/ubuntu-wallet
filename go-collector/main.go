@@ -370,7 +370,10 @@ func collectSlowAll(dataDir string, binance *collector.BinanceCollector, okx *co
 	log.Info("SLOW data collection completed successfully!")
 }
 
-// computeAndPersistFeaturesAndSignals computes features + signals for the primary
+// Small delay between non-primary symbols to avoid bursting ml-service.
+// 200 ms provides a safe gap for a single local ml-service instance without
+// meaningfully delaying the overall FAST cycle.
+const perSymbolMLDelay = 200 * time.Millisecond
 // symbol (backward-compatible root paths) and then for every other enabled symbol
 // (per-symbol sub-directory: dataDir/<SYMBOL>).  Each symbol's FeatureSnapshot is
 // sent to ml-service via MLOrFallback so that ml-service writes the per-symbol
@@ -404,7 +407,7 @@ func computeAndPersistFeaturesAndSignals(dataDir string) {
 			continue
 		}
 		// Small delay between symbols to avoid bursting ml-service.
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(perSymbolMLDelay)
 		computeSymbolFeaturesAndSignals(dataDir, sym, false, klinesCopy, tradesCopy)
 	}
 }
