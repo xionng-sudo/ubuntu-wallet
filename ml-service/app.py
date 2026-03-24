@@ -4,6 +4,7 @@ import glob as _glob
 import json
 import logging
 import os
+from threading import Lock
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
 
@@ -24,6 +25,16 @@ from prediction_logger import log_prediction
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "current")))
 DATA_DIR = os.getenv("DATA_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")))
 
+# Base directory under which per-symbol model subdirectories live.
+# E.g. if MODELS_BASE_DIR=/home/ubuntu/ubuntu-wallet/models then BTCUSDT model
+# artifacts are resolved from models/BTCUSDT/current/.
+# Falls back to MODEL_DIR's parent when not explicitly set (preserving old
+# single-symbol deployments that point MODEL_DIR at models/current directly).
+MODELS_BASE_DIR = os.getenv(
+    "MODELS_BASE_DIR",
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models")),
+)
+
 # Thresholds for legacy binary models
 PROBA_LONG = float(os.getenv("ML_PROBA_LONG", "0.55"))
 PROBA_SHORT = float(os.getenv("ML_PROBA_SHORT", "0.45"))
@@ -36,8 +47,81 @@ EVENT_V3_DELTA = float(os.getenv("EVENT_V3_DELTA", "0.0"))
 
 _loaded: Optional[LoadedModel] = None
 
+# Per-symbol model cache: resolved_model_dir -> Optional[LoadedModel]
+# Populated lazily on first /predict request for that symbol.
+# The key space is bounded by the number of configured symbols (≤ 7 in the
+# current phase-1/phase-2 rollout), so unbounded growth is not a concern in
+# practice.
+_loaded_models: Dict[str, Optional[LoadedModel]] = {}
+_loaded_models_lock = Lock()
+
 logger = logging.getLogger("ml-service")
 logger.setLevel(logging.INFO)
+
+
+def _resolve_model_dir(symbol: Optional[str]) -> str:
+    """Resolve model directory for a given symbol.
+
+    Preference order:
+    1. ``<MODELS_BASE_DIR>/<SYMBOL>/current`` — if that directory exists.
+    2. ``MODEL_DIR`` — legacy/root fallback (keeps ETHUSDT and single-instance
+       deployments working without any config change).
+    """
+    if symbol:
+        sym_dir = os.path.join(MODELS_BASE_DIR, symbol, "current")
+        if os.path.isdir(sym_dir):
+            return sym_dir
+    return MODEL_DIR
+
+
+def _resolve_data_dir(symbol: Optional[str]) -> str:
+    """Resolve kline data directory for a given symbol.
+
+    Preference order:
+    1. ``<DATA_DIR>/<SYMBOL>`` — if that directory exists.
+    2. ``DATA_DIR`` — legacy/root fallback.
+    """
+    if symbol:
+        sym_dir = os.path.join(DATA_DIR, symbol)
+        if os.path.isdir(sym_dir):
+            return sym_dir
+    return DATA_DIR
+
+
+def _get_loaded_model(symbol: Optional[str]) -> Optional[LoadedModel]:
+    """Return the best available LoadedModel for *symbol*.
+
+    * If the per-symbol model directory (``models/<SYMBOL>/current``) exists
+      and is different from the default ``MODEL_DIR``, the model is loaded
+      lazily and cached.
+    * Otherwise the startup-loaded default model (``_loaded``) is returned,
+      preserving backward compatibility for ETHUSDT and legacy deployments.
+    """
+    model_dir = _resolve_model_dir(symbol)
+
+    # If the resolved dir is the default, reuse the already-loaded model.
+    if model_dir == MODEL_DIR:
+        return _loaded
+
+    with _loaded_models_lock:
+        if model_dir not in _loaded_models:
+            try:
+                _loaded_models[model_dir] = load_model(model_dir)
+                logger.info("Loaded per-symbol model from %s", model_dir)
+            except Exception:
+                logger.warning(
+                    "Failed to load per-symbol model from %s — falling back to default",
+                    model_dir,
+                    exc_info=True,
+                )
+                _loaded_models[model_dir] = None
+
+    loaded = _loaded_models.get(model_dir)
+    if loaded is not None:
+        return loaded
+
+    # Per-symbol model load failed — fall back to default.
+    return _loaded
 
 
 class PredictRequest(BaseModel):
@@ -103,8 +187,8 @@ def _apply_calibration(
         return None, None
 
 
-def _active_model_dir() -> str:
-    return MODEL_DIR
+def _active_model_dir(symbol: Optional[str] = None) -> str:
+    return _resolve_model_dir(symbol)
 
 
 app = FastAPI(title="ubuntu-wallet ml-service", version="klines-featurebuilder-v3-event")
@@ -245,12 +329,20 @@ def _parse_iso_to_utc(dt_str: Optional[str]) -> Optional[datetime]:
 
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
-    if _loaded is None:
-        raise HTTPException(status_code=503, detail="model not loaded")
-
     interval = req.interval or "1h"
     as_of_ts = req.as_of_ts
     symbol = req.symbol  # 现在可能是 None，后面可以让 Go 填进来
+
+    # Resolve per-symbol model and data directories.
+    # _get_loaded_model falls back to the default _loaded model when no
+    # per-symbol model directory is found, so ETHUSDT and legacy deployments
+    # continue to work without any configuration change.
+    loaded = _get_loaded_model(symbol)
+    if loaded is None:
+        raise HTTPException(status_code=503, detail="model not loaded")
+
+    effective_model_dir = _active_model_dir(symbol)
+    effective_data_dir = _resolve_data_dir(symbol)
 
     # Extract feature_ts if provided either at top-level or inside features object.
     request_feature_ts = None
@@ -271,25 +363,25 @@ def predict(req: PredictRequest):
 
     # Use the appropriate feature builder based on the active model type
     try:
-        if _loaded.active_model == "event_v3":
+        if loaded.active_model == "event_v3":
             built = build_event_v3_feature_row(
-                data_dir=DATA_DIR,
-                model_dir=_active_model_dir(),
-                expected_n_features=_loaded.expected_n_features,
+                data_dir=effective_data_dir,
+                model_dir=effective_model_dir,
+                expected_n_features=loaded.expected_n_features,
                 as_of_ts=effective_as_of,
             )
         else:
             built = build_latest_feature_row_from_klines(
-                data_dir=DATA_DIR,
+                data_dir=effective_data_dir,
                 interval=interval,
-                expected_n_features=_loaded.expected_n_features,
+                expected_n_features=loaded.expected_n_features,
                 as_of_ts=effective_as_of,
             )
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"feature_build_failed: {e}")
 
     try:
-        p, mode = predict_proba(_loaded, built.X_row)
+        p, mode = predict_proba(loaded, built.X_row)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"predict_failed: {e}")
 
@@ -311,7 +403,7 @@ def predict(req: PredictRequest):
         feat_ts = datetime.utcnow().astimezone(timezone.utc)
 
     # Apply calibration if available
-    cal_p, cal_method = _apply_calibration(_loaded, p)
+    cal_p, cal_method = _apply_calibration(loaded, p)
 
     # Prepare chosen/built ts strings for responses/logging
     chosen_ts_str = feat_ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -320,8 +412,8 @@ def predict(req: PredictRequest):
 
     # --- event_v3: 3-class multiclass output ---
     # Classes: 0=SHORT, 1=FLAT, 2=LONG
-    if mode == "proba_multiclass" and _loaded.active_model == "event_v3":
-        ev3 = _loaded.event_v3 or {}
+    if mode == "proba_multiclass" and loaded.active_model == "event_v3":
+        ev3 = loaded.event_v3 or {}
         p_enter = float(os.getenv("EVENT_V3_P_ENTER", str(ev3.get("p_enter", EVENT_V3_P_ENTER))))
         delta = float(os.getenv("EVENT_V3_DELTA", str(ev3.get("delta", EVENT_V3_DELTA))))
 
@@ -368,8 +460,8 @@ def predict(req: PredictRequest):
             proba_flat=p_flat,
             signal=signal,
             confidence=round(confidence, 6),
-            model_version=_loaded.model_version,
-            active_model=_loaded.active_model,
+            model_version=loaded.model_version,
+            active_model=loaded.active_model,
             cal_proba_long=cp_long,
             cal_proba_short=cp_short,
             cal_proba_flat=cp_flat,
@@ -422,7 +514,7 @@ def predict(req: PredictRequest):
             confidence=round(confidence, 4),
             calibrated_confidence=round(cal_conf, 4) if cal_conf is not None else None,
             calibration_method=cal_method,
-            model_version=_loaded.model_version,
+            model_version=loaded.model_version,
             p_long=round(p_long, 6),
             p_short=round(p_short, 6),
             p_flat=round(p_flat, 6),
@@ -473,8 +565,8 @@ def predict(req: PredictRequest):
             proba_flat=p_flat,
             signal=signal,
             confidence=round(confidence, 6),
-            model_version=_loaded.model_version,
-            active_model=_loaded.active_model,
+            model_version=loaded.model_version,
+            active_model=loaded.active_model,
             cal_proba_long=cp_long_bin,
             cal_proba_short=cp_short_bin,
             calibrated_confidence=round(cal_conf_bin, 6) if cal_conf_bin is not None else None,
@@ -488,7 +580,7 @@ def predict(req: PredictRequest):
             confidence=round(proba_up, 4),
             calibrated_confidence=round(cal_conf_bin, 4) if cal_conf_bin is not None else None,
             calibration_method=cal_method,
-            model_version=_loaded.model_version,
+            model_version=loaded.model_version,
             reasons=[
                 f"proba_up={proba_up:.4f}>= {PROBA_LONG}",
                 f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
@@ -509,8 +601,8 @@ def predict(req: PredictRequest):
             proba_flat=p_flat,
             signal=signal,
             confidence=round(confidence, 6),
-            model_version=_loaded.model_version,
-            active_model=_loaded.active_model,
+            model_version=loaded.model_version,
+            active_model=loaded.active_model,
             cal_proba_long=cp_long_bin,
             cal_proba_short=cp_short_bin,
             calibrated_confidence=round(cal_conf_bin, 6) if cal_conf_bin is not None else None,
@@ -524,7 +616,7 @@ def predict(req: PredictRequest):
             confidence=round(confidence, 4),
             calibrated_confidence=round(cal_conf_bin, 4) if cal_conf_bin is not None else None,
             calibration_method=cal_method,
-            model_version=_loaded.model_version,
+            model_version=loaded.model_version,
             reasons=[
                 f"proba_up={proba_up:.4f}<= {PROBA_SHORT}",
                 f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
@@ -544,8 +636,8 @@ def predict(req: PredictRequest):
         proba_flat=p_flat,
         signal=signal,
         confidence=round(confidence, 6),
-        model_version=_loaded.model_version,
-        active_model=_loaded.active_model,
+        model_version=loaded.model_version,
+        active_model=loaded.active_model,
         cal_proba_long=cp_long_bin,
         cal_proba_short=cp_short_bin,
         calibrated_confidence=None,
@@ -559,7 +651,7 @@ def predict(req: PredictRequest):
         confidence=round(confidence, 4),
         calibrated_confidence=None,
         calibration_method=cal_method,
-        model_version=_loaded.model_version,
+        model_version=loaded.model_version,
         reasons=[
             f"dead_zone: {PROBA_SHORT} < {proba_up:.4f} < {PROBA_LONG}",
             f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",

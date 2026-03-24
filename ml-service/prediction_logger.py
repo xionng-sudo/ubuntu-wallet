@@ -3,9 +3,15 @@
 prediction_logger.py
 - 在进程内对相同预测（按 effective_as_of_used 或 ts, symbol, interval, model_version）做去重，避免重复写入 predictions_log.jsonl
 - 配置项（通过 systemd env 或环境变量设置）：
-    PREDICTIONS_LOG_PATH: 日志文件路径（默认 repo/data/predictions_log.jsonl）
+    PREDICTIONS_LOG_PATH: 根级兜底日志路径（默认 repo/data/predictions_log.jsonl）
     PREDICTIONS_LOG_DEDUPE: "1" 启用，"0"/"false" 关闭（默认启用）
     PREDICTIONS_LOG_DEDUPE_CACHE_SIZE: LRU 缓存大小，默认 4096
+    PREDICTIONS_LOG_ALSO_ROOT: "1" 在写入 per-symbol 路径的同时，也额外追加写入根级路径（迁移期兼容；默认关闭）
+
+多币种行为：
+    - 若 symbol 非空，日志写入 <DATA_DIR>/<SYMBOL>/predictions_log.jsonl
+    - 若 symbol 为 None，退回到根级路径 PREDICTIONS_LOG_PATH
+    - PREDICTIONS_LOG_ALSO_ROOT=1 可同时写根级路径（用于迁移过渡期）
 """
 import json
 import os
@@ -15,7 +21,7 @@ from datetime import datetime, timezone
 from threading import Lock
 from typing import Any, Dict, Optional
 
-# 日志路径（可由环境覆盖）
+# 根级兜底日志路径（可由环境覆盖，用于 symbol=None 时或 PREDICTIONS_LOG_ALSO_ROOT=1 时）
 _LOG_PATH = os.getenv(
     "PREDICTIONS_LOG_PATH",
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data", "predictions_log.jsonl")),
@@ -27,10 +33,26 @@ _DEDUPE_ENABLED = os.getenv("PREDICTIONS_LOG_DEDUPE", "1") not in ("0", "false",
 # 去重缓存大小（LRU），默认 4096
 _DEDUPE_CACHE_SIZE = int(os.getenv("PREDICTIONS_LOG_DEDUPE_CACHE_SIZE", "4096"))
 
+# 兼容双写开关：写 per-symbol 路径时是否同时写根级路径（迁移过渡期使用）
+_ALSO_ROOT = os.getenv("PREDICTIONS_LOG_ALSO_ROOT", "0") not in ("0", "false", "False")
+
 _lock = Lock()
 
 # LRU 缓存：key -> last_seen_unix_ts。OrderedDict 保证顺序，最旧在最前面
 _dedupe_cache = OrderedDict()
+
+
+def _get_per_symbol_log_path(symbol: str) -> str:
+    """Return per-symbol log path: <DATA_DIR>/<SYMBOL>/predictions_log.jsonl.
+
+    Uses the DATA_DIR environment variable (or the default data/ directory next
+    to the repository root) as the base directory.
+    """
+    base_data_dir = os.getenv(
+        "DATA_DIR",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")),
+    )
+    return os.path.join(base_data_dir, symbol, "predictions_log.jsonl")
 
 
 def _to_utc_iso(dt: datetime) -> str:
@@ -96,9 +118,19 @@ def log_prediction(
     trend_1d: Optional[str] = None,
     # 额外字段（可能包含 effective_as_of_used）
     extra: Optional[Dict[str, Any]] = None,
+    # 显式指定日志路径（可选）；未指定时按 symbol 自动推断
+    log_path: Optional[str] = None,
 ) -> None:
     """
     将一次预测追加到 JSONL 日志文件（进程内去重）。
+
+    日志路径解析优先级：
+    1. 若 log_path 显式指定，使用该路径。
+    2. 若 symbol 非空，写入 <DATA_DIR>/<SYMBOL>/predictions_log.jsonl（per-symbol）。
+    3. 否则退回到根级路径 _LOG_PATH（由 PREDICTIONS_LOG_PATH 环境变量控制）。
+
+    若 PREDICTIONS_LOG_ALSO_ROOT=1，per-symbol 写入后还额外追加写入根级路径。
+
     去重 key 优先用 extra 中的 "effective_as_of_used"（如果存在），否则用 ts。
     """
     ts_iso = _to_utc_iso(ts)
@@ -151,8 +183,13 @@ def log_prediction(
 
     line = json.dumps(rec, ensure_ascii=False)
 
-    # 确保目录存在
-    os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+    # 解析目标日志路径
+    if log_path is not None:
+        effective_path = log_path
+    elif symbol:
+        effective_path = _get_per_symbol_log_path(symbol)
+    else:
+        effective_path = _LOG_PATH
 
     # 构建去重 key（优先 effective_as_of）
     key = _make_key_from_parts(ts_iso, symbol, interval, model_version, effective_as_of)
@@ -162,6 +199,13 @@ def log_prediction(
         if _cache_check_and_add(key):
             return
 
-        # 追加写入文件
-        with open(_LOG_PATH, "a", encoding="utf-8") as f:
+        # 追加写入目标路径（per-symbol 或根级）
+        os.makedirs(os.path.dirname(effective_path), exist_ok=True)
+        with open(effective_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
+
+        # 兼容双写：PREDICTIONS_LOG_ALSO_ROOT=1 时额外追加写入根级路径
+        if _ALSO_ROOT and effective_path != _LOG_PATH:
+            os.makedirs(os.path.dirname(_LOG_PATH), exist_ok=True)
+            with open(_LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line + "\n")

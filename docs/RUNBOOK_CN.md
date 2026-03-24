@@ -162,8 +162,8 @@ journalctl -u ml-service -n 50 --no-pager
 ---
 
 ## 3.4 prediction log 检查
-查看：
-- `data/logs/predictions_log.jsonl`
+查看（以 ETHUSDT 为例）：
+- `data/ETHUSDT/predictions_log.jsonl`
 
 重点看：
 - 是否持续追加
@@ -297,8 +297,9 @@ sudo systemctl restart ml-service
 ```bash
 source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
-  --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
-  --data-dir ~/ubuntu-wallet/data \
+  --symbol ETHUSDT \
+  --log-path ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl \
+  --data-dir ~/ubuntu-wallet/data/ETHUSDT \
   --interval 1h \
   --active-model event_v3 \
   --threshold 0.55 \
@@ -657,9 +658,10 @@ sudo systemctl restart ml-service
 ```bash
 source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
-  --train-stats ~/ubuntu-wallet/models/current/train_feature_stats.json \
-  --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
-  --output-dir ~/ubuntu-wallet/data/reports \
+  --symbol ETHUSDT \
+  --train-stats ~/ubuntu-wallet/models/ETHUSDT/current/train_feature_stats.json \
+  --log-path ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl \
+  --output-dir ~/ubuntu-wallet/data/ETHUSDT/reports \
   --dry-run
 ```
 
@@ -668,8 +670,8 @@ ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
 ```bash
 source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 ENABLE_CALIB_REPORT=true python ~/ubuntu-wallet/python-analyzer/calibration_report.py \
-  --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
-  --output-dir ~/ubuntu-wallet/data/reports \
+  --log-path ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl \
+  --output-dir ~/ubuntu-wallet/data/ETHUSDT/reports \
   --dry-run
 ```
 
@@ -805,6 +807,9 @@ done
 
 ## 17.9 向后兼容说明
 
-旧式单币种路径（`data/klines_1h.json`、`models/current/`）仍然有效。
-如果只运行一个币种且不希望改变目录结构，可继续沿用旧路径，仅在需要多币种时迁移。
+**模型目录**：ml-service 优先使用 `models/<SYMBOL>/current/`，若该目录不存在则退回到 `MODEL_DIR`（默认 `models/ETHUSDT/current/`）。
+
+**预测日志**：ml-service 默认写入 `data/<SYMBOL>/predictions_log.jsonl`。若需同时写根级 `data/predictions_log.jsonl`，可设置 `PREDICTIONS_LOG_ALSO_ROOT=1`（迁移期使用）。
+
+离线脚本可通过 `--log-path` / `--train-stats` 等参数显式指定路径，向后兼容行为不变。
 
