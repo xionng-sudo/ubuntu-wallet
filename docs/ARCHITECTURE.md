@@ -53,8 +53,9 @@ The system is designed for **simulated / research operation**. Live order execut
  │  │                      go-collector (Go, port 8080)                    │  │
  │  │                                                                      │  │
  │  │   Binance ──┐                                                        │  │
- │  │   OKX    ───┼── OHLCV poll ──► klines_1h/4h/1d.json                │  │
+ │  │   OKX    ───┼── OHLCV poll ──► data/<SYMBOL>/klines_1h/4h/1d.json  │  │
  │  │   Coinbase ─┘   (market/)       traders.json                        │  │
+ │  │              symbols: BTCUSDT ETHUSDT SOLUSDT BNBUSDT (+Phase2)     │  │
  │  │                                 signals.json                        │  │
  │  │   HTTP API:  /healthz  /signals  /features  /traders                │  │
  │  └──────────────────────────┬───────────────────────────────────────────┘  │
@@ -121,12 +122,17 @@ The system is designed for **simulated / research operation**. Live order execut
 
 ### 3.1 go-collector
 
-- Polls Binance, OKX, and Coinbase exchange APIs on a configurable interval (default every 60 seconds).
-- Downloads OHLCV candles for ETH perpetuals and writes `data/klines_1h.json`, `data/klines_4h.json`, `data/klines_1d.json`.
+- Polls Binance exchange API on a configurable interval (default every 60 seconds).
+- Downloads OHLCV candles for **multiple symbols** (Phase 1: BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT; Phase 2 optional: XRPUSDT, DOGEUSDT, ADAUSDT) and writes per-symbol kline files:
+  - `data/<SYMBOL>/klines_1h.json`, `klines_4h.json`, `klines_1d.json`, `klines_15m.json`
+  - The **first configured symbol** (default: BTCUSDT) additionally writes `klines_1m.json`, `klines_5m.json`
+- Configure symbols via `SYMBOLS=BTCUSDT,ETHUSDT,...` or `ENABLE_PHASE2_SYMBOLS=true` env vars.
+- Legacy root-level `data/klines_*.json` writes for the first configured symbol are maintained for backward compatibility (`LEGACY_ETHUSDT_COMPAT=true`, the default); set to `false` after migrating consumers.
 - Tracks Binance futures leaderboard (top 50 traders), writing `data/traders.json`.
 - Computes over 70 technical features per bar in `features/` (SMA, EMA, MACD, RSI, ATR, Bollinger, volatility, returns).
 - Calls `ml-service /predict` and publishes the result to `data/signals.json` and via the `/signals` HTTP endpoint.
 - Exposes `GET /healthz`, `GET /features`, `GET /traders` for downstream consumers and health checks.
+  - `/api/healthz` includes `enabled_symbols` and `primary_symbol` fields.
 
 ### 3.2 ml-service
 
@@ -267,10 +273,14 @@ ubuntu-wallet/
 
 ```
 go-collector wakes up
-   └─► Binance REST: 1h/4h/1d OHLCV candles for ETHUSDT
+   └─► Resolve symbols from SYMBOLS env (default: BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT)
+   └─► For each symbol:
+         └─► Binance REST: 15m/1h/4h/1d OHLCV candles
+         └─► Write data/<SYMBOL>/klines_{15m,1h,4h,1d}.json
+   └─► Primary symbol only: also fetch 1m/5m candles
+   └─► Legacy compat: also write data/klines_{1h,4h,1d}.json (LEGACY_ETHUSDT_COMPAT=true)
    └─► Binance REST: top-50 leaderboard traders
    └─► OKX REST: funding rates / derivatives data
-   └─► Write data/klines_{1h,4h,1d}.json (full history append)
    └─► Write data/traders.json
    └─► Compute 70+ technical features for latest bar
    └─► POST http://127.0.0.1:9000/predict
@@ -357,8 +367,9 @@ data/klines_1d.json  ──┘         │
 ### 6.1 Prerequisites
 
 ```bash
-# Ensure data exists (go-collector must have run with KLINES_LOOKBACK_MODE=on_startup)
-ls data/klines_1h.json data/klines_4h.json data/klines_1d.json
+# Ensure data exists for the target symbol (go-collector must have run with KLINES_LOOKBACK_MODE=on_startup)
+# e.g. for ETHUSDT:
+ls data/ETHUSDT/klines_1h.json data/ETHUSDT/klines_4h.json data/ETHUSDT/klines_1d.json
 
 # Activate python environment
 source venv310/bin/activate  # or: source venv/bin/activate

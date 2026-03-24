@@ -161,6 +161,79 @@ journalctl -u check-go-collector.service -n 200 --no-pager
 
 ---
 
-## 8. 安全提醒（强烈建议）
+## 8. 多币种 K 线采集（Multi-Symbol Kline Collection）
+
+### 8.1 支持的交易对
+
+| 阶段 | 交易对 | 默认启用 |
+|------|--------|---------|
+| Phase 1 | BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT | ✅ 默认启用 |
+| Phase 2 | XRPUSDT, DOGEUSDT, ADAUSDT | ⚙️ 需显式启用 |
+
+### 8.2 配置方式
+
+**方式 A（推荐）：`SYMBOLS` 环境变量**
+```bash
+# 仅 Phase 1（默认）
+# 无需配置，不设置 SYMBOLS 即可
+
+# 全部 7 个交易对
+SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT
+```
+
+**方式 B：`ENABLE_PHASE2_SYMBOLS` 标志**
+```bash
+# 开启 Phase 2（在 Phase 1 基础上追加）
+ENABLE_PHASE2_SYMBOLS=true
+```
+
+> **优先级**：`SYMBOLS` > `ENABLE_PHASE2_SYMBOLS` > 默认 Phase 1。
+
+### 8.3 文件写入路径
+
+每个交易对的 K 线写入独立子目录：
+```
+data/
+  BTCUSDT/
+    klines_1h.json   klines_4h.json   klines_1d.json   klines_15m.json
+  ETHUSDT/
+    klines_1h.json   klines_4h.json   klines_1d.json   klines_15m.json   klines_1m.json   klines_5m.json
+  SOLUSDT/ ...
+  BNBUSDT/ ...
+  XRPUSDT/ ...   (Phase 2)
+  DOGEUSDT/ ...  (Phase 2)
+  ADAUSDT/ ...   (Phase 2)
+```
+
+> 第一个配置的交易对（默认为 BTCUSDT）同时写入 1m/5m 数据，用于特征计算。
+
+### 8.4 向下兼容模式（Legacy root-level paths）
+
+默认情况下，`LEGACY_ETHUSDT_COMPAT=true`，收集器也会将第一个交易对的 K 线写到根目录：
+```
+data/klines_1h.json   data/klines_4h.json   data/klines_1d.json  ...
+```
+
+当所有下游消费者迁移完毕后，在 `collector.env` 中设置：
+```bash
+LEGACY_ETHUSDT_COMPAT=false
+```
+
+### 8.5 验证各交易对最新时间戳
+
+```bash
+# 列出所有交易对最新 klines_1h.json 修改时间
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  echo -n "$sym: "
+  stat -c '%y' /home/ubuntu/ubuntu-wallet/data/$sym/klines_1h.json 2>/dev/null || echo "not found"
+done
+
+# 或通过 healthz 查看
+curl -fsS http://127.0.0.1:8080/api/healthz | jq '{enabled_symbols, primary_symbol, files}'
+```
+
+---
+
+## 9. 安全提醒（强烈建议）
 - Telegram Bot Token 不要出现在聊天记录/日志/截图中；如已泄露，建议立即在 BotFather 重新生成并替换。
 - 更安全做法：把 token 放到 root-only env 文件（600 权限）并用 `EnvironmentFile=` 注入，而不是明文写在 unit override 里。

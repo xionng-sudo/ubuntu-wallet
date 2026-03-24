@@ -17,6 +17,7 @@ import (
 	"github.com/ubuntu-wallet/go-collector/collector"
 	"github.com/ubuntu-wallet/go-collector/exog"
 	"github.com/ubuntu-wallet/go-collector/features"
+	"github.com/ubuntu-wallet/go-collector/market"
 	"github.com/ubuntu-wallet/go-collector/models"
 	"github.com/ubuntu-wallet/go-collector/signal"
 )
@@ -71,10 +72,11 @@ var store = &DataStore{
 
 // runtime config (for health/status observability)
 var (
-	runtimeDataDir   string
-	runtimeFastEvery time.Duration
-	runtimeSlowEvery time.Duration
+	runtimeDataDir        string
+	runtimeFastEvery      time.Duration
+	runtimeSlowEvery      time.Duration
 	runtimeFeatureColumns []string
+	runtimeSymbols        []string // ordered list of enabled trading symbols
 )
 
 func envOrDefault(key, def string) string {
@@ -201,6 +203,10 @@ func main() {
 	dataDir := envOrDefault("DATA_DIR", defaultDataDir)
 	runtimeDataDir = dataDir
 	log.Infof("DATA_DIR=%s", dataDir)
+
+	// Resolve enabled symbols (reads SYMBOLS / ENABLE_PHASE2_SYMBOLS env).
+	runtimeSymbols = market.ParseSymbols()
+	log.Infof("Enabled symbols (%d): %s", len(runtimeSymbols), strings.Join(runtimeSymbols, ", "))
 
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		log.Fatalf("Failed to create data directory: %v", err)
@@ -573,12 +579,17 @@ func shouldUseLookbackThisRun(isStartup bool) bool {
 }
 
 func collectMarketData(bn *collector.BinanceCollector, isStartup bool) {
-	market, err := bn.GetCurrentPrice("ETHUSDT")
+	// Primary symbol for in-memory market data and feature computation is always
+	// the first configured symbol (default: BTCUSDT).  For backward-compatibility
+	// the /api/market endpoint still surfaces a single MarketData object.
+	primarySymbol := runtimeSymbols[0]
+
+	mkt, err := bn.GetCurrentPrice(primarySymbol)
 	if err != nil {
-		log.Warnf("Failed to get current price: %v", err)
+		log.Warnf("Failed to get current price for %s: %v", primarySymbol, err)
 	} else {
 		store.mu.Lock()
-		store.MarketData = market
+		store.MarketData = mkt
 		store.mu.Unlock()
 	}
 
@@ -591,54 +602,78 @@ func collectMarketData(bn *collector.BinanceCollector, isStartup bool) {
 	look4h := envIntOrDefault("KLINES_4H_LOOKBACK_DAYS", 365)
 	look1d := envIntOrDefault("KLINES_1D_LOOKBACK_DAYS", 730)
 
-	intervals := []string{"1m", "5m", "15m", "1h", "4h", "1d"}
+	// Intervals to collect per symbol.
+	// 1m/5m are kept for the primary symbol only (they are heavy and only used
+	// locally for feature computation on ETHUSDT – extend as needed).
+	primaryIntervals := []string{"1m", "5m", "15m", "1h", "4h", "1d"}
+	multiIntervals := []string{"15m", "1h", "4h", "1d"}
 
-	for _, interval := range intervals {
-		var (
-			klines []models.OHLCV
-			err    error
-		)
-
-		switch interval {
-		case "15m":
-			if useLookback && look15m > 0 {
-				klines, err = bn.GetKlinesLookback("ETHUSDT", "15m", look15m)
-			} else {
-				klines, err = bn.GetKlines("ETHUSDT", "15m", 500)
-			}
-		case "1h":
-			if useLookback && look1h > 0 {
-				klines, err = bn.GetKlinesLookback("ETHUSDT", "1h", look1h)
-			} else {
-				klines, err = bn.GetKlines("ETHUSDT", "1h", 500)
-			}
-		case "4h":
-			if useLookback && look4h > 0 {
-				klines, err = bn.GetKlinesLookback("ETHUSDT", "4h", look4h)
-			} else {
-				klines, err = bn.GetKlines("ETHUSDT", "4h", 500)
-			}
-		case "1d":
-			if useLookback && look1d > 0 {
-				klines, err = bn.GetKlinesLookback("ETHUSDT", "1d", look1d)
-			} else {
-				klines, err = bn.GetKlines("ETHUSDT", "1d", 500)
-			}
-		default:
-			// 1m/5m: keep light
-			klines, err = bn.GetKlines("ETHUSDT", interval, 500)
+	for i, sym := range runtimeSymbols {
+		if i > 0 {
+			// Small pause between symbols to respect rate limits
+			time.Sleep(200 * time.Millisecond)
 		}
 
-		if err != nil {
-			log.Warnf("Failed to get %s klines: %v", interval, err)
-			continue
+		intervals := multiIntervals
+		if sym == primarySymbol {
+			intervals = primaryIntervals
 		}
-		store.mu.Lock()
-		store.Klines[interval] = klines
-		store.mu.Unlock()
 
-		// Spread requests a bit
-		time.Sleep(120 * time.Millisecond)
+		for _, interval := range intervals {
+			var (
+				klines []models.OHLCV
+				ferr   error
+			)
+
+			switch interval {
+			case "15m":
+				if useLookback && look15m > 0 {
+					klines, ferr = bn.GetKlinesLookback(sym, "15m", look15m)
+				} else {
+					klines, ferr = bn.GetKlines(sym, "15m", 500)
+				}
+			case "1h":
+				if useLookback && look1h > 0 {
+					klines, ferr = bn.GetKlinesLookback(sym, "1h", look1h)
+				} else {
+					klines, ferr = bn.GetKlines(sym, "1h", 500)
+				}
+			case "4h":
+				if useLookback && look4h > 0 {
+					klines, ferr = bn.GetKlinesLookback(sym, "4h", look4h)
+				} else {
+					klines, ferr = bn.GetKlines(sym, "4h", 500)
+				}
+			case "1d":
+				if useLookback && look1d > 0 {
+					klines, ferr = bn.GetKlinesLookback(sym, "1d", look1d)
+				} else {
+					klines, ferr = bn.GetKlines(sym, "1d", 500)
+				}
+			default:
+				// 1m/5m: keep light, primary symbol only
+				klines, ferr = bn.GetKlines(sym, interval, 500)
+			}
+
+			if ferr != nil {
+				log.Warnf("[%s] Failed to get %s klines: %v", sym, interval, ferr)
+				continue
+			}
+
+			// Store in-memory keyed by "SYMBOL/interval" for multi-symbol access.
+			// The primary symbol also populates the legacy "interval"-only key for
+			// backward-compatible /api/klines consumers.
+			storeKey := sym + "/" + interval
+			store.mu.Lock()
+			store.Klines[storeKey] = klines
+			if sym == primarySymbol {
+				store.Klines[interval] = klines
+			}
+			store.mu.Unlock()
+
+			// Spread requests a bit
+			time.Sleep(120 * time.Millisecond)
+		}
 	}
 }
 
@@ -714,9 +749,28 @@ func saveFastDataToFiles(dataDir string) {
 		saveJSON(filepath.Join(dataDir, "market_data.json"), store.MarketData)
 	}
 
-	for interval, klines := range store.Klines {
-		filename := fmt.Sprintf("klines_%s.json", interval)
-		saveJSON(filepath.Join(dataDir, filename), klines)
+	// Write per-symbol kline files: data/<SYMBOL>/klines_<interval>.json
+	// The key format in store.Klines is either "SYMBOL/interval" (multi-symbol)
+	// or plain "interval" (legacy primary-symbol entry kept for backward compat).
+	for key, klines := range store.Klines {
+		if strings.Contains(key, "/") {
+			// multi-symbol key: "BTCUSDT/1h"
+			parts := strings.SplitN(key, "/", 2)
+			sym, interval := parts[0], parts[1]
+			symDir := filepath.Join(dataDir, sym)
+			saveJSON(filepath.Join(symDir, fmt.Sprintf("klines_%s.json", interval)), klines)
+		}
+	}
+
+	// Backward-compatible root-level writes for the primary symbol (ETHUSDT or
+	// whatever is first in SYMBOLS).  Disable with LEGACY_ETHUSDT_COMPAT=false.
+	if envBoolOrDefault("LEGACY_ETHUSDT_COMPAT", true) {
+		for _, interval := range []string{"1h", "4h", "1d", "15m", "1m", "5m"} {
+			if klines, ok := store.Klines[interval]; ok {
+				filename := fmt.Sprintf("klines_%s.json", interval)
+				saveJSON(filepath.Join(dataDir, filename), klines)
+			}
+		}
 	}
 
 	log.Info("FAST data saved to files successfully")
@@ -1012,7 +1066,25 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	requireSignals := envBoolOrDefault("HEALTH_REQUIRE_SIGNALS", true)
 	requireSignalsSplit := envBoolOrDefault("HEALTH_REQUIRE_SIGNALS_SPLIT", false)
 
-	kl1hFresh, kl1h := fileFreshOK(filepath.Join(dataDir, "klines_1h.json"), now, staleMax)
+	// Primary symbol for health file checks (first in configured list).
+	primarySymbol := "ETHUSDT"
+	if len(runtimeSymbols) > 0 {
+		primarySymbol = runtimeSymbols[0]
+	}
+
+	// Check per-symbol klines_1h.json (new path) and fall back to root-level for
+	// LEGACY_ETHUSDT_COMPAT mode.
+	symKl1hPath := filepath.Join(dataDir, primarySymbol, "klines_1h.json")
+	kl1hFresh, kl1h := fileFreshOK(symKl1hPath, now, staleMax)
+	if !kl1hFresh && envBoolOrDefault("LEGACY_ETHUSDT_COMPAT", true) {
+		// Accept legacy root-level file as a fallback during migration
+		legacyFresh, legacyKl1h := fileFreshOK(filepath.Join(dataDir, "klines_1h.json"), now, staleMax)
+		if legacyFresh {
+			kl1hFresh = true
+			kl1h = legacyKl1h
+		}
+	}
+
 	featFresh, featLatest := fileFreshOK(filepath.Join(dataDir, "features", "features_1h_latest.json"), now, staleMax)
 
 	// Backward compatible
@@ -1062,7 +1134,9 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 		"started_at":    started,
 		"staleness_sec": stalenessSec,
 
-		"data_dir": dataDir,
+		"data_dir":        dataDir,
+		"primary_symbol":  primarySymbol,
+		"enabled_symbols": runtimeSymbols,
 
 		"fast_interval": func() string {
 			if runtimeFastEvery > 0 {
