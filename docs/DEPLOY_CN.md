@@ -510,8 +510,9 @@ cd ~/ubuntu-wallet
 source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 
 python scripts/evaluate_from_logs.py \
-  --log-path data/predictions_log.jsonl \
-  --data-dir data \
+  --symbol ETHUSDT \
+  --log-path data/ETHUSDT/predictions_log.jsonl \
+  --data-dir data/ETHUSDT \
   --interval 1h \
   --active-model event_v3 \
   --threshold 0.55 \
@@ -945,8 +946,9 @@ sudo systemctl restart ml-service
 ```bash
 source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
-  --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
-  --data-dir ~/ubuntu-wallet/data \
+  --symbol ETHUSDT \
+  --log-path ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl \
+  --data-dir ~/ubuntu-wallet/data/ETHUSDT \
   --interval 1h \
   --active-model event_v3 \
   --threshold 0.55 \
@@ -1025,8 +1027,8 @@ sudo systemctl restart ml-service go-collector
 
 - 脚本：`scripts/report_drift.py`
 - systemd：`systemd/drift-monitor.service` / `systemd/drift-monitor.timer`
-- 输出：`data/reports/drift_YYYY-MM-DD.{json,md}`
-- 训练统计：`models/current/train_feature_stats.json`（由训练脚本生成）
+- 输出：`data/<SYMBOL>/reports/drift_YYYY-MM-DD.{json,md}`
+- 训练统计：`models/<SYMBOL>/current/train_feature_stats.json`（由训练脚本生成）
 
 ### 21.5 Calibration Report 相关文件
 
@@ -1154,5 +1156,8 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py --symbol ${SYMBOL}
 
 ## 22.8 向后兼容说明
 
-现有的单币种路径（`data/klines_1h.json`、`models/current/`）不受影响。
-所有脚本在不传 `--symbol` 时行为与之前完全相同。
+**模型目录**：ml-service 优先使用 `models/<SYMBOL>/current/`；若该目录不存在，退回到 `MODEL_DIR`（默认 `models/ETHUSDT/current/`）。
+
+**预测日志**：ml-service 默认按 symbol 路由到 `data/<SYMBOL>/predictions_log.jsonl`。若需同时写根级 `data/predictions_log.jsonl`（供旧脚本读取），可在 `ml-service.env` 中设置 `PREDICTIONS_LOG_ALSO_ROOT=1`。
+
+所有离线脚本在不传 `--symbol` 时，可通过 `--log-path` / `--train-stats` 等参数显式指定路径，行为与之前完全相同。

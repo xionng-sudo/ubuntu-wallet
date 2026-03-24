@@ -27,8 +27,8 @@
 | 多周期特征构建 | 基于 1h / 4h / 1d K 线数据构建特征向量 |
 | 模型推理 | LightGBM + XGBoost + 堆叠元模型，输出三分类概率 |
 | 概率校准 | Isotonic / Sigmoid 校准，提高置信度可靠性 |
-| 预测日志 | 每次预测结果追加写入 JSONL 日志文件 |
-| 模型版本管理 | `models/current/` 目录作为当前生产模型，训练后自动更新 |
+| 预测日志 | 每次预测结果追加写入 per-symbol JSONL 日志文件 |
+| 多币种模型分辨 | 按请求 symbol 自动从 `models/<SYMBOL>/current/` 加载对应模型 |
 | schema 验证 | 在线推理时检测特征漂移 |
 
 ---
@@ -37,11 +37,11 @@
 
 | 文件 | 说明 |
 |---|---|
-| `app.py` | FastAPI 应用主入口，定义 `/predict`、`/healthz` 等端点 |
-| `model_loader.py` | 模型加载逻辑（从 MODEL_DIR 目录直接加载，默认 `models/current/`） |
+| `app.py` | FastAPI 应用主入口，定义 `/predict`、`/healthz` 等端点；按请求 symbol 自动解析 per-symbol 模型目录和数据目录 |
+| `model_loader.py` | 模型加载逻辑（从 `models/<SYMBOL>/current/` 目录加载，默认退回 `MODEL_DIR`） |
 | `feature_builder.py` | 多周期特征构造 + schema 验证 |
 | `calibration.py` | 概率校准（Isotonic / Sigmoid） |
-| `prediction_logger.py` | 预测日志写入（JSONL 格式） |
+| `prediction_logger.py` | 预测日志写入（JSONL 格式）；按 symbol 路由到 `data/<SYMBOL>/predictions_log.jsonl` |
 | `requirements.txt` | Python 依赖列表 |
 
 ---
@@ -116,8 +116,8 @@ curl -s http://127.0.0.1:9000/healthz | jq .
   "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6",
   "calibration_available": true,
   "calibration_method": "isotonic",
-  "model_dir": "/home/ubuntu/ubuntu-wallet/models/current",
-  "loaded_model_dir": "/home/ubuntu/ubuntu-wallet/models/current",
+  "model_dir": "/home/ubuntu/ubuntu-wallet/models/ETHUSDT/current",
+  "loaded_model_dir": "/home/ubuntu/ubuntu-wallet/models/ETHUSDT/current",
   "flags": {
     "ENABLE_EXOG_FEATURES": "false",
     "ENABLE_DRIFT_MONITOR": "false",
@@ -135,7 +135,7 @@ curl -s http://127.0.0.1:9000/healthz | jq .
 | `model_version` | 当前激活模型的版本标识符 |
 | `calibration_available` | `true` 表示校准器已加载（建议确保此为 true） |
 | `calibration_method` | 校准方法（`isotonic` / `sigmoid`） |
-| `model_dir` | MODEL_DIR 配置值（默认为 `models/current`） |
+| `model_dir` | MODEL_DIR 配置值（默认为 `models/ETHUSDT/current`） |
 | `flags` | 功能开关状态（ENABLE_EXOG_FEATURES / ENABLE_DRIFT_MONITOR / ENABLE_CALIB_REPORT） |
 
 ---
@@ -180,33 +180,38 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 
 ## 模型加载逻辑
 
-ml-service 启动时通过以下步骤加载模型：
+ml-service 启动时先加载默认模型（`MODEL_DIR`），并在每次 `/predict` 请求时按 `symbol` 自动解析 per-symbol 模型目录。
 
-1. 从 `MODEL_DIR`（默认 `models/current/`）目录直接读取模型文件：
-   - `lightgbm_event_v3.pkl` / `lightgbm_event_v3_scaler.pkl`
-   - `xgboost_event_v3.json` / `xgboost_event_v3_scaler.pkl`
-   - `stacking_event_v3.pkl`
-   - `calibration_event_v3.pkl`
-   - `feature_columns_event_v3.json`
-   - `model_meta.json`
-2. 同时在 `models/` 根目录寻找 `registry.json`（如有，用于版本信息查询）
+### 解析优先级
 
-> **说明**：`models/current/` 是一个**目录**（不是 JSON 文件），由训练脚本在每次训练完成后自动更新（覆盖替换）。`MODEL_DIR` 默认值为 `ml-service/` 所在目录的上级路径下的 `models/current`。
+1. **per-symbol**：若 `models/<SYMBOL>/current/` 目录存在，则从该目录加载对应 symbol 的模型（懒加载 + 进程内缓存）。
+2. **legacy fallback**：若 per-symbol 目录不存在，退回到 `MODEL_DIR`（默认 `models/ETHUSDT/current/`），保持 ETHUSDT 及旧部署的兼容性。
 
-如果 `models/current/` 不存在或模型文件缺失，服务会启动但 `/healthz` 会返回 `"ok": false`，`/predict` 会返回 503 错误。
+### 模型文件（每个 per-symbol 目录下）
+
+- `lightgbm_event_v3.pkl` / `lightgbm_event_v3_scaler.pkl`
+- `xgboost_event_v3.json` / `xgboost_event_v3_scaler.pkl`
+- `stacking_event_v3.pkl`
+- `calibration_event_v3.pkl`
+- `feature_columns_event_v3.json`
+- `model_meta.json`
+
+同时在 `models/` 根目录（`MODELS_BASE_DIR`）下寻找 `registry.json`（如有，用于版本信息查询）。
+
+> **说明**：`models/<SYMBOL>/current/` 是一个**目录**（不是 JSON 文件），由训练脚本在每次训练完成后自动更新（覆盖替换）。
+
+如果 per-symbol 模型目录不存在或模型文件缺失，服务回退到默认模型。若默认模型也不可用，`/healthz` 返回 `"ok": false`，`/predict` 返回 503 错误。
 
 **切换模型版本：**
 
-使用 `scripts/rollback_model.py` 或手动将模型文件复制到 `models/current/` 后，重启 ml-service 即可生效：
-
 ```bash
-# 查看当前激活模型元信息
-cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool | grep -E "model_version|trained_at"
+# 查看某 symbol 当前激活模型元信息
+cat ~/ubuntu-wallet/models/BTCUSDT/current/model_meta.json | python3 -m json.tool | grep -E "model_version|trained_at"
 
-# 查看所有历史版本
-ls ~/ubuntu-wallet/models/archive/ 2>/dev/null || ls ~/ubuntu-wallet/models/
+# 查看 ETHUSDT 当前激活模型
+cat ~/ubuntu-wallet/models/ETHUSDT/current/model_meta.json | python3 -m json.tool | grep -E "model_version|trained_at"
 
-# 重启服务加载新模型
+# 重启服务加载最新模型
 sudo systemctl restart ml-service.service
 
 # 验证新模型已加载
@@ -217,7 +222,18 @@ curl -s http://127.0.0.1:9000/healthz | jq .model_version
 
 ## 预测日志
 
-每次 `/predict` 被调用，结果会追加写入 `data/predictions_log.jsonl`（路径相对于仓库根目录）。
+每次 `/predict` 被调用，结果会追加写入 per-symbol 日志文件（路径相对于仓库根目录）：
+
+```
+data/<SYMBOL>/predictions_log.jsonl
+```
+
+例如：
+- `data/BTCUSDT/predictions_log.jsonl`
+- `data/ETHUSDT/predictions_log.jsonl`
+
+> **向下兼容**：若 `symbol` 为空，日志退回到根级路径 `data/predictions_log.jsonl`。
+> 若需在迁移期同时写入根级路径（供旧脚本读取），可设置 `PREDICTIONS_LOG_ALSO_ROOT=1`。
 
 **日志格式（每行一条 JSON）：**
 
@@ -241,8 +257,20 @@ curl -s http://127.0.0.1:9000/healthz | jq .model_version
 **查看最新预测记录：**
 
 ```bash
-tail -n 5 ~/ubuntu-wallet/data/predictions_log.jsonl | \
+# BTCUSDT 预测日志
+tail -n 5 ~/ubuntu-wallet/data/BTCUSDT/predictions_log.jsonl | \
   python3 -c "import sys,json; [print(json.dumps(json.loads(l), indent=2, ensure_ascii=False)) for l in sys.stdin]"
+
+# ETHUSDT 预测日志
+tail -n 5 ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl | \
+  python3 -c "import sys,json; [print(json.dumps(json.loads(l), indent=2, ensure_ascii=False)) for l in sys.stdin]"
+```
+
+**评估脚本（使用 per-symbol 日志）：**
+
+```bash
+python3 scripts/evaluate_from_logs.py --symbol BTCUSDT
+python3 scripts/evaluate_from_logs.py --symbol ETHUSDT
 ```
 
 ---
@@ -251,13 +279,14 @@ tail -n 5 ~/ubuntu-wallet/data/predictions_log.jsonl | \
 
 ml-service 通过以下方式获取配置：
 
-| 配置项 | 方式 | 说明 |
-|---|---|---|
-| 模型目录 | 相对路径 `../models` | 相对于 `ml-service/` 的工作目录 |
-| 数据目录 | 相对路径 `../data` | K 线数据和预测日志所在目录 |
-| 监听地址 | 命令行参数 | `--host 127.0.0.1 --port 9000` |
-
-如需自定义模型目录，可通过环境变量 `MODEL_DIR` 覆盖默认值（具体支持情况以 `app.py` 当前实现为准）。
+| 配置项 | 环境变量 | 默认值 | 说明 |
+|---|---|---|---|
+| per-symbol 模型基目录 | `MODELS_BASE_DIR` | `../models` | 所有 per-symbol 模型产物的根目录，子目录结构为 `<SYMBOL>/current/` |
+| legacy 模型目录 | `MODEL_DIR` | `../models/ETHUSDT/current` | per-symbol 目录缺失时的兜底路径 |
+| 数据目录 | `DATA_DIR` | `../data` | K 线数据和预测日志的根目录；per-symbol 数据在 `DATA_DIR/<SYMBOL>/` |
+| 根级日志路径 | `PREDICTIONS_LOG_PATH` | `data/predictions_log.jsonl` | symbol=None 时或 `PREDICTIONS_LOG_ALSO_ROOT=1` 时使用 |
+| 双写根级日志 | `PREDICTIONS_LOG_ALSO_ROOT` | `0` | 设为 `1` 可在写入 per-symbol 日志的同时额外写入根级日志（迁移期兼容） |
+| 监听地址 | 命令行参数 | `--host 127.0.0.1 --port 9000` | 服务监听地址和端口 |
 
 ---
 
@@ -304,13 +333,14 @@ RestartSec=3
 
 **Q：服务启动后 `/healthz` 返回 `"ok": false`**
 
-原因：`models/current/` 目录不存在或其中模型文件缺失。  
+原因：`MODEL_DIR` 指向的目录不存在或其中模型文件缺失。  
 解决：先运行训练脚本生成模型，参考主 README 第 9 节。
 
 ```bash
-# 检查模型目录
-ls -lh ~/ubuntu-wallet/models/
-cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool | grep -E "model_version|trained_at"
+# 检查 per-symbol 模型目录
+ls -lh ~/ubuntu-wallet/models/ETHUSDT/current/
+ls -lh ~/ubuntu-wallet/models/BTCUSDT/current/
+cat ~/ubuntu-wallet/models/ETHUSDT/current/model_meta.json | python3 -m json.tool | grep -E "model_version|trained_at"
 ```
 
 **Q：`uvicorn` 命令找不到**
@@ -353,20 +383,61 @@ uvicorn app:app --host 127.0.0.1 --port 9001
 
 ## 多币种配置说明
 
-ml-service 本身不直接管理多个符号；它从 `MODEL_DIR` 加载一个模型。
-多币种支持通过「**每币种独立部署**」或「**路由层**」实现。
+ml-service 现在支持**单实例多币种**推理：一个服务进程即可按请求 `symbol` 自动加载并缓存对应的 per-symbol 模型。
 
-### 当前推荐方式：每币种独立 ml-service 实例
+### 模型目录解析逻辑
 
-每个激活币种可以运行一个 ml-service 实例，各实例监听不同端口，指向不同的模型目录：
+```
+MODELS_BASE_DIR/                     (默认 ~/ubuntu-wallet/models/)
+├── BTCUSDT/current/                 → BTCUSDT 请求自动使用
+├── ETHUSDT/current/                 → ETHUSDT 请求自动使用
+├── SOLUSDT/current/                 → SOLUSDT 请求自动使用
+└── ...
+
+MODEL_DIR=/home/ubuntu/ubuntu-wallet/models/ETHUSDT/current  ← legacy 兜底
+```
+
+- 若 `models/<SYMBOL>/current/` 存在 → 使用 per-symbol 模型
+- 若不存在 → 退回到 `MODEL_DIR`（默认指向 ETHUSDT）
+
+### 预测日志路径
+
+```
+DATA_DIR/                            (默认 ~/ubuntu-wallet/data/)
+├── BTCUSDT/predictions_log.jsonl   → BTCUSDT 预测日志
+├── ETHUSDT/predictions_log.jsonl   → ETHUSDT 预测日志
+└── ...
+```
+
+### 环境变量参考
+
+```bash
+# per-symbol 模型基目录（所有币种共用一个 ml-service 实例时）
+MODELS_BASE_DIR=~/ubuntu-wallet/models
+
+# legacy fallback（per-symbol 目录缺失时）
+MODEL_DIR=~/ubuntu-wallet/models/ETHUSDT/current
+
+# 数据目录
+DATA_DIR=~/ubuntu-wallet/data
+
+# 迁移期双写（同时写根级 predictions_log.jsonl）
+PREDICTIONS_LOG_ALSO_ROOT=0
+```
+
+### 多实例部署（可选）
+
+若希望为每个币种运行独立服务进程（例如需要端口隔离），仍可设置不同的 `MODEL_DIR`：
 
 ```bash
 # BTCUSDT 实例（端口 9001）
-MODEL_DIR=~/ubuntu-wallet/models/BTCUSDT/current \
+MODELS_BASE_DIR=~/ubuntu-wallet/models \
+  MODEL_DIR=~/ubuntu-wallet/models/BTCUSDT/current \
   uvicorn app:app --host 127.0.0.1 --port 9001
 
 # ETHUSDT 实例（端口 9002）
-MODEL_DIR=~/ubuntu-wallet/models/ETHUSDT/current \
+MODELS_BASE_DIR=~/ubuntu-wallet/models \
+  MODEL_DIR=~/ubuntu-wallet/models/ETHUSDT/current \
   uvicorn app:app --host 127.0.0.1 --port 9002
 ```
 

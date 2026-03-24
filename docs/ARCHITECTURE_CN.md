@@ -198,13 +198,13 @@
 
 ## 3.4 `ml-service/`
 - `app.py`
-  - 在线推理服务主入口
+  - 在线推理服务主入口；按请求 symbol 自动从 `models/<SYMBOL>/current/` 加载对应模型
 - `feature_builder.py`
-  - 在线推理特征构建
+  - 在线推理特征构建（读取 `data/<SYMBOL>/klines_*.json`）
 - `model_loader.py`
   - 模型加载、模型元数据处理、校准器加载
 - `prediction_logger.py`
-  - 预测结果日志记录
+  - 预测结果日志记录；按 symbol 路由到 `data/<SYMBOL>/predictions_log.jsonl`
 - `calibration.py`
   - 概率校准逻辑
 - `requirements.txt`
@@ -558,7 +558,12 @@ Go collector 应作为常驻 systemd 服务运行。
 # 5.9 prediction_logger.py
 
 ## 作用
-记录每次预测。
+记录每次预测；按 symbol 路由到 per-symbol 日志文件。
+
+## 日志路径规则
+- **symbol 非空**：写入 `data/<SYMBOL>/predictions_log.jsonl`
+- **symbol 为空**：退回根级路径 `data/predictions_log.jsonl`
+- **双写兼容**：设置 `PREDICTIONS_LOG_ALSO_ROOT=1` 可在写入 per-symbol 路径的同时额外写入根级路径（迁移期使用）
 
 ## 为什么它极其重要
 没有 prediction log，你就无法知道模型在真实时间里到底是否有效。

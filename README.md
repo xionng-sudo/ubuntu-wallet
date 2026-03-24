@@ -78,11 +78,11 @@ ubuntu-wallet/
 │   └── ...
 │
 ├── ml-service/                     # FastAPI 推理服务（端口 9000）
-│   ├── app.py                      # FastAPI 主入口（/predict, /healthz）
-│   ├── model_loader.py             # 模型加载逻辑（从 models/current/ 目录加载）
+│   ├── app.py                      # FastAPI 主入口（/predict, /healthz）；按 symbol 解析 per-symbol 模型目录
+│   ├── model_loader.py             # 模型加载逻辑（优先 models/<SYMBOL>/current/，退回 MODEL_DIR）
 │   ├── feature_builder.py          # 多周期特征构造 + schema 验证
 │   ├── calibration.py              # 概率校准
-│   ├── prediction_logger.py        # 预测日志（写入 data/predictions_log.jsonl）
+│   ├── prediction_logger.py        # 预测日志（写入 data/<SYMBOL>/predictions_log.jsonl）
 │   ├── requirements.txt            # Python 依赖
 │   └── README.md                   # 服务说明
 │
@@ -197,11 +197,11 @@ ubuntu-wallet/
 │    ├── POST /predict                            │
 │    ├── GET  /healthz                            │
 │    ├── feature_builder.py（特征构造）            │
-│    ├── model_loader.py（从 models/current/ 目录加载） │
+│    ├── model_loader.py（优先 models/<SYMBOL>/current/，退回 MODEL_DIR） │
 │    └── prediction_logger.py（写预测日志）        │
 │              │                                  │
 │              ▼                                  │
-│      data/predictions_log.jsonl                 │
+│      data/<SYMBOL>/predictions_log.jsonl        │
 └─────────────────────────────────────────────────┘
          │
          ▼
@@ -443,8 +443,9 @@ COLLECTOR_API_URL=http://localhost:8080
 
 # ── 路径配置 ──────────────────────────────────────────────
 
-DATA_DIR=./data               # K 线数据、预测日志存储路径
-# MODEL_DIR=./models/current  # ml-service 默认直接使用 models/current/ 目录（通常无需设置此变量）
+DATA_DIR=./data               # K 线数据、预测日志存储路径（per-symbol 数据在 data/<SYMBOL>/）
+# MODELS_BASE_DIR=./models    # ml-service per-symbol 模型基目录（BTCUSDT → models/BTCUSDT/current/）
+# MODEL_DIR=./models/ETHUSDT/current  # ml-service legacy 兜底目录（per-symbol 不存在时使用）
 ```
 
 **重要提示：**
@@ -452,7 +453,7 @@ DATA_DIR=./data               # K 线数据、预测日志存储路径
 - **绝对不要将真实 API Key 提交到 Git 仓库。** `.env` 文件已在 `.gitignore` 中排除。
 - 生产环境建议将敏感配置放到 `/etc/ubuntu-wallet/collector.env`（`600` 权限），通过 systemd 的 `EnvironmentFile=` 注入，而不是放在项目目录下的 `.env`。
 - API Key 只需要**读取行情**的权限，不需要交易权限（除非你要运行真实交易脚本）。
-- `MODEL_DIR` 默认指向 `models/current`（目录），ml-service 启动时直接从该目录加载模型文件。训练脚本每次训练完成后会将模型产物复制到 `models/current/` 目录，并将版本信息写入 `models/registry.json`。
+- `MODEL_DIR` 默认指向 `models/ETHUSDT/current`（目录），ml-service 启动时从该目录加载默认模型。若请求包含 `symbol` 字段，服务优先从 `models/<SYMBOL>/current/` 加载对应 per-symbol 模型。训练脚本每次训练完成后会将模型产物复制到 `models/<SYMBOL>/current/` 目录，并将版本信息写入 `models/registry.json`。
 - 如果 API Key 已经泄露，请立即在交易所管理后台撤销并重新生成。
 
 ---
@@ -637,7 +638,7 @@ cat /tmp/cv_report.csv
 | `feature_columns_event_v3.json` | 特征列名列表（用于 schema 验证） |
 | `model_meta.json` | 模型元信息（版本、训练时间、参数等） |
 
-训练脚本完成后将模型文件归档至 `models/archive/<版本目录>/`，同时复制到 `models/current/`（ml-service 默认从此目录加载），并将版本信息写入 `models/registry.json`。
+训练脚本完成后将模型文件归档至 `models/archive/<版本目录>/`，同时复制到 `models/<SYMBOL>/current/`（ml-service 优先从此目录加载对应 symbol 的模型），并将版本信息写入 `models/registry.json`。
 
 ---
 
@@ -751,9 +752,9 @@ ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py \
 ```bash
 # 旧式（仍然支持）
 python scripts/report_drift.py \
-  --train-stats models/current/train_feature_stats.json \
-  --log-path    data/predictions_log.jsonl \
-  --output-dir  data/reports
+  --train-stats models/ETHUSDT/current/train_feature_stats.json \
+  --log-path    data/ETHUSDT/predictions_log.jsonl \
+  --output-dir  data/ETHUSDT/reports
 ```
 
 ### 10.7 查看当前活跃模型
@@ -771,8 +772,8 @@ cat models/${SYMBOL}/current/model_meta.json | python3 -m json.tool
 
 `ml-service/` 是基于 FastAPI 的在线推理服务，提供以下功能：
 
-- 接收 K 线数据请求，构建多周期特征，调用模型输出 LONG/SHORT/FLAT 信号
-- 记录每次预测到 `data/predictions_log.jsonl`
+- 接收 K 线数据请求，构建多周期特征，按请求 symbol 从 `models/<SYMBOL>/current/` 加载对应模型并输出 LONG/SHORT/FLAT 信号
+- 记录每次预测到 `data/<SYMBOL>/predictions_log.jsonl`
 - 提供 `/healthz` 接口，报告模型状态
 
 ### 11.2 启动推理服务
@@ -802,7 +803,7 @@ curl -s http://127.0.0.1:9000/healthz | jq .
 #   "model_version": "event_v3:lightgbm:2026-03-12T16:46:11.648910Z:11439d248ae6",
 #   "calibration_available": true,
 #   "calibration_method": "isotonic",
-#   "model_dir": "/home/ubuntu/ubuntu-wallet/models/current",
+#   "model_dir": "/home/ubuntu/ubuntu-wallet/models/ETHUSDT/current",
 #   ...
 # }
 ```
@@ -825,7 +826,7 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 
 ### 11.5 预测日志格式
 
-每次预测结果会追加写入 `data/predictions_log.jsonl`，每行一条记录：
+每次预测结果会追加写入 `data/<SYMBOL>/predictions_log.jsonl`（例如 `data/BTCUSDT/predictions_log.jsonl`），每行一条记录：
 
 ```json
 {
@@ -964,8 +965,9 @@ cd ~/ubuntu-wallet
 source ml-service/.venv/bin/activate
 
 python scripts/evaluate_from_logs.py \
-  --log-path data/predictions_log.jsonl \
-  --data-dir data \
+  --symbol ETHUSDT \
+  --log-path data/ETHUSDT/predictions_log.jsonl \
+  --data-dir data/ETHUSDT \
   --interval 1h \
   --active-model event_v3 \
   --since 2026-03-09T00:00:00Z \
@@ -1168,8 +1170,9 @@ python scripts/backtest_event_v3_http.py \
 
 # ── 日志评估 ──────────────────────────────────────────────
 python scripts/evaluate_from_logs.py \
-  --log-path data/predictions_log.jsonl \
-  --data-dir data --interval 1h \
+  --symbol ETHUSDT \
+  --log-path data/ETHUSDT/predictions_log.jsonl \
+  --data-dir data/ETHUSDT --interval 1h \
   --threshold 0.55 --tp 0.0175 --sl 0.009 \
   --fee 0.0004 --horizon-bars 6
 
