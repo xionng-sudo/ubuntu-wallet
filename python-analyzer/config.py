@@ -27,7 +27,7 @@ COLLECTOR_API_URL = os.getenv("COLLECTOR_API_URL", "http://localhost:8080")
 DATA_DIR = os.getenv("DATA_DIR", os.path.join(_REPO_ROOT, "data"))
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.join(_REPO_ROOT, "models"))
 
-SYMBOL = "ETHUSDT"
+SYMBOL = os.getenv("SYMBOL", "ETHUSDT")
 TOP_TRADERS = 50
 TRADE_HISTORY = 100
 

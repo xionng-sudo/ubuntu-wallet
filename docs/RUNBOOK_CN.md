@@ -688,3 +688,123 @@ sudo systemctl status drift-monitor.timer
 sudo systemctl list-timers drift-monitor.timer
 journalctl -u drift-monitor.service -n 50 --no-pager
 ```
+
+---
+
+# 17. 多币种运维（Multi-Symbol）
+
+本节适用于同时运行多个交易对模型的部署场景。
+
+## 17.1 支持的币种与分阶段上线
+
+| 币种 | 阶段 | configs/symbols.yaml 中默认启用 |
+|------|------|-------------------------------|
+| BTCUSDT | Phase 1 | ✅ |
+| ETHUSDT | Phase 1 | ✅ |
+| SOLUSDT | Phase 1 | ✅ |
+| BNBUSDT | Phase 1 | ✅ |
+| XRPUSDT | Phase 2 | ❌ |
+| DOGEUSDT | Phase 2 | ❌ |
+| ADAUSDT | Phase 2 | ❌ |
+
+**激活 Phase 2 币种**：编辑 `configs/symbols.yaml`，将对应 `enabled: false` 改为 `enabled: true`，然后完成数据准备与初次训练后即可上线。
+
+## 17.2 每币种目录布局
+
+```
+data/
+  BTCUSDT/
+    klines_1h.json    klines_4h.json    klines_1d.json
+    predictions_log.jsonl
+    reports/
+  ETHUSDT/  ...
+
+models/
+  BTCUSDT/
+    current/           <- 活跃模型产物
+    archive/           <- 版本归档
+    registry.json
+  ETHUSDT/  ...
+```
+
+## 17.3 查看某币种当前模型
+
+```bash
+SYMBOL=BTCUSDT
+cat ~/ubuntu-wallet/models/${SYMBOL}/current/model_meta.json | python3 -m json.tool
+```
+
+## 17.4 按币种训练
+
+```bash
+# 方式一：使用便捷包装脚本（自动读取 configs/symbols.yaml 参数）
+bash ~/ubuntu-wallet/scripts/train_symbol.sh BTCUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh ETHUSDT
+
+# 方式二：手工指定路径（完整控制）
+SYMBOL=BTCUSDT
+python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
+  --data-dir  ~/ubuntu-wallet/data/${SYMBOL} \
+  --model-dir ~/ubuntu-wallet/models/${SYMBOL} \
+  --horizon 12 --tp-pct 0.0175 --sl-pct 0.009 --calibration isotonic
+```
+
+## 17.5 按币种评估预测日志
+
+```bash
+# 自动从 configs/symbols.yaml 派生路径和参数
+SYMBOL=BTCUSDT
+source ~/ubuntu-wallet/ml-service/.venv/bin/activate
+python ~/ubuntu-wallet/scripts/evaluate_from_logs.py --symbol ${SYMBOL}
+
+# 也可手工覆盖单个参数
+python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
+  --symbol ${SYMBOL} --threshold 0.68 --tp 0.020
+```
+
+## 17.6 按币种 Drift 监控
+
+```bash
+SYMBOL=BTCUSDT
+ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+  --symbol ${SYMBOL}
+# 等价于：
+#   --train-stats ~/ubuntu-wallet/models/${SYMBOL}/current/train_feature_stats.json
+#   --log-path    ~/ubuntu-wallet/data/${SYMBOL}/predictions_log.jsonl
+#   --output-dir  ~/ubuntu-wallet/data/${SYMBOL}/reports
+```
+
+## 17.7 批量操作所有启用币种
+
+```bash
+# 列出所有 enabled 币种
+python3 -c "
+import sys; sys.path.insert(0,'~/ubuntu-wallet/scripts')
+from symbol_paths import list_enabled_symbols
+print(list_enabled_symbols())
+"
+
+# 批量训练所有 Phase 1 币种
+for SYMBOL in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  echo "=== Training ${SYMBOL} ==="
+  bash ~/ubuntu-wallet/scripts/train_symbol.sh "${SYMBOL}"
+done
+
+# 批量 drift 检查
+for SYMBOL in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+    --symbol "${SYMBOL}"
+done
+```
+
+## 17.8 启用/禁用某币种
+
+1. 编辑 `~/ubuntu-wallet/configs/symbols.yaml`
+2. 修改目标币种的 `enabled: true/false`
+3. 如果禁用，对应 systemd 服务/计时器也应相应暂停或移除
+
+## 17.9 向后兼容说明
+
+旧式单币种路径（`data/klines_1h.json`、`models/current/`）仍然有效。
+如果只运行一个币种且不希望改变目录结构，可继续沿用旧路径，仅在需要多币种时迁移。
+

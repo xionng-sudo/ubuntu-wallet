@@ -106,22 +106,44 @@ def load_predictions(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--log-path", default="data/predictions_log.jsonl")
-    ap.add_argument("--data-dir", default="data")
-    ap.add_argument("--symbol", default=None, help="e.g. BTCUSDT; if None, do not filter by symbol")
-    ap.add_argument("--interval", default="1h")
+    ap = argparse.ArgumentParser(
+        description=(
+            "Evaluate live predictions from a JSONL log file. "
+            "When --symbol is given, --log-path, --data-dir, --threshold, --tp, --sl "
+            "and --horizon-bars are derived automatically from configs/symbols.yaml "
+            "unless explicitly overridden on the command line."
+        )
+    )
+    ap.add_argument(
+        "--log-path",
+        default=None,
+        help=(
+            "JSONL predictions log. "
+            "Defaults to data/<SYMBOL>/predictions_log.jsonl when --symbol is set, "
+            "otherwise data/predictions_log.jsonl."
+        ),
+    )
+    ap.add_argument(
+        "--data-dir",
+        default=None,
+        help=(
+            "Directory containing klines_*.json files. "
+            "Defaults to data/<SYMBOL> when --symbol is set, otherwise data/."
+        ),
+    )
+    ap.add_argument("--symbol", default=None, help="e.g. BTCUSDT; filters log by symbol and sets per-symbol defaults")
+    ap.add_argument("--interval", default=None, help="kline interval, e.g. 1h (default from symbol config or 1h)")
     ap.add_argument("--model-version", default=None)
     ap.add_argument("--active-model", default="event_v3")
     ap.add_argument("--since", default=None, help="ISO8601, e.g. 2026-03-01T00:00:00Z")
     ap.add_argument("--until", default=None)
 
-    ap.add_argument("--threshold", type=float, required=True, help="p_enter threshold, e.g. 0.55")
-    ap.add_argument("--tp", type=float, required=True, help="take profit pct, e.g. 0.0175 for 1.75%%")
-    ap.add_argument("--sl", type=float, required=True, help="stop loss pct, e.g. 0.009 for 0.9%%")
+    ap.add_argument("--threshold", type=float, default=None, help="p_enter threshold, e.g. 0.55 (default from symbol config)")
+    ap.add_argument("--tp", type=float, default=None, help="take profit pct, e.g. 0.0175 for 1.75%% (default from symbol config)")
+    ap.add_argument("--sl", type=float, default=None, help="stop loss pct, e.g. 0.009 for 0.9%% (default from symbol config)")
     ap.add_argument("--fee", type=float, default=0.0004)
     ap.add_argument("--slippage", type=float, default=0.0)
-    ap.add_argument("--horizon-bars", type=int, default=6)
+    ap.add_argument("--horizon-bars", type=int, default=None, help="forward look-ahead bars (default from symbol config or 6)")
     ap.add_argument("--tie-breaker", choices=["SL", "TP"], default="SL")
     ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
     ap.add_argument(
@@ -138,6 +160,48 @@ def main() -> int:
     )
 
     args = ap.parse_args()
+
+    # Resolve per-symbol defaults when --symbol is given
+    sym_cfg: dict = {}
+    if args.symbol:
+        _scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        if _scripts_dir not in sys.path:
+            sys.path.insert(0, _scripts_dir)
+        try:
+            from symbol_paths import (  # type: ignore[import]
+                get_symbol_config,
+                get_symbol_data_dir,
+                get_symbol_log_path,
+            )
+            sym_cfg = get_symbol_config(args.symbol)
+            if args.data_dir is None:
+                args.data_dir = get_symbol_data_dir(args.symbol)
+            if args.log_path is None:
+                args.log_path = get_symbol_log_path(args.symbol)
+        except ImportError:
+            pass
+
+    # Apply final defaults
+    if args.log_path is None:
+        args.log_path = "data/predictions_log.jsonl"
+    if args.data_dir is None:
+        args.data_dir = "data"
+    if args.interval is None:
+        args.interval = sym_cfg.get("interval", "1h")
+    if args.threshold is None:
+        args.threshold = sym_cfg.get("threshold")
+        if args.threshold is None:
+            ap.error("--threshold is required (or provide --symbol to derive from configs/symbols.yaml)")
+    if args.tp is None:
+        args.tp = sym_cfg.get("tp")
+        if args.tp is None:
+            ap.error("--tp is required (or provide --symbol to derive from configs/symbols.yaml)")
+    if args.sl is None:
+        args.sl = sym_cfg.get("sl")
+        if args.sl is None:
+            ap.error("--sl is required (or provide --symbol to derive from configs/symbols.yaml)")
+    if args.horizon_bars is None:
+        args.horizon_bars = sym_cfg.get("horizon", 6)
 
     # 1h K 线
     klines = load_klines_1h(f"{args.data_dir.rstrip('/')}/klines_1h.json")

@@ -1491,3 +1491,107 @@ ENABLE_CALIB_REPORT=true    # 启用校准报告
 ```
 
 上线后建议同时启用这两个 flag 以持续监测模型健康。
+
+---
+
+# 17. 多币种模型管理
+
+## 17.1 每币种模型目录结构
+
+```
+models/
+  BTCUSDT/
+    current/
+      lightgbm_event_v3.pkl
+      xgboost_event_v3.json
+      stacking_event_v3.pkl
+      feature_columns_event_v3.json
+      train_feature_stats.json        <- drift monitor 所需
+      model_meta.json                 <- 训练元数据（trained_at, threshold, tp, sl 等）
+      calibration_event_v3.pkl
+    archive/
+      event_v3-<timestamp>/           <- 每次训练后归档
+    registry.json                     <- 版本注册表
+
+  ETHUSDT/
+    current/  archive/  registry.json
+  SOLUSDT/
+    ...
+```
+
+## 17.2 训练单个币种
+
+```bash
+# 使用便捷包装脚本（推荐）
+bash scripts/train_symbol.sh BTCUSDT
+
+# 手工训练（完整控制）
+SYMBOL=BTCUSDT
+python python-analyzer/train_event_stack_v3.py \
+  --data-dir  data/${SYMBOL} \
+  --model-dir models/${SYMBOL} \
+  --horizon 12 --tp-pct 0.0175 --sl-pct 0.009 --calibration isotonic
+```
+
+## 17.3 查看某币种活跃模型
+
+```bash
+SYMBOL=BTCUSDT
+# 查看模型元数据
+cat models/${SYMBOL}/current/model_meta.json | python3 -m json.tool
+
+# 查看版本注册表
+cat models/${SYMBOL}/registry.json | python3 -m json.tool
+
+# 查看特征统计（用于 drift 监控）
+python3 -c "
+import json
+with open('models/${SYMBOL}/current/train_feature_stats.json') as f:
+    d = json.load(f)
+print('feature count:', len(d))
+k = next(iter(d)); print('sample:', k, d[k])
+"
+```
+
+## 17.4 回滚某币种模型
+
+```bash
+# 使用回滚脚本
+SYMBOL=BTCUSDT
+python scripts/rollback_model.py \
+  --model-dir models/${SYMBOL} \
+  --target-version event_v3-<timestamp>
+```
+
+## 17.5 per-symbol 配置（configs/symbols.yaml）
+
+每个币种的训练参数在 `configs/symbols.yaml` 中定义：
+
+```yaml
+symbols:
+  BTCUSDT:
+    enabled: true
+    interval: "1h"
+    threshold: 0.65     # p_enter
+    tp: 0.0175          # take-profit
+    sl: 0.009           # stop-loss
+    horizon: 12         # 标签前向看 12 根 bar
+    calibration: "isotonic"
+```
+
+修改这些参数后，需要**重新训练**对应币种的模型，新的 `model_meta.json` 才会反映更新后的配置。
+
+## 17.6 分阶段上线
+
+| 阶段 | 币种 | 状态 |
+|------|------|------|
+| Phase 1 | BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT | `enabled: true` — 已激活 |
+| Phase 2 | XRPUSDT, DOGEUSDT, ADAUSDT | `enabled: false` — 待激活 |
+
+**激活流程**（以 XRPUSDT 为例）：
+1. 确认 go-collector 已在采集 XRPUSDT 数据（1h/4h/1d）
+2. 等待足够数据（建议 ≥ 1000 根 1h K 线）
+3. 在 `configs/symbols.yaml` 中设置 `XRPUSDT.enabled: true`
+4. 执行 `bash scripts/train_symbol.sh XRPUSDT`
+5. 验证模型产物：`ls models/XRPUSDT/current/`
+6. 手工验证 drift monitor：`ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py --symbol XRPUSDT --dry-run`

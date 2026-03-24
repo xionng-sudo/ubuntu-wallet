@@ -1033,3 +1033,126 @@ sudo systemctl restart ml-service go-collector
 - 脚本：`python-analyzer/calibration_report.py`
 - systemd：`systemd/calibration-report.service` / `systemd/calibration-report.timer`
 - 输出：`data/reports/calib_report_YYYY-MM-DD.{json,md,png}`
+
+---
+
+# 22. 多币种部署（Multi-Symbol）
+
+## 22.1 架构原则
+
+- **共用代码**：训练脚本、推理服务、评估脚本完全共享，不为每个币种单独维护一套代码。
+- **数据隔离**：每个币种有独立的 `data/<SYMBOL>/` 目录。
+- **模型隔离**：每个币种有独立的 `models/<SYMBOL>/` 目录（含 `current/`、`archive/`、`registry.json`）。
+- **配置隔离**：`configs/symbols.yaml` 文件为每个币种单独配置 threshold/tp/sl/horizon/calibration。
+
+## 22.2 分阶段上线计划
+
+| 阶段 | 币种 | 默认启用 |
+|------|------|---------|
+| Phase 1（初始上线）| BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT | `enabled: true` |
+| Phase 2（灰度扩展）| XRPUSDT, DOGEUSDT, ADAUSDT | `enabled: false`（手动激活）|
+
+## 22.3 激活新币种（Phase 2 示例）
+
+```bash
+# 1. 编辑配置文件，将 enabled: false 改为 true
+nano ~/ubuntu-wallet/configs/symbols.yaml
+# 修改目标币种: enabled: true
+
+# 2. 准备数据目录
+mkdir -p ~/ubuntu-wallet/data/XRPUSDT
+mkdir -p ~/ubuntu-wallet/models/XRPUSDT
+
+# 3. 确保 go-collector 已在采集该币种数据
+# (需在 go-collector 配置中添加该币种，具体见 go-collector/OPS-NOTES.md)
+
+# 4. 等待数据积累（建议至少 1000 根 1h K 线），然后初次训练
+bash ~/ubuntu-wallet/scripts/train_symbol.sh XRPUSDT
+
+# 5. 验证训练产物
+ls ~/ubuntu-wallet/models/XRPUSDT/current/
+cat ~/ubuntu-wallet/models/XRPUSDT/current/model_meta.json | python3 -m json.tool
+```
+
+## 22.4 每币种训练命令
+
+```bash
+# 使用便捷包装脚本（推荐）
+bash ~/ubuntu-wallet/scripts/train_symbol.sh BTCUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh ETHUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh SOLUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh BNBUSDT
+
+# 手工训练（完整控制）
+SYMBOL=BTCUSDT
+python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
+  --data-dir  ~/ubuntu-wallet/data/${SYMBOL} \
+  --model-dir ~/ubuntu-wallet/models/${SYMBOL} \
+  --horizon 12 --tp-pct 0.0175 --sl-pct 0.009 --calibration isotonic
+```
+
+## 22.5 每币种评估命令
+
+```bash
+# 新式（推荐）：从 configs/symbols.yaml 自动派生所有参数
+SYMBOL=BTCUSDT
+python ~/ubuntu-wallet/scripts/evaluate_from_logs.py --symbol ${SYMBOL}
+
+# 旧式（向后兼容）：手工指定全部参数
+python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
+  --symbol ${SYMBOL} \
+  --log-path  ~/ubuntu-wallet/data/${SYMBOL}/predictions_log.jsonl \
+  --data-dir  ~/ubuntu-wallet/data/${SYMBOL} \
+  --threshold 0.65 --tp 0.0175 --sl 0.009 --horizon-bars 12
+```
+
+## 22.6 每币种 Drift 监控命令
+
+```bash
+SYMBOL=BTCUSDT
+ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+  --symbol ${SYMBOL}
+
+# 等价于：
+# python ~/ubuntu-wallet/scripts/report_drift.py \
+#   --train-stats ~/ubuntu-wallet/models/${SYMBOL}/current/train_feature_stats.json \
+#   --log-path    ~/ubuntu-wallet/data/${SYMBOL}/predictions_log.jsonl \
+#   --output-dir  ~/ubuntu-wallet/data/${SYMBOL}/reports
+```
+
+## 22.7 部署后每币种验证清单
+
+对每个新上线的币种，依次执行：
+
+```bash
+SYMBOL=BTCUSDT
+
+# 1. 检查模型产物是否完整
+ls ~/ubuntu-wallet/models/${SYMBOL}/current/
+# 期望文件：lightgbm_event_v3.pkl, xgboost_event_v3.json, stacking_event_v3.pkl,
+#            feature_columns_event_v3.json, train_feature_stats.json, model_meta.json
+
+# 2. 检查 model_meta.json
+cat ~/ubuntu-wallet/models/${SYMBOL}/current/model_meta.json | python3 -m json.tool
+
+# 3. 验证 train_feature_stats.json 格式
+python3 -c "
+import json
+p = '~/ubuntu-wallet/models/${SYMBOL}/current/train_feature_stats.json'.replace('~', __import__('os').path.expanduser('~'))
+with open(p) as f: d = json.load(f)
+k = next(iter(d))
+print('features:', len(d), 'sample:', k, d[k])
+"
+
+# 4. 手工跑一次 drift 报告（dry-run）
+ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+  --symbol ${SYMBOL} --dry-run
+
+# 5. 手工跑一次评估
+python ~/ubuntu-wallet/scripts/evaluate_from_logs.py --symbol ${SYMBOL}
+```
+
+## 22.8 向后兼容说明
+
+现有的单币种路径（`data/klines_1h.json`、`models/current/`）不受影响。
+所有脚本在不传 `--symbol` 时行为与之前完全相同。

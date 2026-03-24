@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """Feature drift monitor: compare training distribution to recent live distribution.
 
-Usage:
+Usage (explicit paths):
   python scripts/report_drift.py --help
   python scripts/report_drift.py --train-stats models/current/train_feature_stats.json \\
       --log-path data/predictions_log.jsonl --output-dir data/reports
+
+Usage (per-symbol mode — paths derived automatically from configs/symbols.yaml):
+  python scripts/report_drift.py --symbol BTCUSDT
+  python scripts/report_drift.py --symbol ETHUSDT --output-dir data/ETHUSDT/reports
+
+  When --symbol is given, --train-stats defaults to
+      models/<SYMBOL>/current/train_feature_stats.json
+  and --log-path defaults to
+      data/<SYMBOL>/predictions_log.jsonl
+  and --output-dir defaults to
+      data/<SYMBOL>/reports
 
 Controlled by ENABLE_DRIFT_MONITOR env var. If set to "false", exits 0 with no-op message.
 
@@ -279,19 +290,34 @@ def _parse_args() -> argparse.Namespace:
         epilog=__doc__,
     )
     parser.add_argument(
+        "--symbol",
+        default=None,
+        help=(
+            "Trading pair symbol (e.g. BTCUSDT).  When provided, --train-stats, "
+            "--log-path and --output-dir are derived automatically from "
+            "configs/symbols.yaml path conventions unless explicitly overridden."
+        ),
+    )
+    parser.add_argument(
         "--train-stats",
-        required=True,
-        help="JSON file with per-feature mean/std/missing_rate from training.",
+        default=None,
+        help=(
+            "JSON file with per-feature mean/std/missing_rate from training. "
+            "Required unless --symbol is given."
+        ),
     )
     parser.add_argument(
         "--log-path",
-        required=True,
-        help="JSONL predictions log file (data/predictions_log.jsonl).",
+        default=None,
+        help=(
+            "JSONL predictions log file. "
+            "Required unless --symbol is given."
+        ),
     )
     parser.add_argument(
         "--output-dir",
-        default="data/reports",
-        help="Directory to write drift_YYYY-MM-DD.{json,md} (default: data/reports).",
+        default=None,
+        help="Directory to write drift_YYYY-MM-DD.{json,md} (default: data/reports or data/<SYMBOL>/reports).",
     )
     parser.add_argument(
         "--window-rows",
@@ -314,18 +340,54 @@ def main() -> None:
         print("ENABLE_DRIFT_MONITOR=false, skipping.")
         sys.exit(0)
 
-    if not os.path.exists(args.train_stats):
-        print(f"ERROR: train-stats file not found: {args.train_stats}", file=sys.stderr)
+    # Resolve per-symbol defaults when --symbol is provided
+    train_stats = args.train_stats
+    log_path = args.log_path
+    output_dir = args.output_dir
+
+    if args.symbol:
+        _scripts_dir = os.path.dirname(os.path.abspath(__file__))
+        if _scripts_dir not in sys.path:
+            sys.path.insert(0, _scripts_dir)
+        try:
+            from symbol_paths import (  # type: ignore[import]
+                get_symbol_train_stats_path,
+                get_symbol_log_path,
+                get_symbol_reports_dir,
+            )
+            if train_stats is None:
+                train_stats = get_symbol_train_stats_path(args.symbol)
+            if log_path is None:
+                log_path = get_symbol_log_path(args.symbol)
+            if output_dir is None:
+                output_dir = get_symbol_reports_dir(args.symbol)
+        except ImportError:
+            pass  # symbol_paths not available; fall through to error below
+
+    # Apply legacy default for output_dir when no symbol was given
+    if output_dir is None:
+        output_dir = "data/reports"
+
+    if train_stats is None:
+        print("ERROR: --train-stats is required (or provide --symbol to derive path automatically).", file=sys.stderr)
         sys.exit(1)
 
-    if not os.path.exists(args.log_path):
-        print(f"ERROR: log-path not found: {args.log_path}", file=sys.stderr)
+    if log_path is None:
+        print("ERROR: --log-path is required (or provide --symbol to derive path automatically).", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.exists(train_stats):
+        print(f"ERROR: train-stats file not found: {train_stats}", file=sys.stderr)
+        sys.exit(1)
+
+    if not os.path.exists(log_path):
+        print(f"ERROR: log-path not found: {log_path}", file=sys.stderr)
         sys.exit(1)
 
     run_drift_report(
-        train_stats_path=args.train_stats,
-        log_path=args.log_path,
-        output_dir=args.output_dir,
+        train_stats_path=train_stats,
+        log_path=log_path,
+        output_dir=output_dir,
         window_rows=args.window_rows,
         dry_run=args.dry_run,
     )
