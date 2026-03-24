@@ -336,6 +336,25 @@ def train_event_v3(
     # --- save model artifacts ---
     os.makedirs(model_dir, exist_ok=True)
 
+    # --- train feature stats (for drift monitoring) ---
+    # Computed from the raw (pre-scaling) training portion of the feature DataFrame
+    # so that live feature distributions can be compared against training baselines.
+    _train_df = merged_valid.iloc[:split][feature_cols]
+    _train_stats: dict = {}
+    for _col in feature_cols:
+        _col_series = _train_df[_col]
+        _n_total = len(_col_series)
+        _valid_vals = _col_series.dropna()
+        _train_stats[_col] = {
+            "mean": round(float(_valid_vals.mean()), 6) if not _valid_vals.empty else 0.0,
+            "std": round(float(_valid_vals.std(ddof=0)), 6) if not _valid_vals.empty else 0.0,  # population std
+            "missing_rate": round(float(_col_series.isna().sum()) / _n_total, 6) if _n_total > 0 else 0.0,
+        }
+    _train_stats_path = os.path.join(model_dir, "train_feature_stats.json")
+    with open(_train_stats_path, "w", encoding="utf-8") as _f:
+        json.dump(_train_stats, _f, indent=2)
+    print(f"[train_event_v3] saved {_train_stats_path} ({len(feature_cols)} features)")
+
     # LightGBM: joblib pkl (no version-mismatch issue for lgb)
     lgb_model_path = os.path.join(model_dir, "lightgbm_event_v3.pkl")
     lgb_scaler_path = os.path.join(model_dir, "lightgbm_event_v3_scaler.pkl")
@@ -525,6 +544,7 @@ _ARTIFACT_FILES = [
     "stacking_event_v3.pkl",
     "feature_columns_event_v3.json",
     "calibration_event_v3.pkl",
+    "train_feature_stats.json",
 ]
 
 

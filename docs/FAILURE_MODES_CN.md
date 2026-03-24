@@ -778,7 +778,7 @@ systemd 运行用户和手工用户不同。
 1. 手动验证：
    ```bash
    ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py \
-     --train-stats data/models/current/train_feature_stats.json \
+     --train-stats models/current/train_feature_stats.json \
      --log-path data/predictions_log.jsonl \
      --output-dir data/reports \
      --dry-run

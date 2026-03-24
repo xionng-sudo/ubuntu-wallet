@@ -657,7 +657,7 @@ sudo systemctl restart ml-service
 ```bash
 source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
-  --train-stats ~/ubuntu-wallet/data/models/current/train_feature_stats.json \
+  --train-stats ~/ubuntu-wallet/models/current/train_feature_stats.json \
   --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
   --output-dir ~/ubuntu-wallet/data/reports \
   --dry-run

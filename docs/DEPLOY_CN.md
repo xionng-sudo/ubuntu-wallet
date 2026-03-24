@@ -1026,7 +1026,7 @@ sudo systemctl restart ml-service go-collector
 - 脚本：`scripts/report_drift.py`
 - systemd：`systemd/drift-monitor.service` / `systemd/drift-monitor.timer`
 - 输出：`data/reports/drift_YYYY-MM-DD.{json,md}`
-- 训练统计：`data/models/current/train_feature_stats.json`（由训练脚本生成）
+- 训练统计：`models/current/train_feature_stats.json`（由训练脚本生成）
 
 ### 21.5 Calibration Report 相关文件
 

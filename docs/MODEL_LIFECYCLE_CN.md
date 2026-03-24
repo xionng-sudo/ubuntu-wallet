@@ -1449,7 +1449,7 @@ sudo swapon /swapfile
 - 手动：`ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py --help`
 
 **所需文件**：
-- `data/models/current/train_feature_stats.json`：训练时各特征 mean/std/missing_rate（由训练脚本生成）
+- `models/current/train_feature_stats.json`：训练时各特征 mean/std/missing_rate（由训练脚本生成）
 - `data/predictions_log.jsonl`：线上预测日志
 
 **输出**：
