@@ -167,6 +167,9 @@ ubuntu-wallet/
 │  data/BTCUSDT/klines_1h.json (等)               │
 │  data/ETHUSDT/klines_1h.json (等)               │
 │  data/SOLUSDT/ data/BNBUSDT/ ...               │
+│                                                 │
+│  每 FAST 周期（默认 60s）自动为所有已启用交易对发送  │
+│  POST /predict → data/<SYMBOL>/predictions_log  │
 └─────────────────────────────────────────────────┘
          │
          ▼
@@ -757,7 +760,31 @@ python scripts/report_drift.py \
   --output-dir  data/ETHUSDT/reports
 ```
 
-### 10.7 查看当前活跃模型
+### 10.7 自动在线预测（Automatic Online Prediction）
+
+go-collector 的 FAST 收集周期（默认 **60 秒**）完成后，会自动对**所有已启用的交易对**调用 ml-service `/predict`，并由 ml-service 写入各自的预测日志。
+
+```
+每 60s:
+  go-collector → POST /predict (symbol=ETHUSDT) → data/ETHUSDT/predictions_log.jsonl
+  go-collector → POST /predict (symbol=BTCUSDT) → data/BTCUSDT/predictions_log.jsonl
+  go-collector → POST /predict (symbol=SOLUSDT) → data/SOLUSDT/predictions_log.jsonl
+  go-collector → POST /predict (symbol=BNBUSDT) → data/BNBUSDT/predictions_log.jsonl
+```
+
+**不需要**手动 curl 或额外 cron job。如果 ml-service 暂时不可用，go-collector 会自动降级到规则引擎，并在下一个周期重试。
+
+验证：
+
+```bash
+# 系统运行 2 分钟后检查各交易对预测日志
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  echo -n "$sym: "
+  stat -c '%y' data/$sym/predictions_log.jsonl 2>/dev/null || echo "NOT FOUND"
+done
+```
+
+### 10.8 查看当前活跃模型
 
 ```bash
 SYMBOL=BTCUSDT

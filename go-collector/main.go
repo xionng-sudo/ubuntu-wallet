@@ -370,99 +370,145 @@ func collectSlowAll(dataDir string, binance *collector.BinanceCollector, okx *co
 	log.Info("SLOW data collection completed successfully!")
 }
 
+// computeAndPersistFeaturesAndSignals computes features + signals for the primary
+// symbol (backward-compatible root paths) and then for every other enabled symbol
+// (per-symbol sub-directory: dataDir/<SYMBOL>).  Each symbol's FeatureSnapshot is
+// sent to ml-service via MLOrFallback so that ml-service writes the per-symbol
+// prediction log at data/<SYMBOL>/predictions_log.jsonl automatically.
 func computeAndPersistFeaturesAndSignals(dataDir string) {
-	// copy needed data under lock, compute outside lock
+	if len(runtimeFeatureColumns) == 0 {
+		log.Warn("Feature schema columns not loaded; skip feature compute")
+		return
+	}
+
+	// Snapshot all klines and trades under a single read-lock for consistency.
 	store.mu.RLock()
-	kl1h := append([]models.OHLCV(nil), store.Klines["1h"]...)
-	kl4h := append([]models.OHLCV(nil), store.Klines["4h"]...)
-	kl1d := append([]models.OHLCV(nil), store.Klines["1d"]...)
-	// deep-copy trades
+	klinesCopy := make(map[string][]models.OHLCV, len(store.Klines))
+	for k, v := range store.Klines {
+		klinesCopy[k] = append([]models.OHLCV(nil), v...)
+	}
 	tradesCopy := make(map[string][]models.Trade, len(store.Trades))
 	for k, v := range store.Trades {
-		vc := append([]models.Trade(nil), v...)
-		tradesCopy[k] = vc
+		tradesCopy[k] = append([]models.Trade(nil), v...)
 	}
 	store.mu.RUnlock()
 
+	// Primary symbol first: uses root dataDir for backward-compat signal paths
+	// and updates the in-memory store.
+	computeSymbolFeaturesAndSignals(dataDir, runtimePrimarySymbol, true, klinesCopy, tradesCopy)
+
+	// All other enabled symbols: each writes to dataDir/<SYMBOL>/signals/ and
+	// triggers an independent POST /predict to ml-service.
+	for _, sym := range runtimeSymbols {
+		if sym == runtimePrimarySymbol {
+			continue
+		}
+		// Small delay between symbols to avoid bursting ml-service.
+		time.Sleep(200 * time.Millisecond)
+		computeSymbolFeaturesAndSignals(dataDir, sym, false, klinesCopy, tradesCopy)
+	}
+}
+
+// computeSymbolFeaturesAndSignals computes features and rules/ML signals for one
+// symbol and persists the results.
+//
+//   - isPrimary=true:  klines read from legacy keys ("1h", "4h", "1d"), results
+//     written to dataDir (root), in-memory store updated.
+//   - isPrimary=false: klines read from per-symbol keys ("SYM/1h", etc.), results
+//     written to dataDir/<SYMBOL>.
+//
+// In both cases MLOrFallback issues a POST /predict that carries the correct
+// symbol, so ml-service writes data/<SYMBOL>/predictions_log.jsonl.
+func computeSymbolFeaturesAndSignals(dataDir, sym string, isPrimary bool, klinesCopy map[string][]models.OHLCV, tradesCopy map[string][]models.Trade) {
+	var kl1h, kl4h, kl1d []models.OHLCV
+	if isPrimary {
+		// Legacy keys kept for backward compat (also set by collectMarketData).
+		kl1h = klinesCopy["1h"]
+		kl4h = klinesCopy["4h"]
+		kl1d = klinesCopy["1d"]
+	} else {
+		kl1h = klinesCopy[sym+"/1h"]
+		kl4h = klinesCopy[sym+"/4h"]
+		kl1d = klinesCopy[sym+"/1d"]
+	}
+
 	if len(kl1h) < 2 {
-		log.Warn("Not enough 1h klines to compute features")
+		log.Warnf("[%s] Not enough 1h klines to compute features", sym)
 		return
+	}
+
+	// Target directory for signal/feature files.
+	symDataDir := dataDir
+	if !isPrimary {
+		symDataDir = filepath.Join(dataDir, sym)
 	}
 
 	now := time.Now().UTC()
 	flow1h := aggregateTraderFlow(tradesCopy, now, 1*time.Hour)
 	flow4h := aggregateTraderFlow(tradesCopy, now, 4*time.Hour)
 	flow1d := aggregateTraderFlow(tradesCopy, now, 24*time.Hour)
-	if len(runtimeFeatureColumns) == 0 {
-		log.Warn("Feature schema columns not loaded; skip feature compute")
-		return
-	}
+
 	snap, err := features.ComputeSnapshot(
-		runtimePrimarySymbol, "1h",
+		sym, "1h",
 		kl1h, kl4h, kl1d,
 		runtimeFeatureColumns,
 		flow1h, flow4h, flow1d,
 		now,
 	)
 	if err != nil {
-		log.Warnf("ComputeSnapshot failed: %v", err)
+		log.Warnf("[%s] ComputeSnapshot failed: %v", sym, err)
 		return
 	}
 
-	if _, err := features.WriteLatest(dataDir, snap); err != nil {
-		log.Warnf("features.WriteLatest failed: %v", err)
+	if _, err := features.WriteLatest(symDataDir, snap); err != nil {
+		log.Warnf("[%s] features.WriteLatest failed: %v", sym, err)
 	}
-	if _, err := features.AppendHistory(dataDir, snap); err != nil {
-		log.Warnf("features.AppendHistory failed: %v", err)
+	if _, err := features.AppendHistory(symDataDir, snap); err != nil {
+		log.Warnf("[%s] features.AppendHistory failed: %v", sym, err)
 	}
-	log.Infof("Feature snapshot aligned: schema=%d computed=%d missing=%d",
-		snap.SchemaColumns, snap.ComputedCols, snap.MissingCols)
+	log.Infof("[%s] Feature snapshot aligned: schema=%d computed=%d missing=%d",
+		sym, snap.SchemaColumns, snap.ComputedCols, snap.MissingCols)
 
 	// === RULES ===
 	rulesRes := signal.RulesEngine(snap)
 
-	// New: split latest
-	if _, err := signal.WriteLatestRules(dataDir, &rulesRes); err != nil {
-		log.Warnf("signal.WriteLatestRules failed: %v", err)
+	if _, err := signal.WriteLatestRules(symDataDir, &rulesRes); err != nil {
+		log.Warnf("[%s] signal.WriteLatestRules failed: %v", sym, err)
+	}
+	if _, err := signal.AppendHistory(symDataDir, &rulesRes); err != nil {
+		log.Warnf("[%s] signal.AppendHistory(rules) failed: %v", sym, err)
 	}
 
-	// history (rules)
-	if _, err := signal.AppendHistory(dataDir, &rulesRes); err != nil {
-		log.Warnf("signal.AppendHistory(rules) failed: %v", err)
-	}
-
-	// === ML (or fallback) ===
+	// === ML (or fallback) — triggers POST /predict on ml-service ===
 	mlRes := signal.MLOrFallback(context.Background(), snap)
 
-	// New: split latest
-	if _, err := signal.WriteLatestML(dataDir, &mlRes); err != nil {
-		log.Warnf("signal.WriteLatestML failed: %v", err)
+	if _, err := signal.WriteLatestML(symDataDir, &mlRes); err != nil {
+		log.Warnf("[%s] signal.WriteLatestML failed: %v", sym, err)
+	}
+	// Backward-compatible "latest" signal file (ML result or rules fallback).
+	if _, err := signal.WriteLatest(symDataDir, &mlRes); err != nil {
+		log.Warnf("[%s] signal.WriteLatest(ml->compat latest) failed: %v", sym, err)
+	}
+	if _, err := signal.AppendHistory(symDataDir, &mlRes); err != nil {
+		log.Warnf("[%s] signal.AppendHistory(ml) failed: %v", sym, err)
 	}
 
-	// Backward compatible latest: point it to "final" signal (ML or fallback)
-	if _, err := signal.WriteLatest(dataDir, &mlRes); err != nil {
-		log.Warnf("signal.WriteLatest(ml->compat latest) failed: %v", err)
-	}
-
-	// history (ml)
-	if _, err := signal.AppendHistory(dataDir, &mlRes); err != nil {
-		log.Warnf("signal.AppendHistory(ml) failed: %v", err)
-	}
-
-	// NEW: collector health/debug prediction log (optional)
-	// If set, write ML result into the JSONL file (one line per run).
-	if hp := strings.TrimSpace(os.Getenv("COLLECTOR_PREDICT_HEALTH_LOG_PATH")); hp != "" {
-		if _, err := signal.AppendJSONL(hp, &mlRes); err != nil {
-			log.Warnf("signal.AppendJSONL(health) failed: %v", err)
+	if isPrimary {
+		// Collector health/debug log — only written for primary symbol to keep
+		// backward compatibility with consumers that expect a single-symbol log.
+		if hp := strings.TrimSpace(os.Getenv("COLLECTOR_PREDICT_HEALTH_LOG_PATH")); hp != "" {
+			if _, err := signal.AppendJSONL(hp, &mlRes); err != nil {
+				log.Warnf("[%s] signal.AppendJSONL(health) failed: %v", sym, err)
+			}
 		}
-	}
 
-	// update in-memory latest
-	store.mu.Lock()
-	store.LatestFeatures1H = snap
-	store.LatestSignalRules = &rulesRes
-	store.LatestSignalML = &mlRes
-	store.mu.Unlock()
+		// Update in-memory latest (primary symbol only; used by /api/signal).
+		store.mu.Lock()
+		store.LatestFeatures1H = snap
+		store.LatestSignalRules = &rulesRes
+		store.LatestSignalML = &mlRes
+		store.mu.Unlock()
+	}
 }
 
 func collectBinanceData(bn *collector.BinanceCollector) {

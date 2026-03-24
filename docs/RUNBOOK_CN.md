@@ -162,12 +162,24 @@ journalctl -u ml-service -n 50 --no-pager
 ---
 
 ## 3.4 prediction log 检查
-查看（以 ETHUSDT 为例）：
-- `data/ETHUSDT/predictions_log.jsonl`
+查看各已启用交易对的预测日志（go-collector 每 FAST 周期自动触发，默认 60s）：
+
+```bash
+# 快速检查所有 Phase 1 交易对的预测日志时间戳
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  echo -n "$sym: "
+  stat -c '%y' ~/ubuntu-wallet/data/$sym/predictions_log.jsonl 2>/dev/null || echo "not found"
+done
+
+# 查看各交易对最新预测条目
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  echo "=== $sym ===" && tail -n 1 ~/ubuntu-wallet/data/$sym/predictions_log.jsonl 2>/dev/null || true
+done
+```
 
 重点看：
-- 是否持续追加
-- 最新记录时间是否合理
+- 是否持续追加（所有已启用交易对均有日志）
+- 最新记录时间是否合理（距当前不超过 2 分钟）
 - 字段是否完整
 - 是否有大量空值
 
@@ -812,4 +824,41 @@ done
 **预测日志**：ml-service 默认写入 `data/<SYMBOL>/predictions_log.jsonl`。若需同时写根级 `data/predictions_log.jsonl`，可设置 `PREDICTIONS_LOG_ALSO_ROOT=1`（迁移期使用）。
 
 离线脚本可通过 `--log-path` / `--train-stats` 等参数显式指定路径，向后兼容行为不变。
+
+## 17.10 自动在线预测（Automatic Online Prediction）
+
+go-collector 的 FAST 收集周期（默认 60s）会对**所有已启用的交易对**自动发送 `POST /predict`。  
+无需手动 curl，也无需额外 cron job。
+
+**调用链**（每 60s 执行一次）：
+```
+go-collector FAST ticker
+  └── collectFastAll()
+        └── computeAndPersistFeaturesAndSignals()
+              ├── computeSymbolFeaturesAndSignals(primary, ...) → POST /predict?symbol=ETHUSDT
+              ├── computeSymbolFeaturesAndSignals(BTCUSDT, ...) → POST /predict?symbol=BTCUSDT
+              ├── computeSymbolFeaturesAndSignals(SOLUSDT, ...) → POST /predict?symbol=SOLUSDT
+              └── computeSymbolFeaturesAndSignals(BNBUSDT, ...) → POST /predict?symbol=BNBUSDT
+```
+
+每次 `/predict` 调用后，ml-service 将预测结果追加至：
+- `data/ETHUSDT/predictions_log.jsonl`
+- `data/BTCUSDT/predictions_log.jsonl`
+- `data/SOLUSDT/predictions_log.jsonl`
+- `data/BNBUSDT/predictions_log.jsonl`
+
+**ml-service 不可用时**：go-collector 自动降级到规则引擎（`RulesEngine`），该交易对的信号仍会持久化，但不会写 predictions_log。下一个周期会重试。
+
+**验证所有交易对均有自动预测**：
+```bash
+# 等待 2 分钟后检查
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  echo -n "$sym: "
+  stat -c '%y' ~/ubuntu-wallet/data/$sym/predictions_log.jsonl 2>/dev/null || echo "NOT FOUND"
+done
+
+# 查看 go-collector 日志中每个交易对的特征计算行
+journalctl -u go-collector.service --since "5 minutes ago" | grep "Feature snapshot aligned"
+```
+
 

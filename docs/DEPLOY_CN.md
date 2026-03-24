@@ -703,10 +703,19 @@ Mar 15 10:00:00 ubuntu python[12345]: INFO:     Uvicorn running on http://127.0.
 - [ ] 推理不报错
 
 ## 15.3 prediction log 验证
-- [ ] 调一次 `/predict` 后有日志写入
+- [ ] 系统正常运行约 2 分钟后，所有已启用交易对均已产生 predictions_log.jsonl
+- [ ] go-collector 日志中可见各交易对的 `Feature snapshot aligned` 行
 - [ ] 字段完整
-- [ ] 时间正确
+- [ ] 时间正确（距当前不超过 2 分钟）
 - [ ] 阈值字段正确
+
+验证命令：
+```bash
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  echo -n "$sym: "
+  stat -c '%y' ~/ubuntu-wallet/data/$sym/predictions_log.jsonl 2>/dev/null || echo "NOT FOUND"
+done
+```
 
 ## 15.4 evaluate timer 验证
 - [ ] timer 正常触发
@@ -857,16 +866,28 @@ journalctl -u ml-service -n 200 --no-pager
 ---
 
 ## 18.5 prediction log 不写
-### ���见原因
-- 日志目录不存在
+### 常见原因
+- 日志目录不存在（需要 `data/<SYMBOL>/` 目录）
 - 权限不足
-- 文件路径配置错
+- go-collector 没有向 ml-service 发送 `/predict` 请求
+- ml-service 未启动
 
 ### 解决方法
 ```bash
-mkdir -p ~/ubuntu-wallet/data/logs
-chmod -R u+rw ~/ubuntu-wallet/data/logs
+# 确认 go-collector 正在触发自动预测
+journalctl -u go-collector.service --since "5 minutes ago" | grep "Feature snapshot aligned"
+
+# 确认 ml-service 收到了请求
+journalctl -u ml-service.service --since "5 minutes ago" | grep "POST /predict"
+
+# 创建缺失的目录并修复权限
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  mkdir -p ~/ubuntu-wallet/data/$sym
+  chmod -R u+rw ~/ubuntu-wallet/data/$sym
+done
 ```
+
+> **注意**：go-collector 在每次 FAST 收集周期（默认 60s）会自动为所有已启用交易对调用 `/predict`，无需手动 curl。如果 prediction log 持续没有更新，首先检查 go-collector 和 ml-service 是否同时正常运行。
 
 ---
 
