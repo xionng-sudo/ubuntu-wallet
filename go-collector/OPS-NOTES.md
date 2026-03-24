@@ -189,6 +189,15 @@ ENABLE_PHASE2_SYMBOLS=true
 
 > **优先级**：`SYMBOLS` > `ENABLE_PHASE2_SYMBOLS` > 默认 Phase 1。
 
+**主交易对：`PRIMARY_SYMBOL`**
+```bash
+# 默认 ETHUSDT（向下兼容），建议显式设置
+PRIMARY_SYMBOL=ETHUSDT
+```
+
+主交易对用于：`/api/market`、特征计算、健康检查文件探针、`LEGACY_ETHUSDT_COMPAT` 根目录文件、1m/5m 额外采集。  
+> ⚠️ `PRIMARY_SYMBOL` 必须包含在 `SYMBOLS` 中，否则服务启动时报错退出。
+
 ### 8.3 文件写入路径
 
 每个交易对的 K 线写入独立子目录：
@@ -205,15 +214,16 @@ data/
   ADAUSDT/ ...   (Phase 2)
 ```
 
-> 第一个配置的交易对（默认为 BTCUSDT）同时写入 1m/5m 数据，用于特征计算。
+> 主交易对（`PRIMARY_SYMBOL`，默认 ETHUSDT）同时写入 1m/5m 数据，用于特征计算。
 
 ### 8.4 向下兼容模式（Legacy root-level paths）
 
-默认情况下，`LEGACY_ETHUSDT_COMPAT=true`，收集器也会将第一个交易对的 K 线写到根目录：
+默认情况下，`LEGACY_ETHUSDT_COMPAT=true`，收集器同时将**主交易对**（默认 ETHUSDT）的 K 线写到根目录：
 ```
 data/klines_1h.json   data/klines_4h.json   data/klines_1d.json  ...
 ```
 
+这些根目录文件始终对应 `PRIMARY_SYMBOL` 的数据（默认 ETHUSDT），**不随 SYMBOLS 列表顺序变化**。  
 当所有下游消费者迁移完毕后，在 `collector.env` 中设置：
 ```bash
 LEGACY_ETHUSDT_COMPAT=false

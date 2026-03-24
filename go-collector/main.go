@@ -77,6 +77,7 @@ var (
 	runtimeSlowEvery      time.Duration
 	runtimeFeatureColumns []string
 	runtimeSymbols        []string // ordered list of enabled trading symbols
+	runtimePrimarySymbol  string   // explicit primary symbol (see PRIMARY_SYMBOL env / market.ResolvePrimarySymbol)
 )
 
 func envOrDefault(key, def string) string {
@@ -207,6 +208,14 @@ func main() {
 	// Resolve enabled symbols (reads SYMBOLS / ENABLE_PHASE2_SYMBOLS env).
 	runtimeSymbols = market.ParseSymbols()
 	log.Infof("Enabled symbols (%d): %s", len(runtimeSymbols), strings.Join(runtimeSymbols, ", "))
+
+	// Resolve explicit primary symbol (reads PRIMARY_SYMBOL env; defaults to ETHUSDT).
+	primary, err := market.ResolvePrimarySymbol(runtimeSymbols)
+	if err != nil {
+		log.Fatalf("Primary symbol configuration error: %v", err)
+	}
+	runtimePrimarySymbol = primary
+	log.Infof("Primary symbol: %s (set PRIMARY_SYMBOL env to override)", runtimePrimarySymbol)
 
 	if err := os.MkdirAll(dataDir, 0755); err != nil {
 		log.Fatalf("Failed to create data directory: %v", err)
@@ -389,7 +398,7 @@ func computeAndPersistFeaturesAndSignals(dataDir string) {
 		return
 	}
 	snap, err := features.ComputeSnapshot(
-		"ETHUSDT", "1h",
+		runtimePrimarySymbol, "1h",
 		kl1h, kl4h, kl1d,
 		runtimeFeatureColumns,
 		flow1h, flow4h, flow1d,
@@ -579,10 +588,10 @@ func shouldUseLookbackThisRun(isStartup bool) bool {
 }
 
 func collectMarketData(bn *collector.BinanceCollector, isStartup bool) {
-	// Primary symbol for in-memory market data and feature computation is always
-	// the first configured symbol (default: BTCUSDT).  For backward-compatibility
-	// the /api/market endpoint still surfaces a single MarketData object.
-	primarySymbol := runtimeSymbols[0]
+	// Use the explicit primary symbol for in-memory market data and feature
+	// computation.  Defaults to ETHUSDT for backward compatibility; can be
+	// overridden with PRIMARY_SYMBOL env.
+	primarySymbol := runtimePrimarySymbol
 
 	mkt, err := bn.GetCurrentPrice(primarySymbol)
 	if err != nil {
@@ -762,8 +771,11 @@ func saveFastDataToFiles(dataDir string) {
 		}
 	}
 
-	// Backward-compatible root-level writes for the primary symbol (ETHUSDT or
-	// whatever is first in SYMBOLS).  Disable with LEGACY_ETHUSDT_COMPAT=false.
+	// Backward-compatible root-level writes for the primary symbol.
+	// When LEGACY_ETHUSDT_COMPAT=true (the default), root-level data/klines_*.json
+	// mirrors the primary symbol – ETHUSDT by default, matching the pre-multi-symbol
+	// behaviour that existing consumers expect.  Disable with LEGACY_ETHUSDT_COMPAT=false
+	// once all consumers have migrated to data/<SYMBOL>/klines_*.json.
 	if envBoolOrDefault("LEGACY_ETHUSDT_COMPAT", true) {
 		for _, interval := range []string{"1h", "4h", "1d", "15m", "1m", "5m"} {
 			if klines, ok := store.Klines[interval]; ok {
@@ -1066,10 +1078,12 @@ func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	requireSignals := envBoolOrDefault("HEALTH_REQUIRE_SIGNALS", true)
 	requireSignalsSplit := envBoolOrDefault("HEALTH_REQUIRE_SIGNALS_SPLIT", false)
 
-	// Primary symbol for health file checks (first in configured list).
-	primarySymbol := "ETHUSDT"
-	if len(runtimeSymbols) > 0 {
-		primarySymbol = runtimeSymbols[0]
+	// Primary symbol for health file checks – resolved at startup via PRIMARY_SYMBOL
+	// env (defaults to ETHUSDT for backward compatibility).
+	primarySymbol := runtimePrimarySymbol
+	if primarySymbol == "" {
+		// Defensive: runtimePrimarySymbol is always set in main(); guard for tests.
+		primarySymbol = "ETHUSDT"
 	}
 
 	// Check per-symbol klines_1h.json (new path) and fall back to root-level for

@@ -487,7 +487,7 @@ data/
   ADAUSDT/  ...  (Phase 2)
 ```
 
-> **向下兼容**：默认同时将**第一个配置的交易对**（未设置 `SYMBOLS` 时为 BTCUSDT）的数据写到 `data/klines_*.json` 根路径，供现有消费者平稳迁移。迁移完成后在 `collector.env` 中设置 `LEGACY_ETHUSDT_COMPAT=false` 关闭该行为。
+> **向下兼容**：默认同时将**主交易对**（`PRIMARY_SYMBOL`，默认 ETHUSDT）的数据写到 `data/klines_*.json` 根路径，保持旧消费者读取 ETHUSDT 数据的语义不变。迁移完成后在 `collector.env` 中设置 `LEGACY_ETHUSDT_COMPAT=false` 关闭该行为。
 
 ### 8.2 手动启动
 
@@ -519,6 +519,9 @@ SYMBOLS=BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT,ADAUSDT ./bin/go-collec
 
 # 全部 7 个交易对（标志方式）
 ENABLE_PHASE2_SYMBOLS=true ./bin/go-collector
+
+# 指定主交易对（默认 ETHUSDT；必须包含在 SYMBOLS 中）
+PRIMARY_SYMBOL=ETHUSDT ./bin/go-collector
 ```
 
 在生产环境中，把这些变量写入 `/etc/ubuntu-wallet/collector.env`（参考 `systemd/env/collector.env.example`）。
@@ -533,7 +536,7 @@ curl -s http://127.0.0.1:8080/api/healthz | jq '{ok, enabled_symbols, primary_sy
 # {
 #   "ok": true,
 #   "enabled_symbols": ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT"],
-#   "primary_symbol": "BTCUSDT",
+#   "primary_symbol": "ETHUSDT",
 #   ...
 # }
 ```
