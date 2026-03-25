@@ -42,6 +42,7 @@
 | `feature_builder.py` | 多周期特征构造 + schema 验证 |
 | `calibration.py` | 概率校准（Isotonic / Sigmoid） |
 | `prediction_logger.py` | 预测日志写入（JSONL 格式）；按 symbol 路由到 `data/<SYMBOL>/predictions_log.jsonl` |
+| `symbols_config.py` | 从 `configs/symbols.yaml` 加载 per-symbol 阈值；提供进程内 mtime 缓存 |
 | `requirements.txt` | Python 依赖列表 |
 
 ---
@@ -74,6 +75,7 @@ python3 -m venv .venv
 | `numpy` | 数值计算 |
 | `joblib` | 模型序列化/反序列化 |
 | `requests` | 日报/评估工具所需 |
+| `pyyaml` | 读取 `configs/symbols.yaml` 获取 per-symbol 阈值 |
 
 ---
 
@@ -452,6 +454,22 @@ symbols:
     enabled: true
     # ... 类似配置
 ```
+
+> **`threshold` 字段在推理时直接生效**：当 `/predict` 请求包含 `symbol` 时，`ml-service`
+> 会从 `configs/symbols.yaml` 读取该 symbol 的 `threshold` 值，作为 `event_v3` 模型的
+> `p_enter`（入场概率阈值），影响：
+> - LONG/SHORT/FLAT 决策逻辑；
+> - 响应字段 `threshold_enter` 的返回值；
+> - 预测日志中的 `threshold_long` / `threshold_short` 字段。
+>
+> **优先级（由高到低）**：
+> 1. `configs/symbols.yaml` 中该 symbol 的 `threshold`；
+> 2. `EVENT_V3_P_ENTER` 环境变量；
+> 3. 模型元数据中的 `p_enter`；
+> 4. 默认值 `0.65`。
+>
+> 响应的 `reasons` 列表中会包含 `threshold_source=<来源>` 字段，方便诊断。
+> 配置由 `ml-service/symbols_config.py` 加载，在进程内缓存并根据文件修改时间自动刷新。
 
 使用 Python 读取这些配置：
 
