@@ -125,18 +125,19 @@ class TestDriftMonitorPathConvention(unittest.TestCase):
         with open(abs_path, "r", encoding="utf-8") as f:
             return f.read()
 
-    def test_service_references_models_current_not_data_models_current(self) -> None:
-        """drift-monitor.service must reference models/current/, not data/models/current/."""
+    def test_service_uses_all_symbols_mode(self) -> None:
+        """drift-monitor.service must use --all-symbols for per-symbol drift coverage."""
         content = self._read_file("systemd/drift-monitor.service")
+        self.assertIn(
+            "--all-symbols",
+            content,
+            "drift-monitor.service must pass --all-symbols to report_drift.py so every "
+            "enabled symbol gets drift coverage.",
+        )
         self.assertNotIn(
             "data/models/current/train_feature_stats",
             content,
-            "drift-monitor.service still references the stale data/models/current/ path.",
-        )
-        self.assertIn(
-            "models/current/train_feature_stats",
-            content,
-            "drift-monitor.service must reference models/current/train_feature_stats.json.",
+            "drift-monitor.service must not reference the stale data/models/current/ path.",
         )
 
     def test_report_drift_docstring_uses_correct_path(self) -> None:

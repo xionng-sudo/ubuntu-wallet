@@ -717,28 +717,71 @@ journalctl -u drift-monitor.service -n 50 --no-pager
 | ETHUSDT | Phase 1 | ✅ |
 | SOLUSDT | Phase 1 | ✅ |
 | BNBUSDT | Phase 1 | ✅ |
-| XRPUSDT | Phase 2 | ❌ |
-| DOGEUSDT | Phase 2 | ❌ |
-| ADAUSDT | Phase 2 | ❌ |
+| XRPUSDT | Phase 2 | ✅ |
+| DOGEUSDT | Phase 2 | ✅ |
+| ADAUSDT | Phase 2 | ✅ |
 
-**激活 Phase 2 币种**：编辑 `configs/symbols.yaml`，将对应 `enabled: false` 改为 `enabled: true`，然后完成数据准备与初次训练后即可上线。
+> 所有 7 个交易对均已启用（`enabled: true`）。如需临时停用某币种，将对应条目改为 `enabled: false`。
 
-## 17.2 每币种目录布局
+## 17.2 每币种目录布局与必需 Artifact
+
+每个启用的交易对均有独立的目录结构，Drift 监控依赖以下文件：
 
 ```
+models/
+  <SYMBOL>/
+    current/                             <- 活跃模型产物（由训练脚本自动 promote）
+      model_meta.json                    <- 训练元数据（训练时间、阈值、标签方法等）
+      train_feature_stats.json           <- ★ drift 监控必需：各特征的 mean/std/missing_rate
+      feature_columns_event_v3.json      <- 特征列列表
+      lightgbm_event_v3.pkl
+      lightgbm_event_v3_scaler.pkl
+      xgboost_event_v3.json
+      xgboost_event_v3_scaler.pkl
+      stacking_event_v3.pkl
+      calibration_event_v3.pkl           <- 可选，仅在 calibration != none 时存在
+    archive/                             <- 版本归档
+      event_v3-<timestamp>/
+        (同 current/ 中所有文件)
+    registry.json                        <- 版本历史
+
 data/
-  BTCUSDT/
+  <SYMBOL>/
     klines_1h.json    klines_4h.json    klines_1d.json
     predictions_log.jsonl
     reports/
-  ETHUSDT/  ...
+```
 
-models/
-  BTCUSDT/
-    current/           <- 活跃模型产物
-    archive/           <- 版本归档
-    registry.json
-  ETHUSDT/  ...
+**验证某币种 artifact 完整性**：
+
+```bash
+SYMBOL=BTCUSDT
+ls ~/ubuntu-wallet/models/${SYMBOL}/current/
+# 应包含：model_meta.json  train_feature_stats.json  feature_columns_event_v3.json
+#         lightgbm_event_v3.pkl  xgboost_event_v3.json  stacking_event_v3.pkl 等
+
+# 验证 train_feature_stats.json 格式（per-feature mean/std/missing_rate）
+python3 -c "
+import json
+with open('models/${SYMBOL}/current/train_feature_stats.json') as f:
+    stats = json.load(f)
+feats = list(stats.keys())
+print(f'{len(feats)} features. First: {feats[0]} → {stats[feats[0]]}')
+"
+```
+
+**跨所有启用币种一次性检查**：
+
+```bash
+for SYMBOL in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
+  FILE=~/ubuntu-wallet/models/${SYMBOL}/current/train_feature_stats.json
+  if [ -f "$FILE" ]; then
+    CNT=$(python3 -c "import json; print(len(json.load(open('$FILE'))))")
+    echo "${SYMBOL}: OK (${CNT} features)"
+  else
+    echo "${SYMBOL}: MISSING ← 需要重新训练: bash ~/ubuntu-wallet/scripts/train_symbol.sh ${SYMBOL}"
+  fi
+done
 ```
 
 ## 17.3 查看某币种当前模型
@@ -751,17 +794,25 @@ cat ~/ubuntu-wallet/models/${SYMBOL}/current/model_meta.json | python3 -m json.t
 ## 17.4 按币种训练
 
 ```bash
-# 方式一：使用便捷包装脚本（自动读取 configs/symbols.yaml 参数）
+# 方式一：单币种便捷包装（自动读取 configs/symbols.yaml 参数）
 bash ~/ubuntu-wallet/scripts/train_symbol.sh BTCUSDT
-bash ~/ubuntu-wallet/scripts/train_symbol.sh ETHUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh ETHUSDT --calibration sigmoid
 
-# 方式二：手工指定路径（完整控制）
+# 方式二：一次训练所有启用币种（失败隔离，互不影响）
+bash ~/ubuntu-wallet/scripts/train_all_symbols.sh
+
+# 预演：打印命令但不执行
+bash ~/ubuntu-wallet/scripts/train_all_symbols.sh --dry-run
+
+# 方式三：手工指定路径（完整控制）
 SYMBOL=BTCUSDT
 python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir  ~/ubuntu-wallet/data/${SYMBOL} \
   --model-dir ~/ubuntu-wallet/models/${SYMBOL} \
   --horizon 12 --tp-pct 0.0175 --sl-pct 0.009 --calibration isotonic
 ```
+
+> `train_all_symbols.sh` 在单个币种失败时会继续训练其余币种，最后汇总报告哪些失败。
 
 ## 17.5 按币种评估预测日志
 
@@ -779,6 +830,7 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
 ## 17.6 按币种 Drift 监控
 
 ```bash
+# 单币种 drift
 SYMBOL=BTCUSDT
 ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
   --symbol ${SYMBOL}
@@ -786,29 +838,51 @@ ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
 #   --train-stats ~/ubuntu-wallet/models/${SYMBOL}/current/train_feature_stats.json
 #   --log-path    ~/ubuntu-wallet/data/${SYMBOL}/predictions_log.jsonl
 #   --output-dir  ~/ubuntu-wallet/data/${SYMBOL}/reports
+
+# 一次对所有启用币种运行 drift（失败隔离：缺失 artifact 的币种跳过并打印 WARNING）
+ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py --all-symbols
+
+# 预演（不写文件）
+ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols --dry-run
 ```
+
+**systemd drift-monitor.service** 已配置为使用 `--all-symbols`，每次触发时自动覆盖全部启用币种。
+若某币种 `models/<SYMBOL>/current/train_feature_stats.json` 缺失，该币种会被跳过并记录 WARNING，不影响其他币种。
 
 ## 17.7 批量操作所有启用币种
 
 ```bash
 # 列出所有 enabled 币种
+cd ~/ubuntu-wallet
 python3 -c "
-import sys; sys.path.insert(0,'~/ubuntu-wallet/scripts')
+import sys; sys.path.insert(0, 'scripts')
 from symbol_paths import list_enabled_symbols
 print(list_enabled_symbols())
 "
 
-# 批量训练所有 Phase 1 币种
-for SYMBOL in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
-  echo "=== Training ${SYMBOL} ==="
-  bash ~/ubuntu-wallet/scripts/train_symbol.sh "${SYMBOL}"
+# 一次训练所有启用币种（失败隔离）
+bash ~/ubuntu-wallet/scripts/train_all_symbols.sh
+
+# 一次对所有启用币种运行 drift
+ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py --all-symbols
+```
+
+**缺失 `train_feature_stats.json` 排查**：
+
+```bash
+# 快速检查哪些币种缺少训练 artifact
+for SYMBOL in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
+  FILE=~/ubuntu-wallet/models/${SYMBOL}/current/train_feature_stats.json
+  [ -f "$FILE" ] && echo "${SYMBOL}: OK" || echo "${SYMBOL}: MISSING — 请运行 bash ~/ubuntu-wallet/scripts/train_symbol.sh ${SYMBOL}"
 done
 
-# 批量 drift 检查
-for SYMBOL in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
-  ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
-    --symbol "${SYMBOL}"
-done
+# 对缺失的币种补充训练
+bash ~/ubuntu-wallet/scripts/train_symbol.sh SOLUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh BNBUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh XRPUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh DOGEUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh ADAUSDT
 ```
 
 ## 17.8 启用/禁用某币种
@@ -838,7 +912,10 @@ go-collector FAST ticker
               ├── computeSymbolFeaturesAndSignals(primary, ...) → POST /predict?symbol=ETHUSDT
               ├── computeSymbolFeaturesAndSignals(BTCUSDT, ...) → POST /predict?symbol=BTCUSDT
               ├── computeSymbolFeaturesAndSignals(SOLUSDT, ...) → POST /predict?symbol=SOLUSDT
-              └── computeSymbolFeaturesAndSignals(BNBUSDT, ...) → POST /predict?symbol=BNBUSDT
+              ├── computeSymbolFeaturesAndSignals(BNBUSDT, ...) → POST /predict?symbol=BNBUSDT
+              ├── computeSymbolFeaturesAndSignals(XRPUSDT, ...) → POST /predict?symbol=XRPUSDT
+              ├── computeSymbolFeaturesAndSignals(DOGEUSDT, ...) → POST /predict?symbol=DOGEUSDT
+              └── computeSymbolFeaturesAndSignals(ADAUSDT, ...) → POST /predict?symbol=ADAUSDT
 ```
 
 每次 `/predict` 调用后，ml-service 将预测结果追加至：
@@ -846,13 +923,16 @@ go-collector FAST ticker
 - `data/BTCUSDT/predictions_log.jsonl`
 - `data/SOLUSDT/predictions_log.jsonl`
 - `data/BNBUSDT/predictions_log.jsonl`
+- `data/XRPUSDT/predictions_log.jsonl`
+- `data/DOGEUSDT/predictions_log.jsonl`
+- `data/ADAUSDT/predictions_log.jsonl`
 
 **ml-service 不可用时**：go-collector 自动降级到规则引擎（`RulesEngine`），该交易对的信号仍会持久化，但不会写 predictions_log。下一个周期会重试。
 
 **验证所有交易对均有自动预测**：
 ```bash
 # 等待 2 分钟后检查
-for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
   echo -n "$sym: "
   stat -c '%y' ~/ubuntu-wallet/data/$sym/predictions_log.jsonl 2>/dev/null || echo "NOT FOUND"
 done

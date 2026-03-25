@@ -1073,16 +1073,17 @@ sudo systemctl restart ml-service go-collector
 | 阶段 | 币种 | 默认启用 |
 |------|------|---------|
 | Phase 1（初始上线）| BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT | `enabled: true` |
-| Phase 2（灰度扩展）| XRPUSDT, DOGEUSDT, ADAUSDT | `enabled: false`（手动激活）|
+| Phase 2（已上线）| XRPUSDT, DOGEUSDT, ADAUSDT | `enabled: true` |
 
-## 22.3 激活新币种（Phase 2 示例）
+> 所有 7 个交易对均已在 `configs/symbols.yaml` 中设为 `enabled: true`。如需临时停用某币种，将对应条目改为 `enabled: false`。
+
+## 22.3 添加/重新启用币种
 
 ```bash
-# 1. 编辑配置文件，将 enabled: false 改为 true
-nano ~/ubuntu-wallet/configs/symbols.yaml
-# 修改目标币种: enabled: true
+# 1. 确认 configs/symbols.yaml 中对应条目为 enabled: true（已是默认值）
+grep -A1 "XRPUSDT:" ~/ubuntu-wallet/configs/symbols.yaml
 
-# 2. 准备数据目录
+# 2. 准备数据目录（首次添加时）
 mkdir -p ~/ubuntu-wallet/data/XRPUSDT
 mkdir -p ~/ubuntu-wallet/models/XRPUSDT
 
@@ -1100,11 +1101,15 @@ cat ~/ubuntu-wallet/models/XRPUSDT/current/model_meta.json | python3 -m json.too
 ## 22.4 每币种训练命令
 
 ```bash
-# 使用便捷包装脚本（推荐）
+# 训练单个币种（推荐：使用便捷包装脚本，自动读取 configs/symbols.yaml 参数）
 bash ~/ubuntu-wallet/scripts/train_symbol.sh BTCUSDT
-bash ~/ubuntu-wallet/scripts/train_symbol.sh ETHUSDT
-bash ~/ubuntu-wallet/scripts/train_symbol.sh SOLUSDT
-bash ~/ubuntu-wallet/scripts/train_symbol.sh BNBUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh ETHUSDT --calibration sigmoid
+
+# 一次训练所有启用币种（失败隔离：单个币种失败不影响其他）
+bash ~/ubuntu-wallet/scripts/train_all_symbols.sh
+
+# 预演（打印命令但不执行）
+bash ~/ubuntu-wallet/scripts/train_all_symbols.sh --dry-run
 
 # 手工训练（完整控制）
 SYMBOL=BTCUSDT
@@ -1132,16 +1137,23 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
 ## 22.6 每币种 Drift 监控命令
 
 ```bash
+# 单币种 drift
 SYMBOL=BTCUSDT
 ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
   --symbol ${SYMBOL}
 
-# 等价于：
+# 一次对所有启用币种运行 drift（失败隔离：缺失 artifact 的币种跳过并打印 WARNING）
+ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py --all-symbols
+
+# 等价于（手工指定路径）：
 # python ~/ubuntu-wallet/scripts/report_drift.py \
 #   --train-stats ~/ubuntu-wallet/models/${SYMBOL}/current/train_feature_stats.json \
 #   --log-path    ~/ubuntu-wallet/data/${SYMBOL}/predictions_log.jsonl \
 #   --output-dir  ~/ubuntu-wallet/data/${SYMBOL}/reports
 ```
+
+> **systemd drift-monitor.service** 已配置使用 `--all-symbols`，每次触发时自动覆盖全部启用币种。
+> 缺少 `train_feature_stats.json` 的币种会被跳过并写 WARNING 日志，不影响其他币种。
 
 ## 22.7 部署后每币种验证清单
 

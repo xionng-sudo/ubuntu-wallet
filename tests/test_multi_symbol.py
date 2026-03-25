@@ -135,11 +135,11 @@ class TestSymbolConfig(unittest.TestCase):
             cfg = get_symbol_config(sym)
             self.assertTrue(cfg["enabled"], f"Phase 1 symbol {sym} should be enabled by default")
 
-    def test_phase2_symbols_disabled(self) -> None:
+    def test_phase2_symbols_enabled(self) -> None:
         from symbol_paths import get_symbol_config  # type: ignore[import]
         for sym in ["XRPUSDT", "DOGEUSDT", "ADAUSDT"]:
             cfg = get_symbol_config(sym)
-            self.assertFalse(cfg["enabled"], f"Phase 2 symbol {sym} should be disabled by default")
+            self.assertTrue(cfg["enabled"], f"Phase 2 symbol {sym} should now be enabled")
 
     def test_config_values_types(self) -> None:
         from symbol_paths import get_symbol_config  # type: ignore[import]
@@ -210,17 +210,20 @@ class TestListEnabledSymbols(unittest.TestCase):
         symbols = list_enabled_symbols(phase=1)
         self.assertEqual(set(symbols), {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"})
 
-    def test_phase2_returns_empty_by_default(self) -> None:
-        """Phase 2 symbols are disabled by default; list should be empty."""
+    def test_phase2_returns_all_enabled(self) -> None:
+        """Phase 2 symbols are now enabled; list should contain all three."""
         from symbol_paths import list_enabled_symbols  # type: ignore[import]
         symbols = list_enabled_symbols(phase=2)
-        self.assertEqual(symbols, [])
+        self.assertEqual(set(symbols), {"XRPUSDT", "DOGEUSDT", "ADAUSDT"})
 
     def test_no_phase_returns_all_enabled(self) -> None:
         from symbol_paths import list_enabled_symbols  # type: ignore[import]
         symbols = list_enabled_symbols()
-        # Only phase 1 symbols are enabled by default
-        self.assertEqual(set(symbols), {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"})
+        # All 7 symbols are now enabled
+        self.assertEqual(
+            set(symbols),
+            {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT"},
+        )
 
     def test_all_symbols_constant(self) -> None:
         from symbol_paths import ALL_SYMBOLS  # type: ignore[import]
