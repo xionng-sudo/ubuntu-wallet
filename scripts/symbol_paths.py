@@ -168,11 +168,18 @@ def get_symbol_model_dir(
     Args:
         symbol: Trading pair, e.g. ``"BTCUSDT"``.
         base_model_dir: Override the base model directory.  Defaults to the
-            ``MODEL_DIR`` environment variable, falling back to
+            ``MODELS_BASE_DIR`` environment variable, falling back to
             ``<repo_root>/models``.
+
+    Note:
+        The ``MODELS_BASE_DIR`` environment variable is used (not
+        ``MODEL_DIR``) because ``MODEL_DIR`` may point to a per-symbol
+        artefact directory such as ``models/ETHUSDT/current``, which would
+        produce an incorrect path when the symbol name is appended.
+        ``MODELS_BASE_DIR`` is always the *parent* of per-symbol sub-trees.
     """
     if base_model_dir is None:
-        base_model_dir = os.environ.get("MODEL_DIR", os.path.join(REPO_ROOT, "models"))
+        base_model_dir = os.environ.get("MODELS_BASE_DIR", os.path.join(REPO_ROOT, "models"))
     return os.path.join(base_model_dir, symbol)
 
 

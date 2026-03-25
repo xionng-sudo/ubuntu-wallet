@@ -673,11 +673,20 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run_for_symbol(symbol: str, args: argparse.Namespace) -> None:
     """Run simulation for a single symbol, merging CLI overrides with symbol config."""
-    cfg = get_symbol_config(symbol)
-    tp_pct = args.tp if args.tp is not None else float(cfg["tp"])
-    sl_pct = args.sl if args.sl is not None else float(cfg["sl"])
-    horizon_bars = args.horizon if args.horizon is not None else int(cfg["horizon"])
-    threshold = args.threshold if args.threshold is not None else float(cfg["threshold"])
+    try:
+        cfg = get_symbol_config(symbol)
+    except Exception as exc:
+        print(
+            f"[sim:{symbol}] WARNING: could not load symbol config from configs/symbols.yaml "
+            f"({exc}); falling back to built-in defaults.",
+            file=sys.stderr,
+        )
+        cfg = {}
+
+    tp_pct = args.tp if args.tp is not None else float(cfg.get("tp", 0.0175))
+    sl_pct = args.sl if args.sl is not None else float(cfg.get("sl", 0.009))
+    horizon_bars = args.horizon if args.horizon is not None else int(cfg.get("horizon", 12))
+    threshold = args.threshold if args.threshold is not None else float(cfg.get("threshold", 0.65))
     interval = args.interval if args.interval is not None else str(cfg.get("interval", "1h"))
 
     sym_data_dir = _data_dir(symbol, base_data_dir=args.data_base_dir)
