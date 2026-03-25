@@ -97,10 +97,8 @@ ls -lh ~/ubuntu-wallet/bin/go-collector
 ```bash
 cd ~/ubuntu-wallet/ml-service
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -r requirements.txt
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -U pip
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
 ```
 
 ---

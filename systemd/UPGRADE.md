@@ -45,10 +45,8 @@ go build -o /home/ubuntu/ubuntu-wallet/bin/go-collector .
 ### 1.3 重新安装/升级 ml-service 依赖（requirements.txt 变更时必须）
 ```bash
 cd /home/ubuntu/ubuntu-wallet/ml-service
-source .venv/bin/activate
-pip install -U pip
-pip install -r requirements.txt
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -U pip
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
 ```
 
 ### 1.4 重启服务

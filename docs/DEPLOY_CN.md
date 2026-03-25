@@ -250,10 +250,8 @@ mkdir -p ~/ubuntu-wallet/models
 ```bash
 cd ~/ubuntu-wallet/ml-service
 python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip setuptools wheel
-pip install -r requirements.txt
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/pip install --upgrade pip setuptools wheel
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
 ```
 
 ## 5.3 部署 analyzer 环境
@@ -263,25 +261,19 @@ deactivate
 ```bash
 cd ~/ubuntu-wallet
 python3 -m venv venv-analyzer
-source ml-service/.venv/bin/activate
-pip install --upgrade pip setuptools wheel
-pip install -r python-analyzer/requirements.txt
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/pip install --upgrade pip setuptools wheel
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r python-analyzer/requirements.txt
 ```
 
 ## 5.4 验证环境
 ```bash
 # 验证 ml-service venv
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python --version   # 应显示 Python 3.10.x 或以上
-python -c "import fastapi, uvicorn, pydantic; print('ml-service 依赖正常 / ml-service deps OK')"
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/python --version   # 应显示 Python 3.10.x 或以上
+~/ubuntu-wallet/ml-service/.venv/bin/python -c "import fastapi, uvicorn, pydantic; print('ml-service 依赖正常 / ml-service deps OK')"
 
 # 验证 analyzer venv（如已创建）
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python --version
-python -c "import lightgbm, xgboost, sklearn; print('analyzer 依赖正常 / analyzer deps OK')"
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/python --version
+~/ubuntu-wallet/ml-service/.venv/bin/python -c "import lightgbm, xgboost, sklearn; print('analyzer 依赖正常 / analyzer deps OK')"
 ```
 
 ---
@@ -442,13 +434,10 @@ source .env 2>/dev/null || true
 ```bash
 cd ~/ubuntu-wallet/ml-service
 python3 -m venv .venv
-source .venv/bin/activate
-pip install --upgrade pip
-pip install -r requirements.txt
+~/ubuntu-wallet/ml-service/.venv/bin/pip install --upgrade pip
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
 # 启动服务（前台运行，Ctrl+C 停止）
-uvicorn app:app --host 127.0.0.1 --port 9000
-# 或：
-python -m uvicorn app:app --host 127.0.0.1 --port 9000
+~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 9000
 ```
 
 启动成功时会输出（Successful startup output）：
@@ -468,7 +457,7 @@ INFO:     Uvicorn running on http://127.0.0.1:9000 (Press CTRL+C to quit)
 > **注意（Note）**：ml-service 默认监听端口 **9000**，不是 8000。
 
 ```bash
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 ```
 
 预期输出（Expected output）：
@@ -507,9 +496,7 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 ```bash
 cd ~/ubuntu-wallet
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --symbol ETHUSDT \
   --log-path data/ETHUSDT/predictions_log.jsonl \
   --data-dir data/ETHUSDT \
@@ -520,8 +507,6 @@ python scripts/evaluate_from_logs.py \
   --sl 0.007 \
   --fee 0.0004 \
   --horizon-bars 6
-
-deactivate
 ```
 
 ## 12.2 验证点
@@ -538,8 +523,7 @@ deactivate
 ## 13.1 历史回放模拟
 ```bash
 cd ~/ubuntu-wallet
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python scripts/live_trader_eth_perp_simulated.py
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
 ```
 
 ## 13.2 关注点
@@ -550,7 +534,7 @@ python scripts/live_trader_eth_perp_simulated.py
 
 ## 13.3 DRY-RUN 交易脚本
 ```bash
-python scripts/live_trader_eth_perp_binance.py --mode dry-run
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_binance.py --mode dry-run
 ```
 
 ## 13.4 当前建议
@@ -743,15 +727,11 @@ git pull origin main
 
 ## 16.2 更新 Python 依赖
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-pip install -r ~/ubuntu-wallet/ml-service/requirements.txt
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r ~/ubuntu-wallet/ml-service/requirements.txt
 
 # 如果有 venv-analyzer（用于训练/分析）
 if [ -d ~/ubuntu-wallet/venv-analyzer ]; then
-  source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-  pip install -r ~/ubuntu-wallet/python-analyzer/requirements.txt
-  deactivate
+  ~/ubuntu-wallet/ml-service/.venv/bin/pip install -r ~/ubuntu-wallet/python-analyzer/requirements.txt
 fi
 ```
 
@@ -953,12 +933,12 @@ journalctl -u go-collector -f
 ## ml-service 健康检查
 ```bash
 # 注意：ml-service 端口为 9000
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 ```
 
 ## go-collector 健康检查
 ```bash
-curl -s http://127.0.0.1:8080/api/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:8080/api/healthz | python3 -m json.tool
 ```
 
 ## 重启服务
@@ -969,8 +949,7 @@ sudo systemctl restart ml-service
 
 ## 手工跑评估
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --symbol ETHUSDT \
   --log-path ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl \
   --data-dir ~/ubuntu-wallet/data/ETHUSDT \
@@ -981,25 +960,20 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --sl 0.007 \
   --fee 0.0004 \
   --horizon-bars 6
-deactivate
 ```
 
 ## 手工模拟
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
 ```
 
 ## 手工训练
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --label-method triple_barrier \
   --tp-pct 0.0175 \
   --sl-pct 0.009 \
   --calibration isotonic
-deactivate
 ```
 
 ---

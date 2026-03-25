@@ -217,10 +217,10 @@ journalctl -u evaluate-predictions.service -n 100 --no-pager
 
 ```bash
 # ml-service 健康检查
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 # go-collector 健康检查
-curl -s http://127.0.0.1:8080/api/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:8080/api/healthz | python3 -m json.tool
 ```
 
 ### 重启服务
@@ -233,8 +233,7 @@ sudo systemctl restart ml-service
 ### 手动运行评估
 
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
   --data-dir ~/ubuntu-wallet/data \
   --interval 1h \
@@ -244,7 +243,6 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --sl 0.007 \
   --fee 0.0004 \
   --horizon-bars 6
-deactivate
 ```
 
 ---
