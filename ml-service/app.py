@@ -21,6 +21,7 @@ from model_loader import (
     find_registry_path,
 )
 from prediction_logger import log_prediction
+from symbols_config import resolve_p_enter as _resolve_p_enter_from_config
 
 MODEL_DIR = os.getenv("MODEL_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models", "current")))
 DATA_DIR = os.getenv("DATA_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data")))
@@ -185,6 +186,17 @@ def _apply_calibration(
         return cal_p, loaded.calibration.method
     except Exception:
         return None, None
+
+
+def _resolve_p_enter(symbol: Optional[str], ev3_meta: dict) -> tuple[float, str]:
+    """Resolve the ``p_enter`` threshold for the event_v3 model.
+
+    Delegates to :func:`symbols_config.resolve_p_enter` using the module-level
+    ``EVENT_V3_P_ENTER`` constant as the hard-coded default.
+    """
+    return _resolve_p_enter_from_config(
+        symbol, ev3_meta, env_var_name="EVENT_V3_P_ENTER", default=EVENT_V3_P_ENTER
+    )
 
 
 def _active_model_dir(symbol: Optional[str] = None) -> str:
@@ -414,8 +426,12 @@ def predict(req: PredictRequest):
     # Classes: 0=SHORT, 1=FLAT, 2=LONG
     if mode == "proba_multiclass" and loaded.active_model == "event_v3":
         ev3 = loaded.event_v3 or {}
-        p_enter = float(os.getenv("EVENT_V3_P_ENTER", str(ev3.get("p_enter", EVENT_V3_P_ENTER))))
+        p_enter, threshold_source = _resolve_p_enter(symbol, ev3)
         delta = float(os.getenv("EVENT_V3_DELTA", str(ev3.get("delta", EVENT_V3_DELTA))))
+        logger.info(
+            "predict: symbol=%s p_enter=%.4f threshold_source=%s",
+            symbol, p_enter, threshold_source,
+        )
 
         p_short = float(p[0, 0])
         p_flat = float(p[0, 1])
@@ -507,6 +523,7 @@ def predict(req: PredictRequest):
             msg,
             f"feature_ts_built={built_ts} chosen_ts={chosen_ts_str}",
             as_of_str,
+            f"threshold_source={threshold_source}",
         ]
 
     return PredictResponse(
