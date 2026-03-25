@@ -87,11 +87,13 @@ ubuntu-wallet/
 │   └── README.md                   # 服务说明
 │
 ├── scripts/                        # 运行、回测、评估脚本
-│   ├── symbol_paths.py             # 每币种路径与配置辅助模块（新）
+│   ├── symbol_config.py            # 公共符号配置 API（封装 symbol_paths.py；推荐导入此模块）
+│   ├── symbol_paths.py             # 每币种路径与配置辅助模块（底层实现）
 │   ├── train_symbol.sh             # 按币种训练便捷包装脚本（新）
 │   ├── backtest_event_v3_http.py   # 三重障碍回测 + 参数网格搜索
 │   ├── evaluate_from_logs.py       # 基于预测日志的事后评估（支持 --symbol）
-│   ├── live_trader_eth_perp_simulated.py  # 模拟交易（历史回放）
+│   ├── live_trader_perp_simulated.py       # 通用模拟交易（支持 --symbol / --all-symbols）
+│   ├── live_trader_eth_perp_simulated.py  # ETHUSDT 模拟交易（旧版封装，已废弃→请用上方脚本）
 │   ├── live_trader_eth_perp_binance.py    # Binance DRY-RUN / 真实交易
 │   ├── mt_trend_utils.py           # 多周期趋势过滤工具
 │   ├── rollback_model.py           # 模型版本回滚
@@ -967,20 +969,46 @@ cd ~/ubuntu-wallet
 
 ### 13.1 模拟交易（历史回放）
 
-`scripts/live_trader_eth_perp_simulated.py` 基于历史 K 线数据回放，模拟完整的交易逻辑（入场、出场、风控）：
+使用通用脚本 `scripts/live_trader_perp_simulated.py` 对任意已配置币种进行历史 K 线回放，
+模拟完整的交易逻辑（入场、出场、多周期趋势过滤、风控）。
+
+**单币种运行（参数自动从 `configs/symbols.yaml` 读取）**：
 
 ```bash
 cd ~/ubuntu-wallet
-~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py \
-  --data-dir data \
-  --base-url http://127.0.0.1:9000 \
+# ETHUSDT（默认）
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py
+
+# 指定其他币种
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+  --symbol BTCUSDT
+
+# 覆盖参数（否则从 configs/symbols.yaml 自动读取）
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+  --symbol ETHUSDT \
   --tp 0.0175 \
   --sl 0.007 \
   --threshold 0.65 \
-  --horizon 6
+  --horizon 6 \
+  --since 2026-01-01T00:00:00Z \
+  --until 2026-03-01T00:00:00Z
 ```
 
-**输出内容**：逐笔模拟交易记录，包含入场时间、信号方向、置信度、出场原因（TP/SL/TIMEOUT）、模拟盈亏等。
+**一次性运行所有已启用币种（顺序执行）**：
+
+```bash
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+  --all-symbols
+```
+
+**输出内容**：逐笔模拟交易记录，包含入场时间、信号方向、置信度、出场原因（TP/SL/TIMEOUT）、模拟盈亏等。  
+权益曲线写入 `data/<SYMBOL>/sim_equity.jsonl`。
+
+> **注意**：前 120 根 K 线（模型预热阶段）会自动静默跳过（不再刷屏打印 503 错误），仅在
+> 第一次预热跳过时打印一条提示。
+>
+> **旧版入口保留（已废弃）**：`live_trader_eth_perp_simulated.py` 等价于
+> `live_trader_perp_simulated.py --symbol ETHUSDT`，两者共享相同实现。
 
 ### 13.2 基于预测日志的事后评估
 

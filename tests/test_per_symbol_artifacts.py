@@ -192,7 +192,10 @@ class TestReportDriftAllSymbols(unittest.TestCase):
             env={
                 **os.environ,
                 "ENABLE_DRIFT_MONITOR": "true",
-                "MODEL_DIR": model_dir,
+                # MODELS_BASE_DIR is the correct env var for --all-symbols path resolution.
+                # (MODEL_DIR is the single-symbol inference pointer and is intentionally
+                # ignored by _resolve_models_base_dir to prevent per-symbol contamination.)
+                "MODELS_BASE_DIR": model_dir,
                 "DATA_DIR": data_dir,
             },
         )
@@ -224,7 +227,8 @@ class TestReportDriftAllSymbols(unittest.TestCase):
             env={
                 **os.environ,
                 "ENABLE_DRIFT_MONITOR": "true",
-                "MODEL_DIR": model_dir,
+                # MODELS_BASE_DIR is the correct env var for --all-symbols path resolution.
+                "MODELS_BASE_DIR": model_dir,
                 "DATA_DIR": data_dir,
             },
         )

@@ -223,7 +223,7 @@ def load_klines_json(path: str) -> pd.DataFrame:
     if isinstance(data, list) and isinstance(data[0], dict):
         rows = []
         for r in data:
-            ts = r.get("timestamp") or r.get("open_time") or r.get("time") or r.get("t")
+            ts = r.get("ts") or r.get("timestamp") or r.get("open_time") or r.get("time") or r.get("t")
             dt = _to_utc_dt(ts)
             rows.append(
                 dict(
