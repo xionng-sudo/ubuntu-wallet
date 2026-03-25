@@ -184,13 +184,13 @@ journalctl -u ml-service -n 50 --no-pager
 
 ```bash
 # 快速检查所有 Phase 1 交易对的预测日志时间戳
-for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
   echo -n "$sym: "
   stat -c '%y' ~/ubuntu-wallet/data/$sym/predictions_log.jsonl 2>/dev/null || echo "not found"
 done
 
 # 查看各交易对最新预测条目
-for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
   echo "=== $sym ===" && tail -n 1 ~/ubuntu-wallet/data/$sym/predictions_log.jsonl 2>/dev/null || true
 done
 ```
