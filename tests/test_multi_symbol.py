@@ -83,18 +83,18 @@ class TestSymbolPathsDefaults(unittest.TestCase):
                 os.environ["DATA_DIR"] = orig
 
     def test_model_dir_respects_env_override(self) -> None:
-        """MODEL_DIR env var must be used as the base when no explicit override."""
+        """MODELS_BASE_DIR env var must be used as the base when no explicit override."""
         import symbol_paths  # type: ignore[import]
-        orig = os.environ.get("MODEL_DIR")
+        orig = os.environ.get("MODELS_BASE_DIR")
         try:
-            os.environ["MODEL_DIR"] = "/env/override/models"
+            os.environ["MODELS_BASE_DIR"] = "/env/override/models"
             path = symbol_paths.get_symbol_model_dir("ETHUSDT")
             self.assertTrue(path.startswith("/env/override/models/"))
         finally:
             if orig is None:
-                os.environ.pop("MODEL_DIR", None)
+                os.environ.pop("MODELS_BASE_DIR", None)
             else:
-                os.environ["MODEL_DIR"] = orig
+                os.environ["MODELS_BASE_DIR"] = orig
 
 
 # ---------------------------------------------------------------------------
