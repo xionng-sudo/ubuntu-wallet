@@ -391,7 +391,7 @@ ss -ltnp | grep 9000
 
 ```bash
 # 确认 /healthz 正常
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 # 构造最小测试请求
 curl -s -X POST http://127.0.0.1:9000/predict \
@@ -777,7 +777,7 @@ systemd 运行用户和手工用户不同。
 ### 处理步骤
 1. 手动验证：
    ```bash
-   ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py \
+   ENABLE_DRIFT_MONITOR=true ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/report_drift.py \
      --train-stats models/current/train_feature_stats.json \
      --log-path data/predictions_log.jsonl \
      --output-dir data/reports \
@@ -893,8 +893,7 @@ ImportError: PyYAML is required to load configs/symbols.yaml
 pip install pyyaml
 
 # 或在 venv 中安装
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-pip install pyyaml
+~/ubuntu-wallet/ml-service/.venv/bin/pip install pyyaml
 ```
 
 ---

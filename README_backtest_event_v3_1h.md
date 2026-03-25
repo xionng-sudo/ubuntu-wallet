@@ -37,7 +37,7 @@
 ### 1.1 回测命令示例（1h + 6 小时 horizon + 单仓 + 多周期过滤）
 
 ```bash
-python scripts/backtest_event_v3_http.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir data \
   --base-url http://127.0.0.1:9000 \
   --interval 1h \
@@ -205,7 +205,7 @@ ml-service 在 `/predict` 中将每次预测写入：
 线上评估命令示例（使用当前 BEST 参数）：
 
 ```bash
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path data/predictions_log.jsonl \
   --data-dir data \
   --interval 1h \

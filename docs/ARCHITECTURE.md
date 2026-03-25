@@ -177,7 +177,7 @@ Production service management on Ubuntu 22.04+.
 | `ml-service.service` | Service | Runs uvicorn/FastAPI, auto-restarts |
 | `evaluate-predictions.service` | oneshot | Triggered to run `evaluate_from_logs.py` |
 | `check-go-collector.service` | oneshot | Health check, sends Telegram alert on failure |
-| `evaluate-predictions.timer` | Timer | Runs evaluate-predictions.service at 00:06, 06:06, 12:06, 18:06 UTC |
+| `evaluate-predictions.timer` | Timer | Runs evaluate-predictions.service at 00:06, 06:06, 12:06, 18:06 local time |
 | `check-go-collector.timer` | Timer | Triggers health check every 60s |
 
 ---
@@ -374,7 +374,6 @@ data/klines_1d.json  ──┘         │
 ls data/ETHUSDT/klines_1h.json data/ETHUSDT/klines_4h.json data/ETHUSDT/klines_1d.json
 
 # Activate python environment
-source venv310/bin/activate  # or: source venv/bin/activate
 cd python-analyzer
 ```
 
@@ -430,7 +429,7 @@ cat ../models/model_meta.json     # Check version hash, training date, n_feature
 
 ```bash
 sudo systemctl restart ml-service
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 # Verify: model_version matches new training run
 ```
 
@@ -539,9 +538,7 @@ Use `--expanding` (default) for most scenarios. Use `--rolling-train-bars 2000` 
 ### 8.1 Starting ml-service
 
 ```bash
-cd ml-service
-source ../venv310/bin/activate
-uvicorn app:app --host 127.0.0.1 --port 9000
+~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 9000
 ```
 
 Or via systemd (production):
@@ -553,7 +550,7 @@ sudo systemctl start ml-service
 ### 8.2 Health Check
 
 ```bash
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 ```
 
 Expected response:
@@ -771,9 +768,8 @@ sudo nano /etc/ubuntu-wallet/collector.env  # Add API keys
 cd go-collector && go build -o ../bin/go-collector . && cd ..
 
 # 4. Train a model before starting ml-service
-source venv310/bin/activate
 cd python-analyzer
-python train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir ../data --model-dir ../models \
   --label-method triple_barrier \
   --tp-pct 0.0175 --sl-pct 0.009 --calibration isotonic
@@ -815,7 +811,7 @@ The `check-go-collector.timer` fires `check-go-collector.service` (oneshot) ever
 2. If unreachable or `ok: false`, sends a Telegram alert.
 3. Optionally restarts go-collector after a 5-minute cooldown.
 
-The `evaluate-predictions.timer` triggers `evaluate_from_logs.py` four times per day (at 00:06, 06:06, 12:06, 18:06 UTC) with a `RandomizedDelaySec=120` jitter. The 120-second randomized delay staggers the evaluation job so it distributes the workload within a 2-minute window (e.g., 00:06:00 to 00:08:00) to avoid multiple instances starting simultaneously if running on multiple nodes.
+The `evaluate-predictions.timer` triggers `evaluate_from_logs.py` four times per day (at 00:06, 06:06, 12:06, 18:06 local time) with a `RandomizedDelaySec=120` jitter. The 120-second randomized delay staggers the evaluation job so it distributes the workload within a 2-minute window (e.g., 00:06:00 to 00:08:00) to avoid multiple instances starting simultaneously if running on multiple nodes.
 
 Configure Telegram in `/etc/ubuntu-wallet/telegram.env`:
 ```
@@ -860,9 +856,8 @@ ML_PROBA_SHORT=0.45
 sudo systemctl stop ml-service
 
 # 2. Train new model (klines must be populated)
-source venv310/bin/activate
 cd python-analyzer
-python train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir ../data --model-dir ../models \
   --label-method triple_barrier \
   --tp-pct 0.0175 --sl-pct 0.009 --calibration isotonic
@@ -874,7 +869,7 @@ cat ../models/model_meta.json
 sudo systemctl start ml-service
 
 # 5. Verify healthz shows new model version
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 ```
 
 ---
@@ -1012,7 +1007,7 @@ tf1d_close, tf1d_sma_200, tf1d_rsi_14, tf1d_atr_14
 find data/ -name "klines_1h.json" -mmin -2 && echo "OK" || echo "STALE"
 
 # 2. Check ml-service health
-curl -s http://127.0.0.1:9000/healthz | python3 -c \
+curl -fsS http://127.0.0.1:9000/healthz | python3 -c \
   "import sys, json; d=json.load(sys.stdin); print('OK' if d['ok'] else 'FAIL', d)"
 
 # 3. Check prediction log is growing

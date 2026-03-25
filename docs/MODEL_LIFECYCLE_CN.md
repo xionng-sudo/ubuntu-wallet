@@ -212,9 +212,8 @@ cat ~/ubuntu-wallet/models/feature_columns_event_v3.json | python3 -m json.tool 
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
 
-python scripts/export_feature_schema.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/export_feature_schema.py \
   --model-dir models \
   --data-dir data \
   --rebuild \
@@ -246,10 +245,8 @@ cd ~/ubuntu-wallet
 
 # 如果还没有 venv-analyzer，创建一个
 python3 -m venv venv-analyzer
-source ml-service/.venv/bin/activate
-pip install --upgrade pip setuptools wheel
-pip install -r python-analyzer/requirements.txt
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/pip install --upgrade pip setuptools wheel
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r python-analyzer/requirements.txt
 ```
 
 > 说明：训练使用独立的 `venv-analyzer`，推理服务使用 `ml-service/.venv`，两者分开管理。
@@ -258,15 +255,13 @@ deactivate
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
 
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --label-method triple_barrier \
   --tp-pct 0.0175 \
   --sl-pct 0.009 \
   --calibration isotonic
 
-deactivate
 ```
 
 ### 参数说明
@@ -403,9 +398,8 @@ cat ~/ubuntu-wallet/models/model_meta.json | python3 -m json.tool
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
 
-python python-analyzer/walkforward_cv.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
   --data-dir ~/ubuntu-wallet/data \
   --n-splits 5 \
   --gap-bars 12 \
@@ -413,7 +407,6 @@ python python-analyzer/walkforward_cv.py \
   --confidence-threshold 0.65 \
   --output-csv /tmp/cv_report.csv
 
-deactivate
 ```
 
 > `walkforward_cv.py` 与训练脚本共用 `build_multi_tf_feature_df()` + `get_feature_columns_like_trainer()`，
@@ -518,9 +511,8 @@ ls -lh ~/ubuntu-wallet/models/
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
 
-python3 -c "
+~/ubuntu-wallet/ml-service/.venv/bin/python3 -c "
 import sys, joblib
 sys.path.insert(0, 'ml-service')
 from calibration import load_calibration, default_calibration_path
@@ -535,13 +527,12 @@ else:
     print('校准器加载成功 (calibration loaded successfully)')
 "
 
-deactivate
 ```
 
 ## 6.4 检查 ml-service 校准状态
 
 ```bash
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 # 预期输出（Expected output）：
 # {
@@ -591,9 +582,8 @@ curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
 # （如需测试候选模型，先按第 7.3/第 8 章的方法让 ml-service 实际加载那组文件）
 
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
 
-python scripts/backtest_event_v3_http.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir ~/ubuntu-wallet/data \
   --base-url http://127.0.0.1:9000 \
   --thresholds "0.55:0.75:0.05" \
@@ -604,7 +594,6 @@ python scripts/backtest_event_v3_http.py \
   --position-mode single \
   --objective avg_ret_mdd_daily
 
-deactivate
 ```
 
 ### 参数说明
@@ -654,17 +643,15 @@ risk/realism: MDD(trade_seq)=4.80% MDD(hourly)=3.21% MDD(daily)=5.12% max_consec
 
 ```bash
 # 此时 ml-service 加载的是生产模型
-curl -s http://127.0.0.1:9000/healthz | python3 -c "import sys,json; m=json.load(sys.stdin); print('生产模型 (Production model):', m['model_version'])"
+curl -fsS http://127.0.0.1:9000/healthz | python3 -c "import sys,json; m=json.load(sys.stdin); print('生产模型 (Production model):', m['model_version'])"
 
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python scripts/backtest_event_v3_http.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir ~/ubuntu-wallet/data \
   --thresholds "0.55:0.75:0.05" \
   --tp-grid "0.015:0.025:0.0025" \
   --sl-grid "0.007:0.012:0.001" \
   --horizon-bars 6 --fee 0.0004 --position-mode single \
   | tee /tmp/backtest_production.txt
-deactivate
 ```
 
 ### 步骤 2：让 ml-service 临时加载候选模型，对候选模型回测
@@ -684,17 +671,15 @@ deactivate
 sudo systemctl daemon-reload
 sudo systemctl restart ml-service
 sleep 5
-curl -s http://127.0.0.1:9000/healthz | python3 -c "import sys,json; m=json.load(sys.stdin); print('候选模型 (Candidate model):', m['model_version'])"
+curl -fsS http://127.0.0.1:9000/healthz | python3 -c "import sys,json; m=json.load(sys.stdin); print('候选模型 (Candidate model):', m['model_version'])"
 
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python scripts/backtest_event_v3_http.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir ~/ubuntu-wallet/data \
   --thresholds "0.55:0.75:0.05" \
   --tp-grid "0.015:0.025:0.0025" \
   --sl-grid "0.007:0.012:0.001" \
   --horizon-bars 6 --fee 0.0004 --position-mode single \
   | tee /tmp/backtest_candidate.txt
-deactivate
 ```
 
 ### 步骤 3：对比两个结果
@@ -773,10 +758,10 @@ echo "=== 候选模型（Candidate）===" && grep -E "threshold=|win_rate|avg_re
 ls -lh ~/ubuntu-wallet/models/
 
 # 确认 ml-service 当前模型版本（生产模型）
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 # 记录当前生产模型版本（做好回滚准备）
-echo "当前生产模型（Current production model）: $(curl -s http://127.0.0.1:9000/healthz | python3 -c 'import sys,json; print(json.load(sys.stdin)["model_version"])')"
+echo "当前生产模型（Current production model）: $(curl -fsS http://127.0.0.1:9000/healthz | python3 -c 'import sys,json; print(json.load(sys.stdin)["model_version"])')"
 ```
 
 ## 8.2 当前实现的上线步骤
@@ -825,7 +810,7 @@ sudo systemctl restart ml-service
 
 ```bash
 sleep 5
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 ```
 
 预期输出（Expected output）：
@@ -966,9 +951,8 @@ tail -100 ~/ubuntu-wallet/data/logs/evaluate_predictions.log
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
 
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
   --data-dir ~/ubuntu-wallet/data \
   --interval 1h \
@@ -979,7 +963,6 @@ python scripts/evaluate_from_logs.py \
   --fee 0.0004 \
   --horizon-bars 6
 
-deactivate
 ```
 
 ## 9.4 需要警惕的监控信号
@@ -1022,7 +1005,7 @@ deactivate
 
 ```bash
 # 1) 训练侧 schema ↔ 在线推理 row contract
-python scripts/export_feature_schema.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/export_feature_schema.py \
   --model-dir ~/ubuntu-wallet/models/current \
   --data-dir ~/ubuntu-wallet/data \
   --rebuild \
@@ -1038,7 +1021,7 @@ python python-analyzer/walkforward_cv.py \
   --output-csv /tmp/cv_report.csv
 
 # 3) 在线 /predict 验证入口（MODEL_DIR=models/current/ 直接驱动 schema）
-curl -s http://127.0.0.1:8000/healthz | jq .
+curl -fsS http://127.0.0.1:8000/healthz | jq .
 curl -s -X POST http://127.0.0.1:8000/predict \
   -H 'Content-Type: application/json' \
   -d '{"interval":"1h"}' | jq .
@@ -1048,13 +1031,13 @@ curl -s -X POST http://127.0.0.1:8000/predict \
 
 ```bash
 # 预览哪个版本会被回滚（不做任何更改）
-python scripts/rollback_model.py --model-dir ~/ubuntu-wallet/models --dry-run
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/rollback_model.py --model-dir ~/ubuntu-wallet/models --dry-run
 ```
 
 ### 步骤 2：记录当前问题模型版本
 
 ```bash
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 # 注意 model_version 和 registry.model_version 字段
 ```
 
@@ -1075,7 +1058,7 @@ sudo systemctl restart ml-service
 sleep 5
 
 # 验证版本已恢复（model_version 应显示回滚后的版本）
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 # 确认 ok: true、calibration_available: true
 # 确认 model_version 是已知稳定版本
@@ -1366,9 +1349,7 @@ DATA_DIR=/home/ubuntu/ubuntu-wallet/data      # 数据根目录
 **解决**：
 ```bash
 cd ~/ubuntu-wallet/ml-service
-source .venv/bin/activate
-pip install -r requirements.txt
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
 
 sudo systemctl restart ml-service
 ```
@@ -1414,7 +1395,7 @@ ls -lh ~/ubuntu-wallet/models/ | grep calibration
 ```bash
 sudo systemctl restart ml-service
 sleep 5
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 # 确认 model_version 已更新
 ```
 
@@ -1446,7 +1427,7 @@ sudo swapon /swapfile
 
 **触发方式**：
 - 自动：`systemd/drift-monitor.timer`（每6小时，00:05/06:05/12:05/18:05）
-- 手动：`ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py --help`
+- 手动：`ENABLE_DRIFT_MONITOR=true ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/report_drift.py --help`
 
 **所需文件**：
 - `models/current/train_feature_stats.json`：训练时各特征 mean/std/missing_rate（由训练脚本生成）
@@ -1558,7 +1539,7 @@ k = next(iter(d)); print('sample:', k, d[k])
 ```bash
 # 使用回滚脚本
 SYMBOL=BTCUSDT
-python scripts/rollback_model.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/rollback_model.py \
   --model-dir models/${SYMBOL} \
   --target-version event_v3-<timestamp>
 ```
@@ -1594,4 +1575,4 @@ symbols:
 3. 在 `configs/symbols.yaml` 中设置 `XRPUSDT.enabled: true`
 4. 执行 `bash scripts/train_symbol.sh XRPUSDT`
 5. 验证模型产物：`ls models/XRPUSDT/current/`
-6. 手工验证 drift monitor：`ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py --symbol XRPUSDT --dry-run`
+6. 手工验证 drift monitor：`ENABLE_DRIFT_MONITOR=true ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/report_drift.py --symbol XRPUSDT --dry-run`

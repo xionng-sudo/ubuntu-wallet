@@ -110,10 +110,10 @@ result = exec_confirm_15m(side, klines_15m, enabled=True)
 
 ```bash
 # 使用原有 symmetric 模式（默认保持不变）
-python scripts/backtest_event_v3_http.py --data-dir data --mt-filter-mode symmetric
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py --data-dir data --mt-filter-mode symmetric
 
 # 使用新 layered gate（稍宽松：允许 4h NEUTRAL + 1d 同向）
-python scripts/backtest_event_v3_http.py --data-dir data --mt-filter-mode layered
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py --data-dir data --mt-filter-mode layered
 ```
 
 可选值：`off` | `long_only` | `symmetric` | `layered`（新增）
@@ -126,12 +126,12 @@ python scripts/backtest_event_v3_http.py --data-dir data --mt-filter-mode layere
 
 ```bash
 # 原有行为（symmetric，默认）
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path data/predictions_log.jsonl --data-dir data \
   --threshold 0.55 --tp 0.0175 --sl 0.007
 
 # 使用新 layered gate
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path data/predictions_log.jsonl --data-dir data \
   --threshold 0.55 --tp 0.0175 --sl 0.007 \
   --mt-filter-mode layered
@@ -145,7 +145,7 @@ python scripts/evaluate_from_logs.py \
 
 ```bash
 # 使用新 layered gate 进行阈值网格分析
-python scripts/report_threshold_grid.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/report_threshold_grid.py \
   --log-path data/predictions_log.jsonl --data-dir data \
   --tp 0.0175 --sl 0.007 \
   --mt-filter-mode layered
@@ -159,7 +159,7 @@ python scripts/report_threshold_grid.py \
 
 ```bash
 # 使用 layered gate 生成日报
-python scripts/generate_daily_report.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/generate_daily_report.py \
   --log-path data/predictions_log.jsonl --data-dir data \
   --tp 0.0175 --sl 0.007 --threshold 0.55 \
   --mt-filter-mode layered
@@ -173,13 +173,13 @@ python scripts/generate_daily_report.py \
 
 ```bash
 # 默认（legacy 模式，原有行为）
-python scripts/live_trader_eth_perp_binance.py
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_binance.py
 
 # 使用新 layered gate
-python scripts/live_trader_eth_perp_binance.py --use-layered-gate
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_binance.py --use-layered-gate
 
 # 同时启用 15m 执行确认（需要 data/klines_15m.json）
-python scripts/live_trader_eth_perp_binance.py --use-layered-gate --use-15m-confirm
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_binance.py --use-layered-gate --use-15m-confirm
 ```
 
 ---
