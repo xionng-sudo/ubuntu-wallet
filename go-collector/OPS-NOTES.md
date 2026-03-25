@@ -244,6 +244,67 @@ curl -fsS http://127.0.0.1:8080/api/healthz | jq '{enabled_symbols, primary_symb
 
 ---
 
-## 9. 安全提醒（强烈建议）
+## 9. 多币种自动在线预测（Multi-Symbol Automatic Online Prediction）
+
+### 9.1 工作原理
+
+每次 FAST 收集周期（默认 60 秒）完成后，go-collector 会对**所有已启用的交易对**依次：
+
+1. 计算 FeatureSnapshot（1h / 4h / 1d K 线特征）
+2. 调用本地规则引擎（`RulesEngine`）
+3. 向 ml-service 发送 `POST /predict`（携带 `symbol` 字段）
+4. ml-service 将预测结果写入 `data/<SYMBOL>/predictions_log.jsonl`
+
+主交易对（primary symbol，默认 ETHUSDT）的信号写入 `data/signals/`（根级，向下兼容）。  
+其他交易对的信号写入 `data/<SYMBOL>/signals/`（按交易对独立目录）。
+
+> **重要**：不需要手动 `curl /predict`；系统会在每个 FAST 周期自动为所有已启用交易对发送预测请求。
+
+### 9.2 验证自动预测日志
+
+运行约 2 分钟后，检查各交易对的预测日志是否持续追加：
+
+```bash
+# 检查所有已启用交易对的预测日志时间戳
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  echo -n "$sym predictions_log: "
+  stat -c '%y' /home/ubuntu/ubuntu-wallet/data/$sym/predictions_log.jsonl 2>/dev/null || echo "not found"
+done
+
+# 查看各交易对最新预测条目
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT; do
+  echo "=== $sym ==="
+  tail -n 2 /home/ubuntu/ubuntu-wallet/data/$sym/predictions_log.jsonl 2>/dev/null || echo "(not found)"
+done
+```
+
+### 9.3 验证 go-collector 日志中有多币种预测调用
+
+```bash
+# 应当看到多个不同交易对的特征计算日志（每 60s 一轮）
+journalctl -u go-collector.service --since "5 minutes ago" | grep -E '\[(BTC|ETH|SOL|BNB)USDT\]' | tail -30
+```
+
+正常输出示例：
+```
+[ETHUSDT] Feature snapshot aligned: schema=87 computed=80 missing=7
+[BTCUSDT] Feature snapshot aligned: schema=87 computed=80 missing=7
+[SOLUSDT] Feature snapshot aligned: schema=87 computed=80 missing=7
+[BNBUSDT] Feature snapshot aligned: schema=87 computed=80 missing=7
+```
+
+### 9.4 配置说明
+
+| 环境变量 | 默认值 | 说明 |
+|---|---|---|
+| `SYMBOLS` | BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT | 启用的交易对列表 |
+| `ENABLE_PHASE2_SYMBOLS` | false | 设为 `true` 可同时启用 Phase 2 交易对（XRPUSDT, DOGEUSDT, ADAUSDT） |
+| `PRIMARY_SYMBOL` | ETHUSDT | 主交易对（根级信号文件 + `/api/signal` 端点） |
+| `ML_SERVICE_URL` | http://127.0.0.1:9000/predict | ml-service 预测端点 |
+| `COLLECT_FAST_INTERVAL` | 60s | 自动预测触发频率 |
+
+---
+
+## 10. 安全提醒（强烈建议）
 - Telegram Bot Token 不要出现在聊天记录/日志/截图中；如已泄露，建议立即在 BotFather 重新生成并替换。
 - 更安全做法：把 token 放到 root-only env 文件（600 权限）并用 `EnvironmentFile=` 注入，而不是明文写在 unit override 里。
