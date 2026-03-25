@@ -336,5 +336,5 @@ sudo systemctl restart ml-service
 3. **部署路径**：文档里的 `~/ubuntu-wallet/` 表示部署服务器上的典型 checkout 路径，不是仓库内固定路径
 4. **venv 路径**：
    - ml-service 推理 venv：`~/ubuntu-wallet/ml-service/.venv/`（部署后创建，systemd 服务硬编码使用此路径）
-   - 训练/分析 venv：可复用 `ml-service/.venv`（安装 `python-analyzer/requirements.txt`），或单独创建 `venv-analyzer/`（均为运行时产物，不进 Git）
+   - 训练/分析 venv：统一复用 `ml-service/.venv`（安装 `python-analyzer/requirements.txt`），不再单独创建 `venv-analyzer/`
 5. **真仓前必须先完成 2 周以上 DRY-RUN**

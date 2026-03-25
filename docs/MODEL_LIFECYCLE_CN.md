@@ -243,13 +243,12 @@ cd ~/ubuntu-wallet
 ```bash
 cd ~/ubuntu-wallet
 
-# 如果还没有 venv-analyzer，创建一个
-python3 -m venv venv-analyzer
+# 安装 python-analyzer 依赖到 ml-service/.venv（统一使用同一虚拟环境）
 ~/ubuntu-wallet/ml-service/.venv/bin/pip install --upgrade pip setuptools wheel
 ~/ubuntu-wallet/ml-service/.venv/bin/pip install -r python-analyzer/requirements.txt
 ```
 
-> 说明：训练使用独立的 `venv-analyzer`，推理服务使用 `ml-service/.venv`，两者分开管理。
+> 说明：训练和推理服务统一使用 `ml-service/.venv`，所有脚本通过 `~/ubuntu-wallet/ml-service/.venv/bin/python` 调用。
 
 ## 4.3 执行训练
 
@@ -1012,7 +1011,7 @@ cd ~/ubuntu-wallet
   --validate-inference-row
 
 # 2) Walk-Forward 验证入口（与训练共用同一 multi-tf 特征路径）
-python python-analyzer/walkforward_cv.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
   --data-dir ~/ubuntu-wallet/data \
   --n-splits 5 \
   --gap-bars 12 \
@@ -1021,8 +1020,8 @@ python python-analyzer/walkforward_cv.py \
   --output-csv /tmp/cv_report.csv
 
 # 3) 在线 /predict 验证入口（MODEL_DIR=models/current/ 直接驱动 schema）
-curl -fsS http://127.0.0.1:8000/healthz | jq .
-curl -s -X POST http://127.0.0.1:8000/predict \
+curl -fsS http://127.0.0.1:9000/healthz | jq .
+curl -fsS -X POST http://127.0.0.1:9000/predict \
   -H 'Content-Type: application/json' \
   -d '{"interval":"1h"}' | jq .
 ```
@@ -1044,7 +1043,7 @@ curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 ### 步骤 3：执行回滚
 
 ```bash
-python ~/ubuntu-wallet/scripts/rollback_model.py --model-dir ~/ubuntu-wallet/models
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/rollback_model.py --model-dir ~/ubuntu-wallet/models
 # 脚本会：
 # 1. 从 registry.json 找到最近一条 archived 条目
 # 2. 将该版本的 archive 目录复制为 models/current/（替换现有内容）
@@ -1299,7 +1298,7 @@ DATA_DIR=/home/ubuntu/ubuntu-wallet/data      # 数据根目录
 
 - [ ] 数据文件存在且最新（klines_1h/4h/1d.json）
 - [ ] 数据时间连续，无明显断档
-- [ ] venv-analyzer 已安装所有依赖
+- [ ] `ml-service/.venv` 已安装所有依赖（ml-service/requirements.txt + python-analyzer/requirements.txt）
 - [ ] 磁盘空间充足（训练需要至少 5GB）
 
 ## 训练完成后检查
@@ -1508,7 +1507,7 @@ bash scripts/train_symbol.sh BTCUSDT
 
 # 手工训练（完整控制）
 SYMBOL=BTCUSDT
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir  data/${SYMBOL} \
   --model-dir models/${SYMBOL} \
   --horizon 12 --tp-pct 0.0175 --sl-pct 0.009 --calibration isotonic

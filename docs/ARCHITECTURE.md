@@ -373,8 +373,7 @@ data/klines_1d.json  ──┘         │
 # e.g. for ETHUSDT:
 ls data/ETHUSDT/klines_1h.json data/ETHUSDT/klines_4h.json data/ETHUSDT/klines_1d.json
 
-# Activate python environment
-cd python-analyzer
+cd ~/ubuntu-wallet
 ```
 
 ### 6.2 Step-by-Step Training (event_v3)
@@ -382,9 +381,9 @@ cd python-analyzer
 **Step 1 — Ternary labeling, default params:**
 
 ```bash
-python train_event_stack_v3.py \
-  --data-dir ../data \
-  --model-dir ../models \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
+  --data-dir ~/ubuntu-wallet/data \
+  --model-dir ~/ubuntu-wallet/models \
   --label-method ternary \
   --horizon 12 \
   --up-thresh 0.015 \
@@ -395,9 +394,9 @@ python train_event_stack_v3.py \
 **Step 2 — Triple-barrier labeling (more realistic, recommended for live):**
 
 ```bash
-python train_event_stack_v3.py \
-  --data-dir ../data \
-  --model-dir ../models \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
+  --data-dir ~/ubuntu-wallet/data \
+  --model-dir ~/ubuntu-wallet/models \
   --label-method triple_barrier \
   --horizon 12 \
   --tp-pct 0.0175 \
@@ -479,10 +478,9 @@ Walk-forward CV is used to assess model stability over time without lookahead bi
 ### 7.1 Usage
 
 ```bash
-cd python-analyzer
-python walkforward_cv.py \
-  --data-dir ../data \
-  --model-dir ../models \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
+  --data-dir ~/ubuntu-wallet/data \
+  --model-dir ~/ubuntu-wallet/models \
   --n-splits 5 \
   --gap-bars 12 \
   --min-train-bars 500 \
@@ -696,10 +694,9 @@ touch data/predictions_log.jsonl
 ### 10.2 Running Evaluation
 
 ```bash
-cd scripts
-python evaluate_from_logs.py \
-  --log-path ../data/predictions_log.jsonl \
-  --data-dir ../data \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
+  --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
+  --data-dir ~/ubuntu-wallet/data \
   --interval 1h \
   --active-model event_v3 \
   --threshold 0.55 \

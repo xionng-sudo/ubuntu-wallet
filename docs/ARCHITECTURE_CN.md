@@ -692,18 +692,14 @@ cd ubuntu-wallet
 ```
 
 ## 7.3 Python 虚拟环境建议
-建议分两个环境：
+统一使用一个虚拟环境（`ml-service/.venv/`）：
 
-### 推理服务环境
 ```bash
-python3 -m venv venv-ml-service
-~/ubuntu-wallet/ml-service/.venv/bin/pip install -r ml-service/requirements.txt
-```
-
-### 训练分析环境
-```bash
-python3 -m venv venv-analyzer
-~/ubuntu-wallet/ml-service/.venv/bin/pip install -r python-analyzer/requirements.txt
+cd ~/ubuntu-wallet/ml-service
+python3 -m venv .venv
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
+# 同时安装训练/分析依赖
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r ../python-analyzer/requirements.txt
 ```
 
 ## 7.4 Go 依赖安装
@@ -841,7 +837,7 @@ cd ~/ubuntu-wallet
 
 ## 9.3 正式训练
 ```bash
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --label-method triple_barrier \
   --tp-pct 0.0175 \
   --sl-pct 0.009 \

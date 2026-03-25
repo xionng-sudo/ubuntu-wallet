@@ -725,7 +725,7 @@ systemd 运行用户和手工用户不同。
 | ml-service     | 9000  | `http://127.0.0.1:9000/healthz`                  |
 | go-collector   | 8080  | `http://127.0.0.1:8080/api/healthz`              |
 | venv (ml-service) | -  | `~/ubuntu-wallet/ml-service/.venv/`              |
-| venv (analyzer)   | -  | `~/ubuntu-wallet/venv-analyzer/`                 |
+| venv (analyzer)   | -  | `~/ubuntu-wallet/ml-service/.venv/`（与 ml-service 共用） |
 | 敏感配置目录    | -     | `/etc/ubuntu-wallet/`                            |
 | 评估日志        | -     | `~/ubuntu-wallet/data/logs/evaluate_predictions.log`  |
 | 健康检查日志    | -     | `~/ubuntu-wallet/data/logs/check-go-collector.log`    |

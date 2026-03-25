@@ -578,7 +578,7 @@ cd ~/ubuntu-wallet
 ### 9.3 训练命令（标准配置）
 
 ```bash
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir data \
   --model-dir models \
   --label-method ternary \
@@ -601,7 +601,7 @@ python python-analyzer/train_event_stack_v3.py \
 ### 9.4 Walk-Forward 交叉验证（建议在部署前运行）
 
 ```bash
-python python-analyzer/walkforward_cv.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
   --data-dir data \
   --n-splits 5 \
   --gap-bars 12 \
@@ -706,7 +706,7 @@ bash scripts/train_all_symbols.sh --dry-run
 
 # 手工指定路径（完整控制）
 SYMBOL=BTCUSDT
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir  data/${SYMBOL} \
   --model-dir models/${SYMBOL} \
   --horizon   12 \
@@ -1173,8 +1173,7 @@ sudo systemctl restart go-collector.service
 sudo systemctl restart ml-service.service
 
 # ── 模型训练 ──────────────────────────────────────────────
-cd ~/ubuntu-wallet
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir data --model-dir models \
   --label-method ternary --horizon 12 --up-thresh 0.015 \
   --calibration isotonic
