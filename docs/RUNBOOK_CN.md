@@ -1017,8 +1017,12 @@ bash scripts/train_all_symbols.sh
 # 4. 启动核心服务
 sudo systemctl start go-collector ml-service
 
-# 5. 等待约 2 分钟，验证预测日志已生成
-for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
+# 5. 等待约 2 分钟，验证预测日志已生成（启用币种从 configs/symbols.yaml 动态读取）
+for sym in $(ml-service/.venv/bin/python -c "
+import sys; sys.path.insert(0,'scripts')
+from symbol_paths import list_enabled_symbols
+print(' '.join(list_enabled_symbols()))
+"); do
   echo -n "$sym: "
   stat -c '%y' data/$sym/predictions_log.jsonl 2>/dev/null || echo "NOT FOUND"
 done
@@ -1657,8 +1661,13 @@ WARNING: [BTCUSDT] train-stats file not found, skipping drift: /home/ubuntu/ubun
 **修复**：
 
 ```bash
-# 检查哪些币种缺少 artifact
-for SYM in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
+# 检查哪些币种缺少 artifact（从 configs/symbols.yaml 动态读取启用币种）
+cd ~/ubuntu-wallet
+for SYM in $(ml-service/.venv/bin/python -c "
+import sys; sys.path.insert(0,'scripts')
+from symbol_paths import list_enabled_symbols
+print(' '.join(list_enabled_symbols()))
+"); do
   FILE=~/ubuntu-wallet/models/${SYM}/current/train_feature_stats.json
   [ -f "$FILE" ] && echo "OK   ${SYM}" || echo "MISS ${SYM}"
 done
@@ -1723,8 +1732,12 @@ tail -n 200 ~/ubuntu-wallet/data/logs/drift_monitor.log
 ls -lt ~/ubuntu-wallet/data/BTCUSDT/reports/drift_*.md | head -5
 cat ~/ubuntu-wallet/data/BTCUSDT/reports/drift_$(date +%Y-%m-%d).md
 
-# 批量查看所有币种今日报告
-for SYM in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
+# 批量查看所有币种今日报告（从 configs/symbols.yaml 动态读取启用币种）
+for SYM in $(ml-service/.venv/bin/python -c "
+import sys; sys.path.insert(0,'scripts')
+from symbol_paths import list_enabled_symbols
+print(' '.join(list_enabled_symbols()))
+"); do
   FILE=~/ubuntu-wallet/data/${SYM}/reports/drift_$(date +%Y-%m-%d).json
   if [ -f "$FILE" ]; then
     echo "=== ${SYM} ==="
