@@ -299,11 +299,22 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--all-symbols",
+        action="store_true",
+        default=False,
+        help=(
+            "Run drift report for every enabled symbol listed in configs/symbols.yaml. "
+            "Per-symbol paths are derived automatically.  Symbols whose train-stats or "
+            "prediction log are missing are skipped with a warning (failure-isolated). "
+            "Mutually exclusive with --symbol / --train-stats / --log-path."
+        ),
+    )
+    parser.add_argument(
         "--train-stats",
         default=None,
         help=(
             "JSON file with per-feature mean/std/missing_rate from training. "
-            "Required unless --symbol is given."
+            "Required unless --symbol or --all-symbols is given."
         ),
     )
     parser.add_argument(
@@ -311,7 +322,7 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "JSONL predictions log file. "
-            "Required unless --symbol is given."
+            "Required unless --symbol or --all-symbols is given."
         ),
     )
     parser.add_argument(
@@ -333,6 +344,15 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _get_symbol_paths_module():
+    """Import symbol_paths from the scripts directory."""
+    _scripts_dir = os.path.dirname(os.path.abspath(__file__))
+    if _scripts_dir not in sys.path:
+        sys.path.insert(0, _scripts_dir)
+    import symbol_paths  # type: ignore[import]
+    return symbol_paths
+
+
 def main() -> None:
     args = _parse_args()
 
@@ -340,27 +360,67 @@ def main() -> None:
         print("ENABLE_DRIFT_MONITOR=false, skipping.")
         sys.exit(0)
 
-    # Resolve per-symbol defaults when --symbol is provided
+    # --all-symbols: loop over every enabled symbol; skip symbols with missing artifacts
+    if args.all_symbols:
+        try:
+            sp = _get_symbol_paths_module()
+        except ImportError as exc:
+            print(f"ERROR: could not import symbol_paths: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+        symbols = sp.list_enabled_symbols()
+        if not symbols:
+            print("WARNING: no enabled symbols found in configs/symbols.yaml; nothing to do.")
+            sys.exit(0)
+
+        any_failed = False
+        for sym in symbols:
+            train_stats = sp.get_symbol_train_stats_path(sym)
+            log_path = sp.get_symbol_log_path(sym)
+            output_dir = sp.get_symbol_reports_dir(sym)
+
+            if not os.path.exists(train_stats):
+                print(
+                    f"WARNING: [{sym}] train-stats file not found, skipping drift: {train_stats}",
+                    file=sys.stderr,
+                )
+                continue
+            if not os.path.exists(log_path):
+                print(
+                    f"WARNING: [{sym}] prediction log not found, skipping drift: {log_path}",
+                    file=sys.stderr,
+                )
+                continue
+
+            print(f"[drift] running for symbol={sym}")
+            try:
+                run_drift_report(
+                    train_stats_path=train_stats,
+                    log_path=log_path,
+                    output_dir=output_dir,
+                    window_rows=args.window_rows,
+                    dry_run=args.dry_run,
+                )
+            except Exception as exc:
+                print(f"ERROR: [{sym}] drift report failed: {exc}", file=sys.stderr)
+                any_failed = True
+
+        sys.exit(1 if any_failed else 0)
+
+    # Single-symbol or explicit-path mode
     train_stats = args.train_stats
     log_path = args.log_path
     output_dir = args.output_dir
 
     if args.symbol:
-        _scripts_dir = os.path.dirname(os.path.abspath(__file__))
-        if _scripts_dir not in sys.path:
-            sys.path.insert(0, _scripts_dir)
         try:
-            from symbol_paths import (  # type: ignore[import]
-                get_symbol_train_stats_path,
-                get_symbol_log_path,
-                get_symbol_reports_dir,
-            )
+            sp = _get_symbol_paths_module()
             if train_stats is None:
-                train_stats = get_symbol_train_stats_path(args.symbol)
+                train_stats = sp.get_symbol_train_stats_path(args.symbol)
             if log_path is None:
-                log_path = get_symbol_log_path(args.symbol)
+                log_path = sp.get_symbol_log_path(args.symbol)
             if output_dir is None:
-                output_dir = get_symbol_reports_dir(args.symbol)
+                output_dir = sp.get_symbol_reports_dir(args.symbol)
         except ImportError:
             pass  # symbol_paths not available; fall through to error below
 
@@ -369,11 +429,17 @@ def main() -> None:
         output_dir = "data/reports"
 
     if train_stats is None:
-        print("ERROR: --train-stats is required (or provide --symbol to derive path automatically).", file=sys.stderr)
+        print(
+            "ERROR: --train-stats is required (or provide --symbol / --all-symbols to derive path automatically).",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if log_path is None:
-        print("ERROR: --log-path is required (or provide --symbol to derive path automatically).", file=sys.stderr)
+        print(
+            "ERROR: --log-path is required (or provide --symbol / --all-symbols to derive path automatically).",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     if not os.path.exists(train_stats):
