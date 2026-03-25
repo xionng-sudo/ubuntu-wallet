@@ -244,7 +244,7 @@ class TestLiveTraderPerpSimulatedCLI(unittest.TestCase):
             spec.loader.exec_module(mod)  # type: ignore[union-attr]
         except Exception:
             self.skipTest("Module-level import failed (missing deps)")
-        ap = mod._build_parser()
+        ap = mod.build_parser()
         defaults = ap.parse_args([])
         self.assertEqual(defaults.symbol, "ETHUSDT", "Default symbol must be ETHUSDT")
         self.assertFalse(defaults.all_symbols, "Default --all-symbols must be False")

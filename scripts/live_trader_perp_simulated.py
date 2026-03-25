@@ -586,7 +586,7 @@ def run_simulation(
 # Entry point
 # ---------------------------------------------------------------------------
 
-def _build_parser() -> argparse.ArgumentParser:
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         description=(
             "Perpetual contract simulated replay trader (DRY-RUN). "
@@ -671,7 +671,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _run_for_symbol(symbol: str, args: argparse.Namespace) -> None:
+def run_for_symbol(symbol: str, args: argparse.Namespace) -> None:
     """Run simulation for a single symbol, merging CLI overrides with symbol config."""
     cfg = get_symbol_config(symbol)
     tp_pct = args.tp if args.tp is not None else float(cfg["tp"])
@@ -705,7 +705,7 @@ def _run_for_symbol(symbol: str, args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
-    ap = _build_parser()
+    ap = build_parser()
     args = ap.parse_args()
 
     if args.all_symbols:
@@ -715,6 +715,6 @@ if __name__ == "__main__":
             sys.exit(1)
         print(f"[sim] Running for all {len(symbols)} enabled symbols: {', '.join(symbols)}")
         for sym in symbols:
-            _run_for_symbol(sym, args)
+            run_for_symbol(sym, args)
     else:
-        _run_for_symbol(args.symbol, args)
+        run_for_symbol(args.symbol, args)

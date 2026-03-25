@@ -31,8 +31,8 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from live_trader_perp_simulated import (  # type: ignore
-    _build_parser,
-    _run_for_symbol,
+    build_parser,
+    run_for_symbol,
     run_simulation,
 )
 
@@ -53,7 +53,7 @@ if __name__ == "__main__":
 
     # Build parser that matches the generic script so old CLI flags still work.
     # Add --data-dir alias for users who pass it explicitly (maps to --data-base-dir).
-    ap = _build_parser()
+    ap = build_parser()
     # --data-dir is the old flag name; add it for backward compat
     ap.add_argument(
         "--data-dir",
@@ -74,4 +74,4 @@ if __name__ == "__main__":
     args.symbol = "ETHUSDT"
     args.all_symbols = False
 
-    _run_for_symbol("ETHUSDT", args)
+    run_for_symbol("ETHUSDT", args)
