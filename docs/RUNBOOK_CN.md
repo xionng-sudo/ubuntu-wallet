@@ -36,6 +36,7 @@
 20. [漂移监控完整参考（Drift Monitor）](#20-漂移监控完整参考drift-monitor)
 21. [新增币种与阈值调试指南](#21-新增币种与阈值调试指南)
 22. [故障排查手册（Troubleshooting）](#22-故障排查手册troubleshooting)
+23. [脚本参数速查（`--help` 摘要）](#23-脚本参数速查--help-摘要)
 
 ---
 
@@ -257,6 +258,11 @@ done
 
 # 5. 常用命令速查
 
+> **唯一正确的 Python 调用风格**：所有脚本一律使用 `~/ubuntu-wallet/ml-service/.venv/bin/python <script>` 直接调用，**不要**用 `source activate` / `deactivate` 包裹。这样不依赖 shell 状态，在 systemd / cron / 子 shell 中均可重现。
+>
+> 正确示例：`~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py ...`  
+> 禁止用法：`source .venv/bin/activate && python ...`
+
 ## 5.1 查看服务状态
 ```bash
 systemctl status go-collector
@@ -267,20 +273,20 @@ systemctl status evaluate-predictions.timer
 预期输出（go-collector 正常状态）：
 ```
 ● go-collector.service - ubuntu-wallet go-collector
-     Active: active (running) since Mon 2026-03-15 10:00:00 UTC; 2h 30min ago
+     Active: active (running) since Mon 2026-03-15 10:00:00 +0800; 2h 30min ago
 ```
 
 预期输出（timer 正常状态）：
 ```
 ● evaluate-predictions.timer - Run prediction evaluator every 6 hours
-     Active: active (waiting) since Mon 2026-03-15 06:06:08 UTC; 5h ago
-    Trigger: Mon 2026-03-15 18:06:08 UTC; 35min left
+     Active: active (waiting) since Mon 2026-03-15 06:06:08 +0800; 5h ago
+    Trigger: Mon 2026-03-15 18:06:08 +0800; 35min left
 ```
 
 **输出说明（Output explanation）：**
 - `active (running)`：服务正在运行 / Service is actively running
 - `active (waiting)`：timer 在等待下次触发 / Timer is waiting for next trigger
-- `Trigger: 18:06:08 UTC`：下次触发时间 / Next trigger time
+- `Trigger: 18:06:08 +0800`：下次触发时间（本机时区，以 `systemctl list-timers` 实际输出为准）
 
 ## 5.2 查看日志
 ```bash
@@ -314,8 +320,7 @@ sudo systemctl restart ml-service
 
 ## 5.4 手工执行评估
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --symbol ETHUSDT \
   --log-path ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl \
   --data-dir ~/ubuntu-wallet/data/ETHUSDT \
@@ -326,27 +331,22 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --sl 0.007 \
   --fee 0.0004 \
   --horizon-bars 6
-deactivate
 ```
 
 ## 5.5 跑模拟交易
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
 ```
 
 ## 5.6 跑 walk-forward
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
   --data-dir ~/ubuntu-wallet/data \
   --n-splits 5 \
   --gap-bars 12 \
   --label-method ternary \
   --confidence-threshold 0.65 \
   --output-csv /tmp/cv_report.csv
-deactivate
 ```
 
 ---
@@ -717,8 +717,9 @@ ENABLE_DRIFT_MONITOR=true \
 ## 16.5 手工运行 Calibration Report
 
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-ENABLE_CALIB_REPORT=true python ~/ubuntu-wallet/python-analyzer/calibration_report.py \
+ENABLE_CALIB_REPORT=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/python-analyzer/calibration_report.py \
   --log-path ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl \
   --output-dir ~/ubuntu-wallet/data/ETHUSDT/reports \
   --dry-run
@@ -843,7 +844,7 @@ bash ~/ubuntu-wallet/scripts/train_all_symbols.sh --dry-run
 
 # 方式三：手工指定路径（完整控制）
 SYMBOL=BTCUSDT
-python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir  ~/ubuntu-wallet/data/${SYMBOL} \
   --model-dir ~/ubuntu-wallet/models/${SYMBOL} \
   --horizon 12 --tp-pct 0.0175 --sl-pct 0.009 --calibration isotonic
@@ -856,11 +857,10 @@ python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
 ```bash
 # 自动从 configs/symbols.yaml 派生路径和参数
 SYMBOL=BTCUSDT
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/scripts/evaluate_from_logs.py --symbol ${SYMBOL}
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py --symbol ${SYMBOL}
 
 # 也可手工覆盖单个参数
-python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --symbol ${SYMBOL} --threshold 0.68 --tp 0.020
 ```
 
@@ -1329,7 +1329,7 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-定时器每天在 00:05、06:05、12:05、18:05（UTC）触发，随机延迟最多 2 分钟以避免集中负载。
+定时器触发时间以本机时区为准（`OnCalendar=*-*-* 00,06,12,18:05:00`），随机延迟最多 2 分钟以避免集中负载。实际下次触发时间以 `systemctl list-timers drift-monitor.timer` 输出为准。
 
 ### 部署步骤
 
@@ -1381,7 +1381,7 @@ tail -f ~/ubuntu-wallet/data/logs/drift_monitor.log
 ```
 ● drift-monitor.service - ubuntu-wallet feature drift monitor
      Loaded: loaded (/etc/systemd/system/drift-monitor.service; static)
-     Active: inactive (dead) since 2026-03-25 12:05:03 UTC; 5min ago
+     Active: inactive (dead) since 2026-03-25 12:05:03 +0800; 5min ago
     Process: ExecStart=/bin/bash -c ... (code=exited, status=0/SUCCESS)
    Main PID: 1234 (code=exited, status=0/SUCCESS)
 
@@ -1772,4 +1772,174 @@ ls -lah ~/ubuntu-wallet/models/${SYMBOL}/current/
 # 如模型缺失，运行训练
 bash ~/ubuntu-wallet/scripts/train_symbol.sh ${SYMBOL}
 sudo systemctl restart ml-service
+```
+
+---
+
+# 23. 脚本参数速查（`--help` 摘要）
+
+> 本节集中列出所有常用脚本的参数、默认值与说明，方便一处查阅，无需分散翻阅各章。
+
+---
+
+## 23.1 `scripts/report_drift.py`
+
+```
+用途：特征漂移监控 — 比较训练期特征分布与线上预测日志中的特征分布
+
+调用示例：
+  ~/ubuntu-wallet/ml-service/.venv/bin/python scripts/report_drift.py --help
+
+参数列表：
+
+参数                     默认值       说明
+----------------------  -----------  -----------------------------------------------
+--symbol <SYM>          (无)         单币种模式，自动派生 train-stats/log-path/output-dir
+--all-symbols           (关闭)       全币种模式，从 configs/symbols.yaml 读取所有 enabled 币种
+--models-base-dir <路径> (见下方)     仅 --all-symbols 有效；模型根目录（必须是绝对路径且存在）
+                                     优先级：CLI > MODELS_BASE_DIR 环境变量 > APP_ROOT/models > 脚本推导
+--train-stats <文件>    (自动推导)    train_feature_stats.json 路径（单币种时可覆盖默认值）
+--log-path <文件>       (自动推导)    predictions_log.jsonl 路径
+--output-dir <目录>     data/<SYM>/reports 或 data/reports
+--window-rows <N>       200          分析最近 N 行预测记录
+--dry-run               (关闭)       仅计算，不写文件
+
+环境变量（优先于脚本默认，低于 CLI 参数）：
+  ENABLE_DRIFT_MONITOR   必须为 "true" 才执行，否则退出 0（默认 "false"）
+  MODELS_BASE_DIR        --all-symbols 模型根目录（被 --models-base-dir 覆盖）
+  APP_ROOT               仓库根目录（用于推导 MODELS_BASE_DIR = APP_ROOT/models）
+  MODEL_DIR              ⚠ 单币种推理指针，--all-symbols 模式完全忽略此变量
+
+输出：
+  data/<SYM>/reports/drift_YYYY-MM-DD.json   完整 JSON 报告
+  data/<SYM>/reports/drift_YYYY-MM-DD.md     Markdown 摘要（仅 mean_drift > 1σ 的特征）
+```
+
+---
+
+## 23.2 `scripts/backtest_event_v3_http.py`
+
+```
+用途：通过本地 ml-service HTTP 端点进行参数网格搜索回测
+前提：ml-service 正在运行（sudo systemctl start ml-service）
+
+调用示例：
+  ~/ubuntu-wallet/ml-service/.venv/bin/python scripts/backtest_event_v3_http.py \
+    --data-dir data/BTCUSDT --debug-best
+
+参数列表：
+
+参数                       默认值                说明
+------------------------  --------------------  -----------------------------------------------
+--data-dir <路径>          (必填)               per-symbol 数据目录（含 klines_1h.json）
+--base-url <URL>           http://127.0.0.1:9000 ml-service 地址
+--interval                 1h                   K 线周期
+--fee                      0.0004               手续费率（单边，如 0.04%）
+--slippage                 0.0                  滑点（单边）
+--since <ISO8601>          (无，全部)            回测开始时间（本机时区解析）
+--until <ISO8601>          (无，全部)            回测结束时间
+--horizon-bars             24                   最大持仓 bar 数
+--thresholds               0.55:0.85:0.02       概率阈值网格（min:max:step）
+--tp-grid                  0.005:0.030:0.0025   止盈比例网格
+--sl-grid                  0.003:0.020:0.001    止损比例网格
+--min-signals-per-week     5.0                  有效配置最少信号频率
+--position-mode            stack                stack（叠加）| single（单仓）
+--objective                avg_ret_mdd_daily    优化目标：pf | avg_ret | avg_ret_mdd_daily | avg_ret_mdd_hourly
+--timeout-exit             close                超时退出价格：close | open_next
+--tie-breaker              SL                   TP/SL 同时触发时优先方：SL | TP
+--warmup-bars              200                  预热跳过的 bar 数
+--side-source              probs                信号来源：signal | probs
+--mt-filter-mode           long_only            趋势过滤：off | long_only | symmetric | layered
+--sleep-ms                 0                    每次 HTTP 调用间隔（毫秒，调试用）
+--debug-best               (关闭)               打印最优配置的详细诊断信息
+```
+
+---
+
+## 23.3 `python-analyzer/train_event_stack_v3.py`
+
+```
+用途：训练 event_v3 多时间框架 LightGBM + XGBoost + LR 堆叠模型
+（通常通过 scripts/train_symbol.sh 或 train_all_symbols.sh 调用，不直接调用）
+
+调用示例：
+  ~/ubuntu-wallet/ml-service/.venv/bin/python python-analyzer/train_event_stack_v3.py \
+    --data-dir data/BTCUSDT --model-dir models/BTCUSDT
+
+参数列表：
+
+参数                  默认值              说明
+------------------   ----------------    -----------------------------------------------
+--data-dir <路径>     <repo_root>/data   含 klines_1h.json、klines_4h.json、klines_1d.json 的目录
+--model-dir <路径>    <repo_root>/models 模型产物输出目录（训练后写入 <model-dir>/current/）
+--p-enter            0.65               最低进场概率（存入 model_meta.json）
+--delta              0.0                p_long - p_short 最小差值
+--label-method       ternary            标签方法：ternary（前向收益）| triple_barrier（TP/SL/horizon）
+--horizon            12                 标签前向 bar 数
+--up-thresh          0.015              ternary 方法 LONG 阈值（如 0.015 = 1.5%）
+--down-thresh        0.015              ternary 方法 SHORT 阈值
+--tp-pct             0.0175             triple_barrier 止盈比例（1.75%）
+--sl-pct             0.009              triple_barrier 止损比例（0.9%）
+--calibration        isotonic           概率校准：isotonic | sigmoid | none
+```
+
+---
+
+## 23.4 `scripts/evaluate_from_logs.py`
+
+```
+用途：从 prediction log 评估模型表现（PnL / 胜率 / MDD 等）
+
+调用示例：
+  ~/ubuntu-wallet/ml-service/.venv/bin/python scripts/evaluate_from_logs.py --symbol BTCUSDT
+
+参数列表：
+
+参数                  默认值（--symbol 时自动推导）   说明
+------------------   ----------------------------   -----------------------------------------------
+--symbol <SYM>        (无)                          指定币种，自动推导以下参数默认值
+--log-path <文件>     data/<SYM>/predictions_log.jsonl  预测日志路径
+--data-dir <目录>     data/<SYM>                    含 klines_*.json 的目录
+--interval            1h（或来自 symbol config）    K 线周期
+--active-model        event_v3                      使用的模型版本名称
+--model-version       (无)                          可选版本过滤
+--since <ISO8601>     (无，全部)                    评估开始时间
+--until <ISO8601>     (无，全部)                    评估结束时间
+--threshold           0.65（或来自 symbol config）  进场概率阈值
+--tp                  0.0175（或来自 symbol config）止盈比例
+--sl                  0.009（或来自 symbol config） 止损比例
+--fee                 0.0004                        手续费率（单边）
+--slippage            0.0                           滑点（单边）
+--horizon-bars        6（或来自 symbol config）     前向 bar 数
+--tie-breaker         SL                            同时触发时优先：SL | TP
+--timeout-exit        close                         超时退出价格：close | open_next
+--mt-filter-mode      symmetric                     趋势过滤：symmetric | layered
+```
+
+---
+
+## 23.5 `scripts/train_symbol.sh` 和 `scripts/train_all_symbols.sh`
+
+```
+用途：单币种 / 批量训练便捷包装，自动从 configs/symbols.yaml 读取参数
+
+train_symbol.sh：
+  bash scripts/train_symbol.sh <SYMBOL> [额外参数转发给训练脚本]
+  bash scripts/train_symbol.sh BTCUSDT
+  bash scripts/train_symbol.sh ETHUSDT --calibration sigmoid
+
+  环境变量覆盖：
+    DATA_BASE   数据根目录（默认 <repo_root>/data）
+    MODEL_BASE  模型根目录（默认 <repo_root>/models）
+    PYTHON      Python 解释器路径（默认 python3；生产环境建议设为 ~/ubuntu-wallet/ml-service/.venv/bin/python）
+
+train_all_symbols.sh：
+  bash scripts/train_all_symbols.sh                    # 训练所有 enabled 币种
+  bash scripts/train_all_symbols.sh --dry-run          # 预演，仅打印命令
+  bash scripts/train_all_symbols.sh --calibration sigmoid  # 覆盖校准方法
+
+  特性：
+    - 单个币种失败不影响其余币种（失败隔离）
+    - 最终汇总哪些成功、哪些失败
+    - 通过 symbol_paths.list_enabled_symbols() 动态读取 configs/symbols.yaml
 ```

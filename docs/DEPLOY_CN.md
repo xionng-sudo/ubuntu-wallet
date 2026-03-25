@@ -670,7 +670,7 @@ systemctl status check-go-collector.timer --no-pager
 ```
 ● ml-service.service - ubuntu-wallet ml-service (FastAPI)
      Loaded: loaded (/etc/systemd/system/ml-service.service; enabled; vendor preset: enabled)
-     Active: active (running) since Mon 2026-03-15 10:00:00 UTC; 5s ago
+     Active: active (running) since Mon 2026-03-15 10:00:00 +0800; 5s ago
    Main PID: 12345 (python)
       Tasks: 2 (limit: 4915)
      Memory: 512.0M

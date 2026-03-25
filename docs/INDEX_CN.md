@@ -113,11 +113,11 @@ ubuntu-wallet/
 │   ├── evaluate-predictions.service  # 评估任务服务
 │   ├── evaluate-predictions.timer    # 评估任务定时器（每 6 小时）
 │   ├── drift-monitor.service     # 特征漂移监控服务（oneshot，调用 report_drift.py --all-symbols）
-│   ├── drift-monitor.timer       # 漂移监控定时器（每 6 小时：00/06/12/18:05 UTC）
+│   ├── drift-monitor.timer       # 漂移监控定时器（每 6 小时，以本机时区为准）
 │   ├── daily-report.service      # 每日报告服务
-│   ├── daily-report.timer        # 每日报告定时器（01:05 UTC）
+│   ├── daily-report.timer        # 每日报告定时器（01:05 本机时区）
 │   ├── calibration-report.service# 校准报告服务
-│   ├── calibration-report.timer  # 校准报告定时器（周一 02:00 UTC）
+│   ├── calibration-report.timer  # 校准报告定时器（周一 02:00 本机时区）
 │   ├── check-go-collector.service    # go-collector 健康检查服务
 │   ├── check-go-collector.timer      # 健康检查定时器（每 1 分钟）
 │   ├── env/
@@ -319,6 +319,7 @@ deactivate
 | 新增币种步骤                      | `RUNBOOK_CN.md` 第 21 节              |
 | 阈值调参方法                      | `RUNBOOK_CN.md` 第 21.2 节            |
 | 故障排查（ENABLE_DRIFT_MONITOR / MODEL_DIR / systemd） | `RUNBOOK_CN.md` 第 22 节 |
+| 所有脚本参数速查（`--help` 摘要）  | `RUNBOOK_CN.md` 第 23 节 |
 | ml-service 起不来怎么办？         | `FAILURE_MODES_CN.md` 第 6.1 节        |
 | go-collector 没有数据怎么办？     | `FAILURE_MODES_CN.md` 第 3 节          |
 | 如何切换/回滚模型？               | `MODEL_LIFECYCLE_CN.md` 第 8/10 节     |
