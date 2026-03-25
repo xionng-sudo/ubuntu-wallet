@@ -92,6 +92,10 @@ ubuntu-wallet/
 │   ├── live_trader_eth_perp_simulated.py  # 模拟交易（历史回放）
 │   ├── live_trader_eth_perp_binance.py    # DRY-RUN / 真仓交易执行
 │   ├── backtest_event_v3_http.py # HTTP 回测（调用 ml-service）
+│   ├── report_drift.py           # 特征漂移监控（支持 --symbol / --all-symbols / --models-base-dir）
+│   ├── symbol_paths.py           # 多币种路径解析工具（供其他脚本导入）
+│   ├── train_symbol.sh           # 单币种训练便捷包装
+│   ├── train_all_symbols.sh      # 批量训练所有启用币种（失败隔离）
 │   ├── eth_perp_engine_binance.py# ETH 永续合约风控引擎
 │   ├── analysis_tool.py          # 分析工具
 │   ├── run.sh                    # 快速启动脚本
@@ -108,6 +112,12 @@ ubuntu-wallet/
 │   ├── ml-service.service        # ml-service 服务定义
 │   ├── evaluate-predictions.service  # 评估任务服务
 │   ├── evaluate-predictions.timer    # 评估任务定时器（每 6 小时）
+│   ├── drift-monitor.service     # 特征漂移监控服务（oneshot，调用 report_drift.py --all-symbols）
+│   ├── drift-monitor.timer       # 漂移监控定时器（每 6 小时：00/06/12/18:05 UTC）
+│   ├── daily-report.service      # 每日报告服务
+│   ├── daily-report.timer        # 每日报告定时器（01:05 UTC）
+│   ├── calibration-report.service# 校准报告服务
+│   ├── calibration-report.timer  # 校准报告定时器（周一 02:00 UTC）
 │   ├── check-go-collector.service    # go-collector 健康检查服务
 │   ├── check-go-collector.timer      # 健康检查定时器（每 1 分钟）
 │   ├── env/
@@ -128,15 +138,17 @@ ubuntu-wallet/
 ```
 ① docs/DEPLOY_CN.md
      ↓ 完成部署后
-② docs/RUNBOOK_CN.md（第 3 节：每日检查清单）
+② docs/RUNBOOK_CN.md（第 18 节：快速入门）
      ↓ 需要训练模型时
-③ docs/MODEL_LIFECYCLE_CN.md（第 2-7 节）
+③ docs/RUNBOOK_CN.md（第 19 节：完整 Ops + ML 工作流程）
+     ↓ 需要管理多币种时
+④ docs/MODEL_LIFECYCLE_CN.md（第 2-7 节）
 ```
 
 ### 路径 2：运维接手
 
 ```
-① docs/RUNBOOK_CN.md（完整阅读）
+① docs/RUNBOOK_CN.md（完整阅读，重点第 18-22 节）
 ② docs/FAILURE_MODES_CN.md（了解常见故障）
 ③ docs/MODEL_LIFECYCLE_CN.md（了解模型切换/回滚）
 ```
@@ -145,15 +157,30 @@ ubuntu-wallet/
 
 ```
 ① docs/MODEL_LIFECYCLE_CN.md（完整阅读）
-② docs/RUNBOOK_CN.md（第 8 节：模型运维）
+② docs/RUNBOOK_CN.md（第 19 节：Ops + ML 工作流程）
 ③ docs/DEPLOY_CN.md（第 16-17 节：升级/回滚流程）
 ```
 
 ### 路径 4：故障处理
 
 ```
-① docs/FAILURE_MODES_CN.md（根据故障类型查阅对应章节）
-② docs/RUNBOOK_CN.md（第 13 节：异常场景处置）
+① docs/RUNBOOK_CN.md（第 22 节：故障排查手册）
+② docs/FAILURE_MODES_CN.md（根据故障类型查阅对应章节）
+③ docs/RUNBOOK_CN.md（第 13 节：异常场景处置）
+```
+
+### 路径 5：漂移监控运维
+
+```
+① docs/RUNBOOK_CN.md（第 20 节：漂移监控完整参考）
+② docs/RUNBOOK_CN.md（第 22.1-22.4 节：常见 drift 故障排查）
+```
+
+### 路径 6：新增币种
+
+```
+① docs/RUNBOOK_CN.md（第 21 节：新增币种与阈值调试指南）
+② docs/RUNBOOK_CN.md（第 19.3 节：何时需要重新训练）
 ```
 
 ---
@@ -229,8 +256,9 @@ deactivate
 | 路径                                          | 说明                                   |
 |-----------------------------------------------|----------------------------------------|
 | `.env.example`                                | 环境变量模板                           |
+| `configs/symbols.yaml`                        | 多币种配置（threshold/tp/sl/horizon/calibration） |
 | `docs/DEPLOY_CN.md`                           | 中文部署手册                           |
-| `docs/RUNBOOK_CN.md`                          | 中文运维手册                           |
+| `docs/RUNBOOK_CN.md`                          | 中文运维手册（含 Quick Start、ML 工作流、Drift 监控、新增币种、故障排查） |
 | `docs/MODEL_LIFECYCLE_CN.md`                  | 模型生命周期文档                       |
 | `docs/FAILURE_MODES_CN.md`                    | 故障排查与恢复手册                     |
 | `go-collector/main.go`                        | go-collector 程序入口                  |
@@ -239,9 +267,15 @@ deactivate
 | `python-analyzer/walkforward_cv.py`           | Walk-Forward 验证脚本                  |
 | `scripts/evaluate_from_logs.py`               | prediction log 评估脚本                |
 | `scripts/backtest_event_v3_http.py`           | 调用 ml-service 的 HTTP 回测脚本       |
+| `scripts/report_drift.py`                     | 特征漂移监控脚本（支持 --all-symbols、--models-base-dir） |
+| `scripts/symbol_paths.py`                     | 多币种路径解析工具                     |
+| `scripts/train_symbol.sh`                     | 单币种训练便捷包装                     |
+| `scripts/train_all_symbols.sh`                | 批量训练所有启用币种                   |
 | `systemd/ml-service.service`                  | ml-service systemd 服务文件            |
 | `systemd/go-collector.service`                | go-collector systemd 服务文件          |
 | `systemd/evaluate-predictions.service`        | 自动评估任务服务文件                   |
+| `systemd/drift-monitor.service`               | 漂移监控 systemd 服务文件              |
+| `systemd/drift-monitor.timer`                 | 漂移监控定时器（每 6 小时）            |
 | `systemd/env/collector.env.example`           | collector 环境变量模板                 |
 | `systemd/env/telegram.env.example`            | Telegram 通知环境变量模板              |
 
@@ -252,13 +286,19 @@ deactivate
 | 路径                                          | 说明                                   |
 |-----------------------------------------------|----------------------------------------|
 | `~/ubuntu-wallet/data/predictions_log.jsonl`  | 预测日志（运行后生成）                 |
+| `~/ubuntu-wallet/data/<SYM>/predictions_log.jsonl` | 多币种预测日志（运行后生成）      |
+| `~/ubuntu-wallet/data/<SYM>/reports/drift_YYYY-MM-DD.json` | Drift 监控 JSON 报告       |
+| `~/ubuntu-wallet/data/<SYM>/reports/drift_YYYY-MM-DD.md`   | Drift 监控 Markdown 摘要   |
 | `~/ubuntu-wallet/data/klines_1h.json`     | 1h K 线数据（采集后生成）              |
 | `~/ubuntu-wallet/data/klines_4h.json`     | 4h K 线数据（采集后生成）              |
 | `~/ubuntu-wallet/data/klines_1d.json`     | 日线 K 线数据（采集后生成）            |
 | `~/ubuntu-wallet/models/`                     | 模型文件目录（训练默认输出，服务加载源）|
+| `~/ubuntu-wallet/models/<SYM>/current/train_feature_stats.json` | Drift 监控必需的训练统计文件 |
 | `~/ubuntu-wallet/models_backup/`              | 模型备份目录（建议人工维护）           |
+| `~/ubuntu-wallet/data/logs/drift_monitor.log` | drift-monitor.service 日志（systemd 定时触发） |
 | `~/ubuntu-wallet/data/logs/evaluate_predictions.log` | 评估任务日志（部署后写入）       |
 | `~/ubuntu-wallet/data/logs/check-go-collector.log`   | 健康检查日志（部署后写入）       |
+| `/etc/ubuntu-wallet/ml-service.env`           | ml-service 环境变量（含 ENABLE_DRIFT_MONITOR、APP_ROOT 等） |
 | `/etc/ubuntu-wallet/collector.env`            | 交易所 API Key 配置（服务器本地）      |
 | `/etc/ubuntu-wallet/telegram.env`             | Telegram 通知配置（服务器本地）        |
 | `~/ubuntu-wallet/bin/go-collector`            | go-collector 编译产物（构建后生成）    |
@@ -271,6 +311,14 @@ deactivate
 | 问题                              | 查看文档                               |
 |-----------------------------------|----------------------------------------|
 | 如何从零部署？                    | `DEPLOY_CN.md`                         |
+| 系统快速入门（首次上线）          | `RUNBOOK_CN.md` 第 18 节              |
+| 完整 ML + Ops 工作流程            | `RUNBOOK_CN.md` 第 19 节              |
+| 如何训练 / 回测 / 判断是否重训    | `RUNBOOK_CN.md` 第 19.2-19.4 节       |
+| Drift 监控完整参考                | `RUNBOOK_CN.md` 第 20 节              |
+| systemd drift-monitor 部署        | `RUNBOOK_CN.md` 第 20.6 节            |
+| 新增币种步骤                      | `RUNBOOK_CN.md` 第 21 节              |
+| 阈值调参方法                      | `RUNBOOK_CN.md` 第 21.2 节            |
+| 故障排查（ENABLE_DRIFT_MONITOR / MODEL_DIR / systemd） | `RUNBOOK_CN.md` 第 22 节 |
 | ml-service 起不来怎么办？         | `FAILURE_MODES_CN.md` 第 6.1 节        |
 | go-collector 没有数据怎么办？     | `FAILURE_MODES_CN.md` 第 3 节          |
 | 如何切换/回滚模型？               | `MODEL_LIFECYCLE_CN.md` 第 8/10 节     |

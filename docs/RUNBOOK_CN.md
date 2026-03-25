@@ -29,6 +29,13 @@
 13. [异常场景处置](#13-异常场景处置)
 14. [必须长期关注的风险信号](#14-必须长期关注的风险信号)
 15. [运维最佳实践](#15-运维最佳实践)
+16. [Feature Flags 运维说明](#16-feature-flags-运维说明)
+17. [多币种运维（Multi-Symbol）](#17-多币种运维multi-symbol)
+18. [快速入门（Quick Start）](#18-快速入门quick-start)
+19. [完整 Ops + ML 工作流程](#19-完整-ops--ml-工作流程)
+20. [漂移监控完整参考（Drift Monitor）](#20-漂移监控完整参考drift-monitor)
+21. [新增币种与阈值调试指南](#21-新增币种与阈值调试指南)
+22. [故障排查手册（Troubleshooting）](#22-故障排查手册troubleshooting)
 
 ---
 
@@ -667,15 +674,45 @@ sudo systemctl restart ml-service
 
 ## 16.4 手工运行 Drift Monitor
 
+**推荐方式：直接调用 ml-service 虚拟环境中的 Python（不需要 `source activate`）**
+
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+# 单币种（自动派生路径）
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
   --symbol ETHUSDT \
-  --train-stats ~/ubuntu-wallet/models/ETHUSDT/current/train_feature_stats.json \
-  --log-path ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl \
-  --output-dir ~/ubuntu-wallet/data/ETHUSDT/reports \
   --dry-run
+
+# 单币种（完整显式路径）
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
+  --train-stats ~/ubuntu-wallet/models/ETHUSDT/current/train_feature_stats.json \
+  --log-path    ~/ubuntu-wallet/data/ETHUSDT/predictions_log.jsonl \
+  --output-dir  ~/ubuntu-wallet/data/ETHUSDT/reports \
+  --dry-run
+
+# 全币种（使用 --models-base-dir 明确指定模型根目录，避免 MODEL_DIR 污染）
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
+
+# 全币种（验证 MODEL_DIR 不影响全量模式）
+ENABLE_DRIFT_MONITOR=true \
+  MODEL_DIR=~/ubuntu-wallet/models/ETHUSDT/current \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
 ```
+
+> **说明**：`--models-base-dir` 是 `--all-symbols` 模式专用参数，优先级高于 `MODELS_BASE_DIR` 环境变量。  
+> 永远**不要**在 `--models-base-dir` 中传单币种路径（如 `models/ETHUSDT/current`），必须传根目录（如 `~/ubuntu-wallet/models`）。
+
+详细的 `--models-base-dir` 解析规则与完整 Drift Monitor 参考，请见 [第 20 节](#20-漂移监控完整参考drift-monitor)。
 
 ## 16.5 手工运行 Calibration Report
 
@@ -830,32 +867,44 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
 ## 17.6 按币种 Drift 监控
 
 ```bash
-# 单币种 drift
+# 单币种 drift（推荐：直接使用 ml-service venv）
 SYMBOL=BTCUSDT
-ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
   --symbol ${SYMBOL}
 # 等价于：
 #   --train-stats ~/ubuntu-wallet/models/${SYMBOL}/current/train_feature_stats.json
 #   --log-path    ~/ubuntu-wallet/data/${SYMBOL}/predictions_log.jsonl
 #   --output-dir  ~/ubuntu-wallet/data/${SYMBOL}/reports
 
-# 一次对所有启用币种运行 drift（失败隔离：缺失 artifact 的币种跳过并打印 WARNING）
-ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py --all-symbols
+# 一次对所有启用币种运行 drift（--models-base-dir 必须是模型根目录，非单币种路径）
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
 
 # 预演（不写文件）
-ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
-  --all-symbols --dry-run
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models \
+  --dry-run
 ```
 
-**systemd drift-monitor.service** 已配置为使用 `--all-symbols`，每次触发时自动覆盖全部启用币种。
+**systemd drift-monitor.service** 已配置为使用 `--all-symbols` 和 `--models-base-dir`，每次触发时自动覆盖全部启用币种。
 若某币种 `models/<SYMBOL>/current/train_feature_stats.json` 缺失，该币种会被跳过并记录 WARNING，不影响其他币种。
+
+完整 drift 监控参考（包括 systemd 部署、日志解读、输出目录）见 [第 20 节](#20-漂移监控完整参考drift-monitor)。
 
 ## 17.7 批量操作所有启用币种
 
 ```bash
 # 列出所有 enabled 币种
 cd ~/ubuntu-wallet
-python3 -c "
+~/ubuntu-wallet/ml-service/.venv/bin/python -c "
 import sys; sys.path.insert(0, 'scripts')
 from symbol_paths import list_enabled_symbols
 print(list_enabled_symbols())
@@ -864,8 +913,12 @@ print(list_enabled_symbols())
 # 一次训练所有启用币种（失败隔离）
 bash ~/ubuntu-wallet/scripts/train_all_symbols.sh
 
-# 一次对所有启用币种运行 drift
-ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py --all-symbols
+# 一次对所有启用币种运行 drift（明确指定模型根目录）
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
 ```
 
 **缺失 `train_feature_stats.json` 排查**：
@@ -942,3 +995,768 @@ journalctl -u go-collector.service --since "5 minutes ago" | grep "Feature snaps
 ```
 
 
+
+---
+
+# 18. 快速入门（Quick Start）
+
+> 适用于：新用户第一次上手，或熟悉系统后需要快速参考。
+
+## 18.1 系统首次部署后必须完成的步骤
+
+```bash
+# 1. 进入仓库根目录（所有命令均以此为基准）
+cd ~/ubuntu-wallet
+
+# 2. 确认环境变量文件已配置
+cat /etc/ubuntu-wallet/ml-service.env   # 检查 APP_ROOT、ENABLE_DRIFT_MONITOR 等
+
+# 3. 训练所有启用币种的模型（首次必须运行）
+bash scripts/train_all_symbols.sh
+
+# 4. 启动核心服务
+sudo systemctl start go-collector ml-service
+
+# 5. 等待约 2 分钟，验证预测日志已生成
+for sym in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
+  echo -n "$sym: "
+  stat -c '%y' data/$sym/predictions_log.jsonl 2>/dev/null || echo "NOT FOUND"
+done
+
+# 6. 运行一次全量 drift 检查（验证模型 artifact 完整）
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models \
+  --dry-run
+```
+
+## 18.2 日常操作速查
+
+| 操作 | 命令 |
+|------|------|
+| 训练单个币种 | `bash scripts/train_symbol.sh BTCUSDT` |
+| 训练全部币种 | `bash scripts/train_all_symbols.sh` |
+| 单币种回测 | 见 [第 19.2 节](#192-回测工作流) |
+| 单币种 drift 检查 | `ENABLE_DRIFT_MONITOR=true ml-service/.venv/bin/python scripts/report_drift.py --symbol BTCUSDT` |
+| 全币种 drift 检查 | `ENABLE_DRIFT_MONITOR=true ml-service/.venv/bin/python scripts/report_drift.py --all-symbols --models-base-dir ~/ubuntu-wallet/models` |
+| 检查 systemd 服务状态 | `sudo systemctl status drift-monitor.service drift-monitor.timer` |
+| 查看 drift 日志 | `tail -n 100 data/logs/drift_monitor.log` |
+
+---
+
+# 19. 完整 Ops + ML 工作流程
+
+## 19.1 工作流总览与执行顺序
+
+```
+数据采集 (go-collector)
+    ↓
+模型训练 (train_symbol.sh / train_all_symbols.sh)
+    ↓
+在线推理 (ml-service) → 写入 predictions_log.jsonl
+    ↓
+回测验证 (backtest_event_v3_http.py)   ← 需要 ml-service 正在运行
+    ↓
+漂移监控 (report_drift.py)             ← 需要 train_feature_stats.json
+    ↓
+决策：是否需要重新训练？
+    ↓ (是)
+重新训练 → 重新回测 → 重新验证漂移
+```
+
+> **关键原则**：  
+> - 训练在前，回测在后（回测依赖在线推理，推理依赖已训练的模型）  
+> - 回测结果决定是否上线该模型（不通过回测的模型不应上线）  
+> - 漂移监控是持续运行的（systemd 每 6 小时一次），不是仅在重训时运行  
+
+## 19.2 回测工作流
+
+回测脚本通过 HTTP 调用本地 ml-service 完成信号生成，因此 **必须先启动 ml-service**。
+
+```bash
+# 前提：ml-service 正在运行
+sudo systemctl start ml-service
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+
+# 基本回测（单币种，使用默认参数网格）
+SYMBOL=BTCUSDT
+ml-service/.venv/bin/python scripts/backtest_event_v3_http.py \
+  --data-dir  data/${SYMBOL} \
+  --base-url  http://127.0.0.1:9000
+
+# 带参数的回测示例（固定 threshold 和 TP/SL，搜索最优配置）
+ml-service/.venv/bin/python scripts/backtest_event_v3_http.py \
+  --data-dir        data/${SYMBOL} \
+  --base-url        http://127.0.0.1:9000 \
+  --thresholds      0.60:0.80:0.02 \
+  --tp-grid         0.010:0.025:0.005 \
+  --sl-grid         0.005:0.015:0.005 \
+  --horizon-bars    12 \
+  --objective       avg_ret_mdd_daily \
+  --position-mode   single
+
+# 关键回测参数说明：
+# --data-dir         per-symbol 数据目录（含 klines_1h.json）
+# --base-url         ml-service 地址（默认 http://127.0.0.1:9000）
+# --thresholds       概率阈值网格，格式 min:max:step
+# --tp-grid          止盈比例网格，格式 min:max:step
+# --sl-grid          止损比例网格，格式 min:max:step
+# --horizon-bars     持仓最大 bar 数（默认 24）
+# --objective        优化目标：pf | avg_ret | avg_ret_mdd_daily | avg_ret_mdd_hourly
+# --position-mode    stack（默认，多仓叠加）| single（单仓，更保守）
+# --mt-filter-mode   市场趋势过滤：off | long_only | symmetric | layered
+# --since / --until  限定回测时间范围（ISO 日期字符串）
+# --debug-best       打印最优配置的详细诊断信息
+```
+
+## 19.3 何时需要重新训练
+
+满足以下任一条件时应重新训练：
+
+| 触发条件 | 说明 |
+|----------|------|
+| **漂移报告显示 PSI > 0.2** | 特征分布严重偏移，模型预期效果下降 |
+| **漂移报告 mean_drift > 3σ（多个特征）** | 均值显著漂移，超出训练分布 |
+| **回测指标明显恶化** | avg_ret 大幅下降，MDD 上升，profit factor < 1.0 |
+| **市场 regime 变化** | 如剧烈行情后，模型训练期所用数据已无代表性 |
+| **新增训练数据超过 30 天** | 积累了足量新数据，值得重训捕捉新规律 |
+| **首次添加新币种** | 新币种必须先训练再上线 |
+
+**重新训练后必须重新验证**：
+1. 检查新 `train_feature_stats.json` 是否已生成
+2. 重新运行回测，对比训前/训后指标
+3. 重新运行 drift 检查（此时应无漂移，因为基线已更新）
+4. 如回测通过，重启 ml-service 加载新模型
+
+```bash
+# 完整重训 + 验证流程（以 BTCUSDT 为例）
+SYMBOL=BTCUSDT
+
+# 步骤 1：重新训练
+bash scripts/train_symbol.sh ${SYMBOL}
+
+# 步骤 2：验证 train_feature_stats.json 已更新
+ls -lh models/${SYMBOL}/current/train_feature_stats.json
+
+# 步骤 3：重启 ml-service 加载新模型
+sudo systemctl restart ml-service
+
+# 步骤 4：等待服务稳定，再运行回测
+sleep 5
+ml-service/.venv/bin/python scripts/backtest_event_v3_http.py \
+  --data-dir data/${SYMBOL} \
+  --base-url http://127.0.0.1:9000 \
+  --debug-best
+
+# 步骤 5：运行 drift 检查，确认基线与线上分布一致
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py \
+  --symbol ${SYMBOL}
+```
+
+## 19.4 何时重新运行回测
+
+| 触发条件 | 是否需要重新回测 |
+|----------|-----------------|
+| 修改 `configs/symbols.yaml` 中的 threshold/tp/sl | **是** |
+| 重新训练模型 | **是** |
+| 怀疑回测结果不准（数据更新后）| **是** |
+| 仅修改日志格式或报告输出 | 否 |
+| 仅修改 systemd 配置 | 否 |
+
+---
+
+# 20. 漂移监控完整参考（Drift Monitor）
+
+## 20.1 工作原理
+
+`scripts/report_drift.py` 比较**训练时的特征分布**与**近期线上预测日志中的特征分布**，计算以下指标：
+
+| 指标 | 说明 |
+|------|------|
+| `mean_drift` | 均值漂移，以训练 std 为单位（值 > 1σ 开始关注，> 2σ 需要重训） |
+| `std_drift` | 标准差漂移（值 > 1σ 表示波动性变化） |
+| `psi` | Population Stability Index，综合分布距离（< 0.1 稳定，0.1~0.2 警告，> 0.2 需重训） |
+| `psi_baseline` | PSI 计算基线来源：`bootstrap`（使用训练样本）或 `gaussian_cdf`（使用均值/方差） |
+| `live_missing_rate` | 线上特征缺失率（高缺失率可能表示数据 schema 变化） |
+
+输出文件（每次运行生成两个）：
+- `data/<SYMBOL>/reports/drift_YYYY-MM-DD.json`：完整 JSON 格式报告
+- `data/<SYMBOL>/reports/drift_YYYY-MM-DD.md`：Markdown 摘要（仅显示 mean_drift > 1σ 的特征）
+
+## 20.2 `--models-base-dir` 解析优先级
+
+`report_drift.py` 在 `--all-symbols` 模式下，通过以下优先级链确定模型根目录：
+
+1. `--models-base-dir <路径>`（CLI 参数，优先级最高）
+2. `MODELS_BASE_DIR` 环境变量
+3. `$APP_ROOT/models`（若 `APP_ROOT` 环境变量已设置）
+4. 脚本位置推导：`<脚本目录>/../models`（兜底，对 CWD 不敏感）
+
+> **重要**：`MODEL_DIR` 环境变量**永远不会被 `--all-symbols` 使用**，因为它是单币种指针，会污染多币种路径解析。
+
+## 20.3 完整参数说明
+
+```
+report_drift.py 参数：
+
+--symbol <SYM>           单币种模式，自动派生 train-stats/log-path/output-dir
+--all-symbols            全币种模式，从 configs/symbols.yaml 读取所有 enabled 币种
+--models-base-dir <路径>  仅 --all-symbols 有效，指定模型根目录
+                          （如 ~/ubuntu-wallet/models，而不是 .../models/ETHUSDT/current）
+--train-stats <文件>      手动指定 train_feature_stats.json（单币种模式下可覆盖默认值）
+--log-path <文件>         手动指定 predictions_log.jsonl
+--output-dir <目录>       输出目录（默认 data/<SYMBOL>/reports 或 data/reports）
+--window-rows <N>         分析最近 N 行预测记录（默认 200）
+--dry-run                 仅计算，不写文件
+```
+
+## 20.4 如何手动运行
+
+```bash
+cd ~/ubuntu-wallet  # 建议在仓库根目录运行
+
+# 方式 A：单币种（自动路径）
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py \
+  --symbol BTCUSDT
+
+# 方式 B：单币种（完整显式路径，用于调试）
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py \
+  --train-stats models/BTCUSDT/current/train_feature_stats.json \
+  --log-path    data/BTCUSDT/predictions_log.jsonl \
+  --output-dir  data/BTCUSDT/reports
+
+# 方式 C：全币种（推荐生产用法）
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
+
+# 方式 D：全币种 + 使用环境变量（无需 CLI 参数）
+export ENABLE_DRIFT_MONITOR=true
+export MODELS_BASE_DIR=~/ubuntu-wallet/models
+ml-service/.venv/bin/python scripts/report_drift.py --all-symbols
+```
+
+## 20.5 如何解读输出
+
+**控制台输出示例（正常）**：
+```
+[drift] models base dir: /home/ubuntu/ubuntu-wallet/models
+[drift] running for symbol=BTCUSDT
+Drift report JSON  → data/BTCUSDT/reports/drift_2026-03-25.json
+Drift report MD    → data/BTCUSDT/reports/drift_2026-03-25.md
+[drift] running for symbol=ETHUSDT
+...
+```
+
+**控制台输出示例（有警告）**：
+```
+WARNING: [SOLUSDT] train-stats file not found, skipping drift: /home/ubuntu/ubuntu-wallet/models/SOLUSDT/current/train_feature_stats.json
+```
+→ 说明该币种尚未完成训练，需运行 `bash scripts/train_symbol.sh SOLUSDT`
+
+**Markdown 报告关键字段**：
+```markdown
+# Feature Drift Report — 2026-03-25
+
+- Live rows analysed: **200** (window=200)
+- Features monitored: **47**
+- Features with mean_drift > 1σ: **3**
+
+## High-Drift Features (mean_drift > 1σ)
+
+| Feature | mean_drift | psi | live_missing_rate |
+|---------|-----------|-----|-------------------|
+| rsi_1h  | 2.1400 | 0.1823 | 0.000 |
+```
+
+**解读标准**：
+- `mean_drift > 2.0` + `psi > 0.2`：**严重漂移，建议重训**
+- `mean_drift > 1.0` + `psi > 0.1`：**轻度漂移，持续观察**
+- `live_missing_rate > 0.1`：**数据 schema 变化，检查 go-collector**
+
+## 20.6 systemd 部署与定时器
+
+### 服务文件（`systemd/drift-monitor.service`）
+
+```ini
+[Unit]
+Description=ubuntu-wallet feature drift monitor
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Environment=APP_ROOT=/home/ubuntu/ubuntu-wallet
+EnvironmentFile=-/etc/ubuntu-wallet/ml-service.env
+WorkingDirectory=/home/ubuntu/ubuntu-wallet
+ExecStartPre=/bin/mkdir -p /home/ubuntu/ubuntu-wallet/data/logs
+ExecStart=/bin/bash -c '/home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/python \
+  /home/ubuntu/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ${APP_ROOT}/models \
+  >> ${APP_ROOT}/data/logs/drift_monitor.log 2>&1'
+
+[Install]
+WantedBy=multi-user.target
+```
+
+> **注意 `WorkingDirectory` 与 `ExecStart` 的路径写法**：
+> - `WorkingDirectory` 中不要使用 `${APP_ROOT}` 变量展开（systemd 环境下 `${}` 变量展开有限制），应直接写绝对路径 `/home/ubuntu/ubuntu-wallet`。
+> - `ExecStart` 中使用 `/bin/bash -c '...'` 包装后，`bash` 会展开 `${APP_ROOT}`，但**仅当** `APP_ROOT` 已通过 `Environment=` 或 `EnvironmentFile=` 导入到 unit 中。
+
+### 定时器文件（`systemd/drift-monitor.timer`）
+
+```ini
+[Unit]
+Description=Run feature drift monitor every 6 hours
+Requires=drift-monitor.service
+
+[Timer]
+OnCalendar=*-*-* 00,06,12,18:05:00
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+```
+
+定时器每天在 00:05、06:05、12:05、18:05（UTC）触发，随机延迟最多 2 分钟以避免集中负载。
+
+### 部署步骤
+
+```bash
+cd ~/ubuntu-wallet
+
+# 1. 备份当前 systemd unit（可回滚）
+sudo mkdir -p /etc/systemd/system/backup-ubuntu-wallet
+sudo cp -a /etc/systemd/system/drift-monitor.service \
+  /etc/systemd/system/backup-ubuntu-wallet/drift-monitor.service.$(date +%F_%H%M%S) 2>/dev/null || true
+sudo cp -a /etc/systemd/system/drift-monitor.timer \
+  /etc/systemd/system/backup-ubuntu-wallet/drift-monitor.timer.$(date +%F_%H%M%S) 2>/dev/null || true
+
+# 2. 复制仓库中的 unit 文件到 /etc/systemd/system/
+sudo cp -f systemd/drift-monitor.service /etc/systemd/system/drift-monitor.service
+sudo cp -f systemd/drift-monitor.timer   /etc/systemd/system/drift-monitor.timer
+
+# 3. 重新加载 systemd 配置
+sudo systemctl daemon-reload
+
+# 4. 启用并启动定时器（定时器启动后服务会按计划自动触发）
+sudo systemctl enable --now drift-monitor.timer
+
+# 5. 手动触发一次验证（不等下次计划时间）
+sudo systemctl start drift-monitor.service
+
+# 6. 查看执行结果
+systemctl show -p Result -p ExecMainStatus drift-monitor.service
+tail -n 100 data/logs/drift_monitor.log
+```
+
+### 验证定时器运行状态
+
+```bash
+# 查看所有定时器（含下次触发时间）
+sudo systemctl list-timers --all | grep drift
+
+# 查看服务最近执行状态
+sudo systemctl status drift-monitor.service --no-pager -l
+
+# 查看日志（journal）
+journalctl -u drift-monitor.service -n 100 --no-pager
+
+# 查看文件日志
+tail -f ~/ubuntu-wallet/data/logs/drift_monitor.log
+```
+
+期望输出：
+```
+● drift-monitor.service - ubuntu-wallet feature drift monitor
+     Loaded: loaded (/etc/systemd/system/drift-monitor.service; static)
+     Active: inactive (dead) since 2026-03-25 12:05:03 UTC; 5min ago
+    Process: ExecStart=/bin/bash -c ... (code=exited, status=0/SUCCESS)
+   Main PID: 1234 (code=exited, status=0/SUCCESS)
+
+Result=success  ExecMainStatus=0
+```
+
+---
+
+# 21. 新增币种与阈值调试指南
+
+## 21.1 新增币种完整检查清单
+
+在将新币种加入系统之前，按以下步骤逐一确认：
+
+- [ ] **1. 数据可用性**：确认 `data/<SYMBOL>/klines_1h.json` 存在且数据量足够
+
+```bash
+SYMBOL=NEWUSDT
+ls -lh data/${SYMBOL}/klines_1h.json
+wc -l data/${SYMBOL}/klines_1h.json
+# 建议至少 2000 行（约 3 个月 1h K 线）
+```
+
+- [ ] **2. 添加到 `configs/symbols.yaml`**
+
+```yaml
+# 在 configs/symbols.yaml 中添加：
+  NEWUSDT:
+    enabled: true
+    interval: "1h"
+    threshold: 0.65        # 起始用默认值，后续通过回测调整
+    tp: 0.020
+    sl: 0.010
+    horizon: 12
+    calibration: "isotonic"
+```
+
+- [ ] **3. 训练模型**
+
+```bash
+bash scripts/train_symbol.sh NEWUSDT
+```
+
+- [ ] **4. 验证训练产物完整**
+
+```bash
+ls -lh models/NEWUSDT/current/
+# 必须包含：
+# - train_feature_stats.json   （drift 监控必需）
+# - model_meta.json            （模型元数据）
+# - feature_columns_event_v3.json
+# - lightgbm_event_v3.pkl（或其他模型文件）
+```
+
+- [ ] **5. 验证 train_feature_stats.json 格式**
+
+```bash
+ml-service/.venv/bin/python -c "
+import json
+with open('models/NEWUSDT/current/train_feature_stats.json') as f:
+    stats = json.load(f)
+print(f'特征数量: {len(stats)}')
+first_feat = next(iter(stats.items()))
+print(f'示例特征: {first_feat[0]} -> {first_feat[1]}')
+"
+```
+
+- [ ] **6. 运行 drift 检查（确认 artifact 可被读取）**
+
+```bash
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py \
+  --symbol NEWUSDT \
+  --dry-run
+```
+
+- [ ] **7. 重启 ml-service 加载新模型**
+
+```bash
+sudo systemctl restart ml-service
+# 等待服务启动
+sleep 5
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool | grep NEWUSDT
+```
+
+- [ ] **8. 运行回测验证参数**
+
+```bash
+ml-service/.venv/bin/python scripts/backtest_event_v3_http.py \
+  --data-dir data/NEWUSDT \
+  --base-url http://127.0.0.1:9000 \
+  --debug-best
+```
+
+- [ ] **9. 根据回测结果调整阈值（见 21.2 节）**
+
+- [ ] **10. 部署到 systemd drift-monitor（全量运行会自动包含新币种）**
+
+```bash
+# 验证新币种已被 --all-symbols 识别
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models \
+  --dry-run 2>&1 | grep -E "running for|WARNING.*NEWUSDT"
+```
+
+## 21.2 阈值参数调试方法
+
+### 参数位置
+
+所有阈值参数存储在 `configs/symbols.yaml` 中的对应币种配置下：
+
+```yaml
+BTCUSDT:
+  threshold: 0.65   # 最低进场概率（值越高，信号越少但质量更高）
+  tp: 0.0175        # 止盈比例（1.75%）
+  sl: 0.009         # 止损比例（0.90%）
+  horizon: 12       # 最大持仓 bar 数（1h interval → 12h）
+  calibration: isotonic  # 概率校准方法
+```
+
+### 调试步骤
+
+```bash
+SYMBOL=BTCUSDT
+
+# 步骤 1：用网格搜索找最优参数（回测搜索）
+ml-service/.venv/bin/python scripts/backtest_event_v3_http.py \
+  --data-dir        data/${SYMBOL} \
+  --base-url        http://127.0.0.1:9000 \
+  --thresholds      0.55:0.80:0.025 \
+  --tp-grid         0.010:0.030:0.0025 \
+  --sl-grid         0.005:0.020:0.001 \
+  --objective       avg_ret_mdd_daily \
+  --position-mode   single \
+  --debug-best
+
+# 步骤 2：记录最优参数（阅读 --debug-best 输出中的 best config 部分）
+
+# 步骤 3：将最优参数更新到 configs/symbols.yaml
+# 编辑文件，修改 threshold/tp/sl 字段
+
+# 步骤 4：验证修改：用固定参数运行一次回测（缩小网格，确认最优点）
+ml-service/.venv/bin/python scripts/backtest_event_v3_http.py \
+  --data-dir        data/${SYMBOL} \
+  --base-url        http://127.0.0.1:9000 \
+  --thresholds      0.63:0.68:0.005 \
+  --tp-grid         0.016:0.020:0.001 \
+  --sl-grid         0.008:0.011:0.001 \
+  --objective       avg_ret_mdd_daily \
+  --position-mode   single
+
+# 步骤 5：若参数变化较大（threshold 差 > 0.05 或 tp/sl 差 > 20%），重新训练
+bash scripts/train_symbol.sh ${SYMBOL}
+
+# 步骤 6：重训后再次运行回测验证（比较训前/训后指标）
+ml-service/.venv/bin/python scripts/backtest_event_v3_http.py \
+  --data-dir data/${SYMBOL} \
+  --base-url http://127.0.0.1:9000 \
+  --debug-best
+```
+
+### 指标解读
+
+| 指标 | 判断标准 |
+|------|----------|
+| `avg_ret` (平均收益率) | > 0 为正期望，> 0.003 为较好信号 |
+| `profit_factor` | > 1.2 可接受，> 1.5 较好 |
+| `avg_ret_mdd_daily` | 综合收益/最大回撤，越大越好（首选优化目标） |
+| `n_signals` | 信号总数，太少（< 50）会降低统计可信度 |
+| `timeout_win_rate` | 超时退出的盈亏比（过高表示 TP 设置偏高） |
+
+## 21.3 只改一个变量原则
+
+每次调参遵循：**只改一类变量，验证后再改下一个**：
+
+1. 先调 `threshold`（影响进场频率与质量）
+2. 再调 `tp/sl`（影响每笔盈亏比）
+3. 最后调 `horizon`（影响持仓时长）
+
+不要一次同时修改多个参数，否则无法归因。
+
+---
+
+# 22. 故障排查手册（Troubleshooting）
+
+## 22.1 常见故障一览
+
+| 故障现象 | 可能原因 | 定位方法 |
+|----------|----------|----------|
+| drift 报告全部 skip，无任何 `[drift] running` | `ENABLE_DRIFT_MONITOR=false` | 检查 `/etc/ubuntu-wallet/ml-service.env` |
+| drift 报告显示 `train_feature_stats.json not found` | 对应币种未训练 | 运行 `bash scripts/train_symbol.sh <SYMBOL>` |
+| `--all-symbols` 路径拼错，如 `models/ETHUSDT/current/BTCUSDT/current/...` | `MODEL_DIR` 污染（旧版 bug） | 升级脚本至最新版，使用 `--models-base-dir` |
+| systemd `Result=success` 但日志无输出 | `ENABLE_DRIFT_MONITOR` 未传入 unit | 检查 unit 的 `EnvironmentFile=` 是否正确 |
+| systemd `WorkingDirectory` 无效，报路径错误 | `${}` 变量展开失败 | 在 unit 中直接写绝对路径，不使用变量 |
+| `backtest_event_v3_http.py` 报 `Connection refused` | ml-service 未启动 | `sudo systemctl start ml-service` |
+| ml-service 加载模型失败，日志有 `FileNotFoundError` | `models/current.json` 或 `models/<SYM>/current/` 缺失 | 运行训练脚本生成 artifact |
+| go-collector 不写 predictions_log | ml-service 宕机（降级到规则引擎） | 检查 ml-service 状态并重启 |
+
+## 22.2 ENABLE_DRIFT_MONITOR=false（最常见的"无输出"原因）
+
+**现象**：运行 `report_drift.py` 后只打印 `ENABLE_DRIFT_MONITOR=false, skipping.`，没有任何报告生成。
+
+**原因**：环境变量 `ENABLE_DRIFT_MONITOR` 默认值为 `false`，若未显式设置为 `true`，脚本立即退出。
+
+**修复（手动运行）**：
+
+```bash
+# 方式 1：在命令前直接赋值
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
+
+# 方式 2：export 后运行
+export ENABLE_DRIFT_MONITOR=true
+ml-service/.venv/bin/python scripts/report_drift.py --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
+```
+
+**修复（systemd）**：
+
+```bash
+# 检查 EnvironmentFile 内容
+cat /etc/ubuntu-wallet/ml-service.env | grep DRIFT
+
+# 如果缺少或为 false，修改：
+sudo sed -i 's/ENABLE_DRIFT_MONITOR=false/ENABLE_DRIFT_MONITOR=true/' \
+  /etc/ubuntu-wallet/ml-service.env
+# 或直接编辑
+sudo nano /etc/ubuntu-wallet/ml-service.env
+# 添加/修改：ENABLE_DRIFT_MONITOR=true
+
+# 重新触发服务
+sudo systemctl daemon-reload
+sudo systemctl start drift-monitor.service
+```
+
+## 22.3 MODEL_DIR 污染（`--all-symbols` 路径拼错）
+
+**现象**：drift 报告报 `train_feature_stats.json not found`，路径形如：
+```
+models/ETHUSDT/current/BTCUSDT/current/train_feature_stats.json
+```
+或：
+```
+BTCUSDT/current/train_feature_stats.json  （相对路径）
+```
+
+**原因（旧版脚本）**：旧版 `report_drift.py` 在 `--all-symbols` 模式下错误地读取 `MODEL_DIR`（单币种指针），将其作为 base dir，导致路径错误拼接。
+
+**修复**：确认使用最新版本的 `scripts/report_drift.py`（包含 `_resolve_models_base_dir()` 函数），并显式传递 `--models-base-dir`：
+
+```bash
+# 正确用法（--models-base-dir 必须指向模型根目录，如 .../models，不是 .../models/ETHUSDT/current）
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
+
+# 即使 MODEL_DIR 被设置为单币种路径，也不会影响 --all-symbols
+MODEL_DIR=~/ubuntu-wallet/models/ETHUSDT/current \
+ENABLE_DRIFT_MONITOR=true \
+  ml-service/.venv/bin/python scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
+```
+
+## 22.4 train_feature_stats.json 缺失
+
+**现象**：
+
+```
+WARNING: [BTCUSDT] train-stats file not found, skipping drift: /home/ubuntu/ubuntu-wallet/models/BTCUSDT/current/train_feature_stats.json
+```
+
+**修复**：
+
+```bash
+# 检查哪些币种缺少 artifact
+for SYM in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
+  FILE=~/ubuntu-wallet/models/${SYM}/current/train_feature_stats.json
+  [ -f "$FILE" ] && echo "OK   ${SYM}" || echo "MISS ${SYM}"
+done
+
+# 对缺失的币种运行训练
+bash ~/ubuntu-wallet/scripts/train_symbol.sh BTCUSDT
+bash ~/ubuntu-wallet/scripts/train_symbol.sh ETHUSDT
+# 或一次性训练所有（失败隔离）
+bash ~/ubuntu-wallet/scripts/train_all_symbols.sh
+```
+
+## 22.5 systemd WorkingDirectory 变量展开失败
+
+**现象**：systemd unit 启动报错，如：
+```
+WorkingDirectory=/home/ubuntu/ubuntu-wallet: No such file or directory
+```
+或日志中路径出现 `${APP_ROOT}` 字面量（未被展开）。
+
+**原因**：systemd `WorkingDirectory=` 字段**不支持 `${VAR}` 变量展开**（不同于 `ExecStart` 通过 `bash -c` 展开）。
+
+**修复**：在 `WorkingDirectory=` 中直接写绝对路径，不使用变量：
+
+```ini
+# 错误写法（systemd 不展开此处的变量）
+WorkingDirectory=${APP_ROOT}
+
+# 正确写法
+WorkingDirectory=/home/ubuntu/ubuntu-wallet
+```
+
+## 22.6 如何检查 systemd 服务状态
+
+```bash
+# 查看服务运行状态（最近 50 行日志）
+sudo systemctl status drift-monitor.service --no-pager -l
+
+# 查看服务 journal 日志
+journalctl -u drift-monitor.service -n 200 --no-pager
+
+# 查看定时器状态（含下次触发时间）
+sudo systemctl list-timers drift-monitor.timer --all
+
+# 查看所有相关 ubuntu-wallet 服务状态
+sudo systemctl status go-collector ml-service drift-monitor.timer --no-pager
+
+# 手动触发 oneshot 服务（立即运行，不等计划时间）
+sudo systemctl start drift-monitor.service
+
+# 查看服务最终退出状态
+systemctl show -p Result -p ExecMainStatus drift-monitor.service
+# 期望：Result=success  ExecMainStatus=0
+```
+
+## 22.7 如何查看日志与报告
+
+```bash
+# drift monitor 文件日志（服务输出重定向到此文件）
+tail -n 200 ~/ubuntu-wallet/data/logs/drift_monitor.log
+
+# 查看最新 drift 报告（Markdown 格式，按日期排序）
+ls -lt ~/ubuntu-wallet/data/BTCUSDT/reports/drift_*.md | head -5
+cat ~/ubuntu-wallet/data/BTCUSDT/reports/drift_$(date +%Y-%m-%d).md
+
+# 批量查看所有币种今日报告
+for SYM in BTCUSDT ETHUSDT SOLUSDT BNBUSDT XRPUSDT DOGEUSDT ADAUSDT; do
+  FILE=~/ubuntu-wallet/data/${SYM}/reports/drift_$(date +%Y-%m-%d).json
+  if [ -f "$FILE" ]; then
+    echo "=== ${SYM} ==="
+    python3 -c "
+import json
+with open('${FILE}') as f:
+    r = json.load(f)
+high = [(k,v) for k,v in r['features'].items() if v['mean_drift']>1.0]
+print(f'n_live_rows={r[\"n_live_rows\"]} high_drift_features={len(high)}')
+for k,v in sorted(high,key=lambda x:-x[1]['mean_drift'])[:3]:
+    print(f'  {k}: mean_drift={v[\"mean_drift\"]:.3f} psi={v[\"psi\"]}')
+"
+  else
+    echo "=== ${SYM}: 今日无报告 ==="
+  fi
+done
+```
+
+## 22.8 ml-service 路径问题排查
+
+```bash
+# 查看 ml-service 启动日志，确认加载的模型路径
+journalctl -u ml-service.service -n 50 --no-pager
+
+# 确认 MODEL_DIR 的实际解析路径
+curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool | grep -i model
+
+# 验证某币种模型目录存在且有内容
+SYMBOL=BTCUSDT
+ls -lah ~/ubuntu-wallet/models/${SYMBOL}/current/
+
+# 如模型缺失，运行训练
+bash ~/ubuntu-wallet/scripts/train_symbol.sh ${SYMBOL}
+sudo systemctl restart ml-service
+```
