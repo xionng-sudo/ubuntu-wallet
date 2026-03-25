@@ -8,12 +8,13 @@ User=ubuntu
 # Default repo root; override APP_ROOT in /etc/ubuntu-wallet/ml-service.env if needed.
 Environment=APP_ROOT=/home/ubuntu/ubuntu-wallet
 EnvironmentFile=-/etc/ubuntu-wallet/ml-service.env
-WorkingDirectory=${APP_ROOT}/scripts
+WorkingDirectory=/home/ubuntu/ubuntu-wallet
 ExecStartPre=/bin/mkdir -p /home/ubuntu/ubuntu-wallet/data/logs
-ExecStart=/bin/bash -c 'source ${APP_ROOT}/ml-service/.venv/bin/activate && \
-  python ${APP_ROOT}/scripts/report_drift.py \
-    --all-symbols \
-    >> ${APP_ROOT}/data/logs/drift_monitor.log 2>&1'
+ExecStart=/bin/bash -c '/home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/python \
+  /home/ubuntu/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ${APP_ROOT}/models \
+  >> ${APP_ROOT}/data/logs/drift_monitor.log 2>&1'
 
 [Install]
 WantedBy=multi-user.target

@@ -283,6 +283,35 @@ def run_drift_report(
     return report
 
 
+def _resolve_models_base_dir(cli_arg: Optional[str] = None) -> str:
+    """Resolve the models base directory deterministically.
+
+    Priority (highest to lowest):
+    1. ``--models-base-dir`` CLI arg (if non-empty).
+    2. ``MODELS_BASE_DIR`` environment variable (if non-empty).
+    3. ``APP_ROOT/models`` (if ``APP_ROOT`` env var is set and non-empty).
+    4. Derived from script location: ``<script_dir>/../models``.
+
+    Returns an absolute path.  Never uses ``MODEL_DIR`` (single-symbol
+    inference config) so that ``--all-symbols`` is not contaminated by
+    per-symbol model pointers.
+    """
+    if cli_arg:
+        return os.path.abspath(cli_arg)
+
+    env_base = os.environ.get("MODELS_BASE_DIR", "").strip()
+    if env_base:
+        return os.path.abspath(env_base)
+
+    app_root = os.environ.get("APP_ROOT", "").strip()
+    if app_root:
+        return os.path.abspath(os.path.join(app_root, "models"))
+
+    # Derive from script location — robust regardless of CWD or which python is used
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.abspath(os.path.join(script_dir, "..", "models"))
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Feature drift monitor — compare training distribution to live prediction log.",
@@ -307,6 +336,16 @@ def _parse_args() -> argparse.Namespace:
             "Per-symbol paths are derived automatically.  Symbols whose train-stats or "
             "prediction log are missing are skipped with a warning (failure-isolated). "
             "Mutually exclusive with --symbol / --train-stats / --log-path."
+        ),
+    )
+    parser.add_argument(
+        "--models-base-dir",
+        default=None,
+        help=(
+            "Base directory containing per-symbol model subdirectories "
+            "(e.g. /path/to/models, under which BTCUSDT/current/... live). "
+            "Used only with --all-symbols.  Overrides MODELS_BASE_DIR env var. "
+            "Never use MODEL_DIR here — that is a single-symbol pointer."
         ),
     )
     parser.add_argument(
@@ -368,6 +407,24 @@ def main() -> None:
             print(f"ERROR: could not import symbol_paths: {exc}", file=sys.stderr)
             sys.exit(1)
 
+        # Resolve models base deterministically — must NOT use MODEL_DIR
+        models_base = _resolve_models_base_dir(args.models_base_dir)
+        print(f"[drift] models base dir: {models_base}")
+
+        if not os.path.isabs(models_base):
+            print(
+                f"ERROR: resolved models base dir is not absolute: {models_base}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        if not os.path.isdir(models_base):
+            print(
+                f"ERROR: models base dir does not exist: {models_base}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         symbols = sp.list_enabled_symbols()
         if not symbols:
             print("WARNING: no enabled symbols found in configs/symbols.yaml; nothing to do.")
@@ -375,7 +432,7 @@ def main() -> None:
 
         any_failed = False
         for sym in symbols:
-            train_stats = sp.get_symbol_train_stats_path(sym)
+            train_stats = sp.get_symbol_train_stats_path(sym, base_model_dir=models_base)
             log_path = sp.get_symbol_log_path(sym)
             output_dir = sp.get_symbol_reports_dir(sym)
 

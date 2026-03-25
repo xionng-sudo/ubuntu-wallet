@@ -303,5 +303,147 @@ class TestReportDriftBackwardCompat(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
 
 
+# ---------------------------------------------------------------------------
+# Tests: --all-symbols path resolution — regression tests
+# ---------------------------------------------------------------------------
+
+class TestAllSymbolsPathResolution(unittest.TestCase):
+    """Regression tests: --all-symbols must not use MODEL_DIR as models base."""
+
+    def _make_fixture(self, tmpdir: str, symbols: list) -> str:
+        """Create a minimal models fixture under *tmpdir* and return the models base."""
+        models_base = os.path.join(tmpdir, "models")
+        for sym in symbols:
+            sym_dir = os.path.join(models_base, sym, "current")
+            os.makedirs(sym_dir, exist_ok=True)
+            with open(os.path.join(sym_dir, "train_feature_stats.json"), "w") as f:
+                f.write('{"feat": {"mean": 0.5, "std": 0.1, "missing_rate": 0.0}}\n')
+        return models_base
+
+    def test_model_dir_contamination_regression(self) -> None:
+        """With MODEL_DIR set to a per-symbol path, --all-symbols must still resolve
+        paths under the correct models base (not under MODEL_DIR)."""
+        from report_drift_module import _resolve_models_base_dir
+        contaminated = "/some/path/models/ETHUSDT/current"
+        orig = os.environ.get("MODEL_DIR")
+        orig_base = os.environ.get("MODELS_BASE_DIR")
+        orig_app = os.environ.get("APP_ROOT")
+        try:
+            os.environ["MODEL_DIR"] = contaminated
+            os.environ.pop("MODELS_BASE_DIR", None)
+            os.environ.pop("APP_ROOT", None)
+            # Should derive from script location, NOT from MODEL_DIR
+            resolved = _resolve_models_base_dir(None)
+            self.assertTrue(os.path.isabs(resolved), "Resolved path must be absolute")
+            self.assertNotIn("ETHUSDT", resolved, (
+                f"Resolved models base must not include per-symbol MODEL_DIR component; got: {resolved}"
+            ))
+        finally:
+            if orig is None:
+                os.environ.pop("MODEL_DIR", None)
+            else:
+                os.environ["MODEL_DIR"] = orig
+            if orig_base is None:
+                os.environ.pop("MODELS_BASE_DIR", None)
+            else:
+                os.environ["MODELS_BASE_DIR"] = orig_base
+            if orig_app is None:
+                os.environ.pop("APP_ROOT", None)
+            else:
+                os.environ["APP_ROOT"] = orig_app
+
+    def test_different_cwd_same_resolution(self) -> None:
+        """_resolve_models_base_dir must return the same absolute path regardless of CWD."""
+        from report_drift_module import _resolve_models_base_dir
+        orig_base = os.environ.get("MODELS_BASE_DIR")
+        orig_app = os.environ.get("APP_ROOT")
+        try:
+            os.environ.pop("MODELS_BASE_DIR", None)
+            os.environ.pop("APP_ROOT", None)
+            orig_cwd = os.getcwd()
+            resolved_from_repo = _resolve_models_base_dir(None)
+            try:
+                os.chdir("/tmp")
+                resolved_from_tmp = _resolve_models_base_dir(None)
+            finally:
+                os.chdir(orig_cwd)
+            self.assertEqual(
+                resolved_from_repo,
+                resolved_from_tmp,
+                "Resolution must not depend on current working directory",
+            )
+            self.assertTrue(os.path.isabs(resolved_from_tmp))
+        finally:
+            if orig_base is None:
+                os.environ.pop("MODELS_BASE_DIR", None)
+            else:
+                os.environ["MODELS_BASE_DIR"] = orig_base
+            if orig_app is None:
+                os.environ.pop("APP_ROOT", None)
+            else:
+                os.environ["APP_ROOT"] = orig_app
+
+    def test_models_base_dir_env_produces_absolute_existing_paths(self) -> None:
+        """When MODELS_BASE_DIR is set, train-stats paths are absolute and exist."""
+        import subprocess
+        symbols = ["BTCUSDT", "ETHUSDT"]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            models_base = self._make_fixture(tmpdir, symbols)
+            # Also create minimal data dirs so log_path lookup doesn't break the test
+            for sym in symbols:
+                data_dir = os.path.join(tmpdir, "data", sym)
+                os.makedirs(data_dir, exist_ok=True)
+                with open(os.path.join(data_dir, "predictions_log.jsonl"), "w") as f:
+                    f.write('{"features": {"feat": 0.6}}\n')
+
+            # Verify path resolution via _resolve_models_base_dir
+            from report_drift_module import _resolve_models_base_dir
+            orig = os.environ.get("MODELS_BASE_DIR")
+            try:
+                os.environ["MODELS_BASE_DIR"] = models_base
+                resolved = _resolve_models_base_dir(None)
+            finally:
+                if orig is None:
+                    os.environ.pop("MODELS_BASE_DIR", None)
+                else:
+                    os.environ["MODELS_BASE_DIR"] = orig
+
+            self.assertEqual(resolved, models_base)
+            self.assertTrue(os.path.isabs(resolved))
+
+            # Verify each expected train-stats file would be found at the right path
+            import symbol_paths as sp  # type: ignore[import]
+            for sym in symbols:
+                stats_path = sp.get_symbol_train_stats_path(sym, base_model_dir=resolved)
+                self.assertTrue(os.path.isabs(stats_path), f"Path must be absolute: {stats_path}")
+                self.assertTrue(os.path.exists(stats_path), f"Stats file must exist: {stats_path}")
+
+
+# ---------------------------------------------------------------------------
+# Helper: import report_drift as a module (with import alias)
+# ---------------------------------------------------------------------------
+
+def _import_report_drift():
+    """Import report_drift.py as a module, adding scripts dir to path if needed."""
+    if SCRIPTS_DIR not in sys.path:
+        sys.path.insert(0, SCRIPTS_DIR)
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "report_drift_module",
+        os.path.join(SCRIPTS_DIR, "report_drift.py"),
+    )
+    mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+    sys.modules["report_drift_module"] = mod
+    return mod
+
+
+# Eagerly load so the test class above can import from it
+try:
+    _import_report_drift()
+except Exception:
+    pass  # will surface as ImportError in individual tests
+
+
 if __name__ == "__main__":
     unittest.main()
