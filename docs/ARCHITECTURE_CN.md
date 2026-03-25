@@ -272,7 +272,7 @@
 - `daily-report.service` *(P0-4 新增)*
   - 每日报告生成任务服务（使用 `ml-service/.venv`，需安装 `ml-service/requirements.txt`）
 - `daily-report.timer` *(P0-4 新增)*
-  - 每日报告定时器（本机时区（以 `systemctl list-timers` 输出为准） 01:05 每天运行一次 generate_daily_report.py）
+  - 每日报告定时器（每天 01:05 运行一次 generate_daily_report.py，本机时区，以 `systemctl list-timers` 输出为准）
 - `DEPLOY-NEW-SERVER.md`
   - 新服务器部署说明
 - `UPGRADE.md`
