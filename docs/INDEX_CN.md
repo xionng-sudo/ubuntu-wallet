@@ -217,10 +217,10 @@ journalctl -u evaluate-predictions.service -n 100 --no-pager
 
 ```bash
 # ml-service 健康检查
-curl -s http://127.0.0.1:9000/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:9000/healthz | python3 -m json.tool
 
 # go-collector 健康检查
-curl -s http://127.0.0.1:8080/api/healthz | python3 -m json.tool
+curl -fsS http://127.0.0.1:8080/api/healthz | python3 -m json.tool
 ```
 
 ### 重启服务
@@ -233,8 +233,7 @@ sudo systemctl restart ml-service
 ### 手动运行评估
 
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
   --data-dir ~/ubuntu-wallet/data \
   --interval 1h \
@@ -244,7 +243,6 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --sl 0.007 \
   --fee 0.0004 \
   --horizon-bars 6
-deactivate
 ```
 
 ---
@@ -338,5 +336,5 @@ deactivate
 3. **部署路径**：文档里的 `~/ubuntu-wallet/` 表示部署服务器上的典型 checkout 路径，不是仓库内固定路径
 4. **venv 路径**：
    - ml-service 推理 venv：`~/ubuntu-wallet/ml-service/.venv/`（部署后创建，systemd 服务硬编码使用此路径）
-   - 训练/分析 venv：可复用 `ml-service/.venv`（安装 `python-analyzer/requirements.txt`），或单独创建 `venv-analyzer/`（均为运行时产物，不进 Git）
+   - 训练/分析 venv：统一复用 `ml-service/.venv`（安装 `python-analyzer/requirements.txt`），不再单独创建 `venv-analyzer/`
 5. **真仓前必须先完成 2 周以上 DRY-RUN**

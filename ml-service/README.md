@@ -54,17 +54,12 @@ cd ~/ubuntu-wallet/ml-service
 # 创建虚拟环境（首次部署时执行）
 python3 -m venv .venv
 
-# 激活虚拟环境
-source .venv/bin/activate
-
 # 升级 pip 并安装依赖
-pip install --upgrade pip
-pip install -r requirements.txt
+~/ubuntu-wallet/ml-service/.venv/bin/pip install --upgrade pip
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
 
 # 验证关键依赖
-python -c "import fastapi, uvicorn, lightgbm; print('依赖安装成功')"
-
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/python -c "import fastapi, uvicorn, lightgbm; print('依赖安装成功')"
 ```
 
 **`requirements.txt` 主要依赖：**
@@ -86,13 +81,12 @@ deactivate
 
 ```bash
 cd ~/ubuntu-wallet/ml-service
-source .venv/bin/activate
 
 # 前台运行（调试时推荐，Ctrl+C 停止）
-uvicorn app:app --host 127.0.0.1 --port 9000
+~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 9000
 
 # 后台运行（生产环境推荐配合日志文件）
-nohup uvicorn app:app --host 127.0.0.1 --port 9000 \
+nohup ~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 9000 \
   > ~/ubuntu-wallet/logs/ml-service.log 2>&1 &
 echo "ml-service 已启动，PID: $!"
 ```
@@ -105,7 +99,7 @@ echo "ml-service 已启动，PID: $!"
 
 ```bash
 # 检查服务状态与模型加载情况
-curl -s http://127.0.0.1:9000/healthz | jq .
+curl -fsS http://127.0.0.1:9000/healthz | jq .
 ```
 
 **期望输出：**
@@ -215,7 +209,7 @@ cat ~/ubuntu-wallet/models/ETHUSDT/current/model_meta.json | python3 -m json.too
 sudo systemctl restart ml-service.service
 
 # 验证新模型已加载
-curl -s http://127.0.0.1:9000/healthz | jq .model_version
+curl -fsS http://127.0.0.1:9000/healthz | jq .model_version
 ```
 
 ---
@@ -345,12 +339,11 @@ cat ~/ubuntu-wallet/models/ETHUSDT/current/model_meta.json | python3 -m json.too
 
 **Q：`uvicorn` 命令找不到**
 
-原因：未激活虚拟环境。  
+原因：未使用完整的虚拟环境路径。  
 解决：
 
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-uvicorn app:app --host 127.0.0.1 --port 9000
+~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 9000
 ```
 
 **Q：`import lightgbm` 报 `libgomp` 错误**

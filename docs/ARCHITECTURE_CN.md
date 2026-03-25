@@ -272,7 +272,7 @@
 - `daily-report.service` *(P0-4 新增)*
   - 每日报告生成任务服务（使用 `ml-service/.venv`，需安装 `ml-service/requirements.txt`）
 - `daily-report.timer` *(P0-4 新增)*
-  - 每日报告定时器（UTC 01:05 每天运行一次 generate_daily_report.py）
+  - 每日报告定时器（每天 01:05 运行一次 generate_daily_report.py，本机时区，以 `systemctl list-timers` 输出为准）
 - `DEPLOY-NEW-SERVER.md`
   - 新服务器部署说明
 - `UPGRADE.md`
@@ -692,22 +692,14 @@ cd ubuntu-wallet
 ```
 
 ## 7.3 Python 虚拟环境建议
-建议分两个环境：
+统一使用一个虚拟环境（`ml-service/.venv/`）：
 
-### 推理服务环境
 ```bash
-python3 -m venv venv-ml-service
-source venv-ml-service/bin/activate
-pip install -r ml-service/requirements.txt
-deactivate
-```
-
-### 训练分析环境
-```bash
-python3 -m venv venv-analyzer
-source ml-service/.venv/bin/activate
-pip install -r python-analyzer/requirements.txt
-deactivate
+cd ~/ubuntu-wallet/ml-service
+python3 -m venv .venv
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
+# 同时安装训练/分析依赖
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r ../python-analyzer/requirements.txt
 ```
 
 ## 7.4 Go 依赖安装
@@ -771,9 +763,7 @@ go build -o ../bin/go-collector main.go
 
 ## 8.6 部署 ml-service
 ```bash
-source ~/ubuntu-wallet/venv-ml-service/bin/activate
-cd ~/ubuntu-wallet/ml-service
-python app.py
+~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 9000
 ```
 
 ## 8.7 配置 systemd
@@ -819,10 +809,9 @@ systemctl status evaluate-predictions.timer
 
 ## 9.2 先跑 walk-forward CV
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 cd ~/ubuntu-wallet
 
-python python-analyzer/walkforward_cv.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
   --data-dir data \
   --n-splits 5 \
   --gap-bars 12 \
@@ -833,10 +822,9 @@ python python-analyzer/walkforward_cv.py \
 
 ## 9.2.1 再做训练 / 推理 schema 一致性检查
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 cd ~/ubuntu-wallet
 
-python scripts/export_feature_schema.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/export_feature_schema.py \
   --model-dir models \
   --data-dir data \
   --rebuild \
@@ -849,7 +837,7 @@ python scripts/export_feature_schema.py \
 
 ## 9.3 正式训练
 ```bash
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --label-method triple_barrier \
   --tp-pct 0.0175 \
   --sl-pct 0.009 \
@@ -879,9 +867,7 @@ python python-analyzer/train_event_stack_v3.py \
 
 # 10.1 启动
 ```bash
-source ~/ubuntu-wallet/venv-ml-service/bin/activate
-cd ~/ubuntu-wallet/ml-service
-python app.py
+~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 0.0.0.0 --port 9000
 ```
 
 ## 10.2 健康检查
@@ -914,7 +900,7 @@ curl http://127.0.0.1:8000/healthz
 # 11.1 HTTP 回测
 使用：
 ```bash
-python scripts/backtest_event_v3_http.py
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py
 ```
 
 作用：
@@ -923,7 +909,7 @@ python scripts/backtest_event_v3_http.py
 
 ## 11.2 从日志评估
 ```bash
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path data/predictions_log.jsonl \
   --data-dir data \
   --threshold 0.55 \
@@ -947,7 +933,7 @@ python scripts/evaluate_from_logs.py \
 
 # 12.1 历史顺序模拟
 ```bash
-python scripts/live_trader_eth_perp_simulated.py
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
 ```
 
 作用：
@@ -957,7 +943,7 @@ python scripts/live_trader_eth_perp_simulated.py
 
 ## 12.2 DRY-RUN
 ```bash
-python scripts/live_trader_eth_perp_binance.py --mode dry-run
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_binance.py --mode dry-run
 ```
 
 作用：
@@ -1287,8 +1273,7 @@ journalctl -u go-collector -n 200 --no-pager
 
 ## 启动评估
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --log-path ~/ubuntu-wallet/data/predictions_log.jsonl \
   --data-dir ~/ubuntu-wallet/data \
   --threshold 0.55 \
@@ -1299,14 +1284,12 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
 
 ## 跑模拟交易
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py
 ```
 
 ## 训练新模型
 ```bash
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --label-method triple_barrier \
   --tp-pct 0.0175 \
   --sl-pct 0.009 \

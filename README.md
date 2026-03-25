@@ -278,9 +278,7 @@ nano .env
 # ── 第四步：安装 Python 依赖 ──────────────────────────────
 cd ml-service
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
 cd ..
 
 # ── 第五步：编译 Go Collector ─────────────────────────────
@@ -294,22 +292,21 @@ nohup ./bin/go-collector > logs/go-collector.log 2>&1 &
 
 # ── 第七步：验证采集器健康状态 ────────────────────────────
 sleep 3
-curl -s http://127.0.0.1:8080/api/healthz | jq .
+curl -fsS http://127.0.0.1:8080/api/healthz | jq .
 
 # ── 第八步：启动推理服务（需要模型已训练完毕） ─────────────
 cd ml-service
-source .venv/bin/activate
-nohup uvicorn app:app --host 127.0.0.1 --port 9000 \
+nohup ~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 9000 \
   > ../logs/ml-service.log 2>&1 &
 
 # ── 第九步：验证推理服务 ──────────────────────────────────
 sleep 3
-curl -s http://127.0.0.1:9000/healthz | jq .
+curl -fsS http://127.0.0.1:9000/healthz | jq .
 
 # ── 第十步：运行快速回测（需要已训练好的模型） ─────────────
 # 如果没有模型，请先参考第 9 节完成训练
 cd ~/ubuntu-wallet
-python scripts/backtest_event_v3_http.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir data \
   --base-url http://127.0.0.1:9000 \
   --interval 1h \
@@ -350,16 +347,12 @@ sudo apt install -y \
 ```bash
 cd ~/ubuntu-wallet/ml-service
 python3 -m venv .venv
-source .venv/bin/activate
-
 # 升级 pip 并安装推理服务依赖
-pip install --upgrade pip
-pip install -r requirements.txt
+~/ubuntu-wallet/ml-service/.venv/bin/pip install --upgrade pip
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
 
 # 验证安装
-python -c "import fastapi, uvicorn, lightgbm; print('依赖安装成功')"
-
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/python -c "import fastapi, uvicorn, lightgbm; print('依赖安装成功')"
 cd ~/ubuntu-wallet
 ```
 
@@ -372,15 +365,11 @@ cd ~/ubuntu-wallet
 cd ~/ubuntu-wallet
 
 # 复用 ml-service 的 venv（在已激活的状态下继续安装）
-source ml-service/.venv/bin/activate
-
-pip install --upgrade pip
-pip install -r python-analyzer/requirements.txt
+~/ubuntu-wallet/ml-service/.venv/bin/pip install --upgrade pip
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r python-analyzer/requirements.txt
 
 # 注：python-analyzer/requirements.txt 包含 torch/tensorflow 等体积较大的包
 # 如仅做推理，可跳过此步
-
-deactivate
 ```
 
 ### 6.5 编译 Go Collector
@@ -534,7 +523,7 @@ PRIMARY_SYMBOL=ETHUSDT ./bin/go-collector
 
 ```bash
 # 验证服务是否正常运行（含当前启用交易对）
-curl -s http://127.0.0.1:8080/api/healthz | jq '{ok, enabled_symbols, primary_symbol, files}'
+curl -fsS http://127.0.0.1:8080/api/healthz | jq '{ok, enabled_symbols, primary_symbol, files}'
 
 # 期望输出示例（.ok 为 true 表示服务正常）：
 # {
@@ -583,15 +572,13 @@ ls -lh ~/ubuntu-wallet/data/ETHUSDT/klines_1d.json
 # 确认模型输出目录存在
 mkdir -p ~/ubuntu-wallet/models
 
-# 激活虚拟环境
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
 cd ~/ubuntu-wallet
 ```
 
 ### 9.3 训练命令（标准配置）
 
 ```bash
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir data \
   --model-dir models \
   --label-method ternary \
@@ -614,7 +601,7 @@ python python-analyzer/train_event_stack_v3.py \
 ### 9.4 Walk-Forward 交叉验证（建议在部署前运行）
 
 ```bash
-python python-analyzer/walkforward_cv.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/walkforward_cv.py \
   --data-dir data \
   --n-splits 5 \
   --gap-bars 12 \
@@ -719,7 +706,7 @@ bash scripts/train_all_symbols.sh --dry-run
 
 # 手工指定路径（完整控制）
 SYMBOL=BTCUSDT
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir  data/${SYMBOL} \
   --model-dir models/${SYMBOL} \
   --horizon   12 \
@@ -732,12 +719,12 @@ python python-analyzer/train_event_stack_v3.py \
 
 ```bash
 SYMBOL=BTCUSDT
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --symbol ${SYMBOL}
 # 路径和参数自动从 configs/symbols.yaml 派生
 
 # 也可手工指定全部参数（向后兼容）：
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --symbol ${SYMBOL} \
   --log-path  data/${SYMBOL}/predictions_log.jsonl \
   --data-dir  data/${SYMBOL} \
@@ -749,7 +736,7 @@ python scripts/evaluate_from_logs.py \
 ```bash
 # 单币种
 SYMBOL=BTCUSDT
-ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py \
+ENABLE_DRIFT_MONITOR=true ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/report_drift.py \
   --symbol ${SYMBOL}
 # 等价于：
 #   --train-stats models/${SYMBOL}/current/train_feature_stats.json
@@ -757,7 +744,7 @@ ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py \
 #   --output-dir  data/${SYMBOL}/reports
 
 # 一次对所有启用币种运行（失败隔离：缺失 artifact 的币种跳过并打印 WARNING）
-ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py --all-symbols
+ENABLE_DRIFT_MONITOR=true ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/report_drift.py --all-symbols
 ```
 
 > **drift-monitor.service** 已配置使用 `--all-symbols`，每次触发时自动覆盖全部启用币种。
@@ -768,7 +755,7 @@ ENABLE_DRIFT_MONITOR=true python scripts/report_drift.py --all-symbols
 
 ```bash
 # 旧式（仍然支持）
-python scripts/report_drift.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/report_drift.py \
   --train-stats models/ETHUSDT/current/train_feature_stats.json \
   --log-path    data/ETHUSDT/predictions_log.jsonl \
   --output-dir  data/ETHUSDT/reports
@@ -824,13 +811,12 @@ cat models/${SYMBOL}/current/model_meta.json | python3 -m json.tool
 
 ```bash
 cd ~/ubuntu-wallet/ml-service
-source .venv/bin/activate
 
 # 前台运行（调试时推荐，Ctrl+C 停止）
-uvicorn app:app --host 127.0.0.1 --port 9000
+~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 9000
 
 # 后台运行（推荐配合日志文件）
-nohup uvicorn app:app --host 127.0.0.1 --port 9000 \
+nohup ~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 9000 \
   > ~/ubuntu-wallet/logs/ml-service.log 2>&1 &
 echo "ml-service 已启动，PID: $!"
 ```
@@ -839,7 +825,7 @@ echo "ml-service 已启动，PID: $!"
 
 ```bash
 # 检查服务是否启动、模型是否已加载
-curl -s http://127.0.0.1:9000/healthz | jq .
+curl -fsS http://127.0.0.1:9000/healthz | jq .
 
 # 期望输出示例（字段说明见下表）：
 # {
@@ -918,9 +904,7 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
-
-python scripts/backtest_event_v3_http.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir data \
   --base-url http://127.0.0.1:9000 \
   --interval 1h \
@@ -987,9 +971,7 @@ python scripts/backtest_event_v3_http.py \
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
-
-python scripts/live_trader_eth_perp_simulated.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_eth_perp_simulated.py \
   --data-dir data \
   --base-url http://127.0.0.1:9000 \
   --tp 0.0175 \
@@ -1006,9 +988,7 @@ python scripts/live_trader_eth_perp_simulated.py \
 
 ```bash
 cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
-
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --symbol ETHUSDT \
   --log-path data/ETHUSDT/predictions_log.jsonl \
   --data-dir data/ETHUSDT \
@@ -1092,7 +1072,7 @@ systemctl status go-collector.service --no-pager
 journalctl -u go-collector.service -f --no-pager
 
 # 验证健康状态
-curl -s http://127.0.0.1:8080/api/healthz | jq .
+curl -fsS http://127.0.0.1:8080/api/healthz | jq .
 ```
 
 ### 14.4 部署 ML Service 服务
@@ -1115,7 +1095,7 @@ systemctl status ml-service.service --no-pager
 journalctl -u ml-service.service -f --no-pager
 
 # 验证健康状态
-curl -s http://127.0.0.1:9000/healthz | jq .
+curl -fsS http://127.0.0.1:9000/healthz | jq .
 ```
 
 ### 14.5 部署定时评估服务（可选）
@@ -1163,9 +1143,9 @@ journalctl -u check-go-collector.service -n 50 --no-pager
 
 | 服务 | 定时器 | 作用 |
 |---|---|---|
-| `daily-report.service` | `daily-report.timer` （每天 01:05 UTC） | 每日预测质量报告 |
+| `daily-report.service` | `daily-report.timer` （每天 01:05，本机时区，以 `systemctl list-timers` 输出为准） | 每日预测质量报告 |
 | `drift-monitor.service` | `drift-monitor.timer` （每 6 小时） | 特征漂移监控 |
-| `calibration-report.service` | `calibration-report.timer` （每周一 02:00 UTC） | 校准质量报告 |
+| `calibration-report.service` | `calibration-report.timer` （每周一 02:00，本机时区，以 `systemctl list-timers` 输出为准） | 校准质量报告 |
 
 ---
 
@@ -1185,26 +1165,21 @@ journalctl -u go-collector.service -f --no-pager
 journalctl -u ml-service.service -f --no-pager
 
 # ── 健康检查 ──────────────────────────────────────────────
-curl -s http://127.0.0.1:8080/api/healthz | jq .
-curl -s http://127.0.0.1:9000/healthz | jq .
+curl -fsS http://127.0.0.1:8080/api/healthz | jq .
+curl -fsS http://127.0.0.1:9000/healthz | jq .
 
 # ── 服务重启 ──────────────────────────────────────────────
 sudo systemctl restart go-collector.service
 sudo systemctl restart ml-service.service
 
-# ── 激活 Python 虚拟环境 ──────────────────────────────────
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-
 # ── 模型训练 ──────────────────────────────────────────────
-cd ~/ubuntu-wallet
-source ml-service/.venv/bin/activate
-python python-analyzer/train_event_stack_v3.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/python-analyzer/train_event_stack_v3.py \
   --data-dir data --model-dir models \
   --label-method ternary --horizon 12 --up-thresh 0.015 \
   --calibration isotonic
 
 # ── 快速回测（单组参数） ──────────────────────────────────
-python scripts/backtest_event_v3_http.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir data --base-url http://127.0.0.1:9000 \
   --interval 1h \
   --threshold 0.65 \
@@ -1213,7 +1188,7 @@ python scripts/backtest_event_v3_http.py \
   --horizon-bars 6
 
 # ── 日志评估 ──────────────────────────────────────────────
-python scripts/evaluate_from_logs.py \
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
   --symbol ETHUSDT \
   --log-path data/ETHUSDT/predictions_log.jsonl \
   --data-dir data/ETHUSDT --interval 1h \
@@ -1285,9 +1260,7 @@ ls ~/ubuntu-wallet/ml-service/.venv/bin/python
 # 如果 venv 不存在，重新创建
 cd ~/ubuntu-wallet/ml-service
 python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-deactivate
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r requirements.txt
 
 # 检查 uvicorn 是否安装
 ~/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn --version
@@ -1314,12 +1287,11 @@ cat ~/ubuntu-wallet/models/current/model_meta.json | python3 -m json.tool
 
 ```bash
 # 重新安装依赖
-source ~/ubuntu-wallet/ml-service/.venv/bin/activate
-pip install --upgrade pip
-pip install -r ~/ubuntu-wallet/ml-service/requirements.txt
+~/ubuntu-wallet/ml-service/.venv/bin/pip install --upgrade pip
+~/ubuntu-wallet/ml-service/.venv/bin/pip install -r ~/ubuntu-wallet/ml-service/requirements.txt
 
 # 检查 LightGBM 是否可用
-python -c "import lightgbm; print('LightGBM 版本:', lightgbm.__version__)"
+~/ubuntu-wallet/ml-service/.venv/bin/python -c "import lightgbm; print('LightGBM 版本:', lightgbm.__version__)"
 
 # 如果出现 libgomp 相关错误，安装系统库
 sudo apt install -y libgomp1
@@ -1365,7 +1337,7 @@ ls -lh ~/ubuntu-wallet/data/klines_*.json
 
 # 检查 API Key 配置是否正确
 # 健康检查接口通常能反映连接状态
-curl -s http://127.0.0.1:8080/api/healthz | jq .
+curl -fsS http://127.0.0.1:8080/api/healthz | jq .
 ```
 
 ---
