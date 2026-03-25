@@ -621,6 +621,8 @@ sudo cp ~/ubuntu-wallet/systemd/evaluate-predictions.service /etc/systemd/system
 sudo cp ~/ubuntu-wallet/systemd/evaluate-predictions.timer /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/daily-report.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/daily-report.timer /etc/systemd/system/
+sudo cp ~/ubuntu-wallet/systemd/drift-monitor.service /etc/systemd/system/
+sudo cp ~/ubuntu-wallet/systemd/drift-monitor.timer /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/check-go-collector.service /etc/systemd/system/
 sudo cp ~/ubuntu-wallet/systemd/check-go-collector.timer /etc/systemd/system/
 ```
@@ -642,6 +644,7 @@ sudo systemctl enable go-collector
 sudo systemctl enable ml-service
 sudo systemctl enable evaluate-predictions.timer
 sudo systemctl enable daily-report.timer
+sudo systemctl enable drift-monitor.timer
 sudo systemctl enable check-go-collector.timer
 ```
 
@@ -650,6 +653,7 @@ sudo systemctl enable check-go-collector.timer
 sudo systemctl start ml-service
 sudo systemctl start go-collector
 sudo systemctl start evaluate-predictions.timer
+sudo systemctl start drift-monitor.timer
 sudo systemctl start check-go-collector.timer
 ```
 
@@ -666,7 +670,7 @@ systemctl status check-go-collector.timer --no-pager
 ```
 ● ml-service.service - ubuntu-wallet ml-service (FastAPI)
      Loaded: loaded (/etc/systemd/system/ml-service.service; enabled; vendor preset: enabled)
-     Active: active (running) since Mon 2026-03-15 10:00:00 UTC; 5s ago
+     Active: active (running) since Mon 2026-03-15 10:00:00 +0800; 5s ago
    Main PID: 12345 (python)
       Tasks: 2 (limit: 4915)
      Memory: 512.0M
@@ -1137,23 +1141,37 @@ python ~/ubuntu-wallet/scripts/evaluate_from_logs.py \
 ## 22.6 每币种 Drift 监控命令
 
 ```bash
-# 单币种 drift
+# 推荐：使用 ml-service venv 直接调用（不需要 source activate）
+
+# 单币种 drift（自动派生路径）
 SYMBOL=BTCUSDT
-ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
   --symbol ${SYMBOL}
 
-# 一次对所有启用币种运行 drift（失败隔离：缺失 artifact 的币种跳过并打印 WARNING）
-ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py --all-symbols
+# 全币种 drift（--models-base-dir 指向模型根目录，避免 MODEL_DIR 污染）
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models
 
-# 等价于（手工指定路径）：
-# python ~/ubuntu-wallet/scripts/report_drift.py \
-#   --train-stats ~/ubuntu-wallet/models/${SYMBOL}/current/train_feature_stats.json \
-#   --log-path    ~/ubuntu-wallet/data/${SYMBOL}/predictions_log.jsonl \
-#   --output-dir  ~/ubuntu-wallet/data/${SYMBOL}/reports
+# 预演（不写文件，验证配置是否正确）
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
+  --all-symbols \
+  --models-base-dir ~/ubuntu-wallet/models \
+  --dry-run
 ```
 
-> **systemd drift-monitor.service** 已配置使用 `--all-symbols`，每次触发时自动覆盖全部启用币种。
+> **`--models-base-dir` 说明**：必须指向模型根目录（如 `~/ubuntu-wallet/models`），而不是单币种路径（如 `...models/ETHUSDT/current`）。该参数在 `--all-symbols` 模式下优先级最高，完全忽略 `MODEL_DIR` 环境变量。
+
+> **systemd drift-monitor.service** 已配置使用 `--all-symbols --models-base-dir ${APP_ROOT}/models`，每次触发时自动覆盖全部启用币种。
 > 缺少 `train_feature_stats.json` 的币种会被跳过并写 WARNING 日志，不影响其他币种。
+
+详细的 Drift 监控参考（包括解析优先级、日志解读、systemd 部署步骤）请见 [RUNBOOK_CN.md 第 20 节](RUNBOOK_CN.md#20-漂移监控完整参考drift-monitor)。
 
 ## 22.7 部署后每币种验证清单
 
@@ -1179,8 +1197,10 @@ k = next(iter(d))
 print('features:', len(d), 'sample:', k, d[k])
 "
 
-# 4. 手工跑一次 drift 报告（dry-run）
-ENABLE_DRIFT_MONITOR=true python ~/ubuntu-wallet/scripts/report_drift.py \
+# 4. 手工跑一次 drift 报告（dry-run，使用 ml-service venv）
+ENABLE_DRIFT_MONITOR=true \
+  ~/ubuntu-wallet/ml-service/.venv/bin/python \
+  ~/ubuntu-wallet/scripts/report_drift.py \
   --symbol ${SYMBOL} --dry-run
 
 # 5. 手工跑一次评估
