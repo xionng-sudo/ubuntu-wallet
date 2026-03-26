@@ -103,6 +103,10 @@ func stdLast(vals []float64, n int) float64 {
 	return safe(stddev(vals[len(vals)-n:]))
 }
 
+// priceToMA returns close / rolling_mean(n), matching the Python training/inference
+// definition in ml-service/feature_builder.py:
+//
+//	df["price_to_ma_{n}"] = df["close"] / df["rolling_mean_{n}"]
 func priceToMA(closes []float64, n int) float64 {
 	if len(closes) < n || n <= 0 {
 		return 0
@@ -111,7 +115,7 @@ func priceToMA(closes []float64, n int) float64 {
 	if ma == 0 {
 		return 0
 	}
-	return safe((closes[len(closes)-1] - ma) / ma)
+	return safe(closes[len(closes)-1] / ma)
 }
 
 func itoa(i int) string {
