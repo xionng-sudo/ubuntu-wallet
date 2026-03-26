@@ -2,7 +2,7 @@
 set -euo pipefail
 
 URL="http://127.0.0.1:8080/api/healthz"
-LOCK_FILE="/run/ubuntu-wallet/check-go-collector.lock"
+LOCK_FILE="/home/ubuntu/ubuntu-wallet/data/tmp/check-go-collector.lock"
 
 COOLDOWN_SEC=300
 LAST_RESTART_FILE="/tmp/go-collector.last-restart"

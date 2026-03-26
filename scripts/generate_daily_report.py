@@ -5,51 +5,31 @@ generate_daily_report.py
 ========================
 Generate a structured daily evaluation report from prediction logs.
 
-Output files (written to --report-dir, default: data/reports/):
-  daily_eval_YYYY-MM-DD.json
-  daily_eval_YYYY-MM-DD.md
+Per-symbol output files:
+  data/<SYMBOL>/reports/daily_eval_YYYY-MM-DD.json
+  data/<SYMBOL>/reports/daily_eval_YYYY-MM-DD.md
 
-Report includes:
-  - model_version (from log entries)
-  - total predictions
-  - coverage (fraction that became trades after MT filter)
-  - precision (win_rate)
-  - win_rate
-  - avg_return
-  - max_drawdown (trade-sequence MDD)
-  - TP / SL / TIMEOUT distribution
-  - LONG / SHORT directional breakdown
-
-MT filter modes:
-  - strict:
-      LONG requires 4h UP and 1d not DOWN;
-      SHORT requires 4h DOWN and 1d not UP.
-  - relaxed:
-      Allow NEUTRAL; reject only on strong opposite direction:
-        LONG rejects if 1d DOWN or 4h DOWN
-        SHORT rejects if 1d UP   or 4h UP
-  - regime:
-      Use 1d as dominant regime (hard direction gate), 4h does NOT veto 1d:
-        if 1d UP:   allow LONG only
-        if 1d DOWN: allow SHORT only
-        if 1d NEUTRAL: fall back to relaxed
-  - conflict (方案 2 / recommended for stability):
-      If 1d and 4h conflict (UP vs DOWN), reject ALL trades (FLAT).
-      Otherwise fall back to relaxed filtering.
+Primary-symbol compatibility fallback:
+  data/reports/daily_eval_YYYY-MM-DD.json
+  data/reports/daily_eval_YYYY-MM-DD.md
 
 Usage
 -----
-  # Evaluate yesterday (default) and write to data/reports/
+  # Single symbol, auto-resolve per-symbol paths
   python scripts/generate_daily_report.py \
-    --log-path data/predictions_log.jsonl \
-    --data-dir data \
+    --symbol BTCUSDT \
     --tp 0.0175 --sl 0.007 --threshold 0.55
 
-  # Evaluate a specific date
+  # All enabled symbols
+  python scripts/generate_daily_report.py \
+    --all-symbols \
+    --tp 0.0175 --sl 0.007 --threshold 0.55
+
+  # Explicit paths (legacy mode)
   python scripts/generate_daily_report.py \
     --log-path data/predictions_log.jsonl \
     --data-dir data \
-    --date 2026-03-01 \
+    --report-dir data/reports \
     --tp 0.0175 --sl 0.007 --threshold 0.55
 """
 from __future__ import annotations
@@ -61,9 +41,8 @@ import sys
 from bisect import bisect_right
 from collections import Counter
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-# Allow importing backtest utilities without packaging
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPT_DIR not in sys.path:
     sys.path.insert(0, _SCRIPT_DIR)
@@ -76,6 +55,13 @@ from backtest_event_v3_http import (  # noqa: E402
     _trend_series,
 )
 from mt_filter import mt_gate, gate_allows  # noqa: E402
+
+
+def _get_symbol_paths_module():
+    if _SCRIPT_DIR not in sys.path:
+        sys.path.insert(0, _SCRIPT_DIR)
+    import symbol_paths  # type: ignore[import]
+    return symbol_paths
 
 
 def _to_utc_dt(s: str) -> datetime:
@@ -141,7 +127,6 @@ def _load_predictions_for_day(
 
 
 def _pick_model_version(preds: List[Dict[str, Any]], override: Optional[str]) -> str:
-    """Pick a stable model_version from preds (time-ordered)."""
     if override:
         return override
     for p in reversed(preds):
@@ -159,16 +144,6 @@ def _mt_filter_side(
     mode: str,
     mt_reject_reasons: Counter,
 ) -> str:
-    """
-    Apply MT filter and return final side.
-
-    mode:
-      - strict:   requires 4h same-direction confirmation
-      - relaxed:  rejects only on strong opposite direction (allows NEUTRAL)
-      - regime:   1d is dominant regime; do not let 4h veto 1d direction
-      - conflict: if 1d and 4h conflict, reject all trades; otherwise fall back to relaxed
-      - layered:  uses unified mt_gate (ALLOW_STRONG / ALLOW_WEAK / REJECT from mt_filter.py)
-    """
     mode = (mode or "strict").lower().strip()
     if side_initial not in ("LONG", "SHORT"):
         return side_initial
@@ -193,7 +168,6 @@ def _mt_filter_side(
                 return "FLAT"
             return "LONG"
 
-        # SHORT
         if t4 != "DOWN":
             mt_reject_reasons["short_4h_not_down"] += 1
             return "FLAT"
@@ -212,7 +186,6 @@ def _mt_filter_side(
                 return "FLAT"
             return "LONG"
 
-        # SHORT
         if t1d == "UP":
             mt_reject_reasons["short_1d_is_up"] += 1
             return "FLAT"
@@ -228,7 +201,6 @@ def _mt_filter_side(
         return _relaxed()
 
     if mode == "regime":
-        # 1d is the main regime gate; 4h is not allowed to veto the 1d direction.
         if t1d == "UP":
             if side_initial == "SHORT":
                 mt_reject_reasons["regime_1d_up_reject_short"] += 1
@@ -241,7 +213,6 @@ def _mt_filter_side(
                 return "FLAT"
             return "SHORT"
 
-        # t1d NEUTRAL: fall back to relaxed (4h only rejects strong opposite)
         if side_initial == "LONG":
             if t4 == "DOWN":
                 mt_reject_reasons["regime_1d_neutral_long_4h_down"] += 1
@@ -253,13 +224,10 @@ def _mt_filter_side(
                 return "FLAT"
             return "SHORT"
 
-    # conflict-aware (方案 2)
-    # If 1d and 4h are in opposite directions, do not trade.
     if (t1d == "UP" and t4 == "DOWN") or (t1d == "DOWN" and t4 == "UP"):
         mt_reject_reasons["conflict_1d_vs_4h"] += 1
         return "FLAT"
 
-    # If not conflicting, fall back to relaxed filtering.
     return _relaxed()
 
 
@@ -285,8 +253,6 @@ def _build_report(
     mt_filter_mode: str,
     model_version_override: Optional[str],
 ) -> Dict[str, Any]:
-    """Run simulation and return structured report dict."""
-
     def trend_4h_at(ts) -> str:
         idx = bisect_right(ts_4h, ts) - 1
         if idx < 0:
@@ -304,11 +270,10 @@ def _build_report(
     n_total = len(preds)
     trades = []
 
-    # clearer counters
     skipped_no_kline = 0
-    skipped_flat_model = 0          # decide_side produced FLAT
-    filtered_mt = 0                 # MT filter turned LONG/SHORT -> FLAT
-    passed_mt = 0                   # LONG/SHORT that survived MT filter
+    skipped_flat_model = 0
+    filtered_mt = 0
+    passed_mt = 0
 
     initial_side_counts = Counter()
     final_side_counts = Counter()
@@ -475,7 +440,6 @@ def _build_report(
 
 
 def _render_markdown(report: Dict[str, Any]) -> str:
-    """Convert report dict to Markdown string."""
     date = report["date"]
     gen = report["generated_at"]
     mv = report["model_version"]
@@ -557,7 +521,6 @@ def _render_markdown(report: Dict[str, Any]) -> str:
             "",
         ]
 
-    # Direction breakdown
     lines += ["## Direction Breakdown", ""]
     for direction in ("long", "short"):
         ds = (db or {}).get(direction)
@@ -578,7 +541,6 @@ def _render_markdown(report: Dict[str, Any]) -> str:
             ]
         lines.append("")
 
-    # Optional debug section (kept short)
     dbg = report.get("debug_mt")
     if dbg:
         lines += [
@@ -595,54 +557,32 @@ def _render_markdown(report: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(
-        description="Generate daily evaluation reports (JSON + Markdown) from prediction logs"
-    )
-    ap.add_argument(
-        "--log-path",
-        default="data/predictions_log.jsonl",
-        help="Path to predictions_log.jsonl (default: data/predictions_log.jsonl)",
-    )
-    ap.add_argument("--data-dir", default="data", help="Directory with klines json files (default: data)")
-    ap.add_argument(
-        "--date",
-        default=None,
-        help="Date to evaluate in YYYY-MM-DD format (UTC). Default: yesterday.",
-    )
-    ap.add_argument("--symbol", default=None)
-    ap.add_argument("--interval", default="1h")
-    ap.add_argument("--active-model", default="event_v3")
-    ap.add_argument("--model-version", default=None, help="Override model_version in report (default: derived from log)")
+def _resolve_symbol_paths(
+    *,
+    symbol: str,
+    log_path: Optional[str],
+    data_dir: Optional[str],
+    report_dir: Optional[str],
+) -> Tuple[str, str, str]:
+    """Resolve per-symbol paths with root fallback for primary symbol compatibility."""
+    base_data = data_dir or "data"
 
-    ap.add_argument("--tp", type=float, required=True, help="Take-profit fraction, e.g. 0.0175")
-    ap.add_argument("--sl", type=float, required=True, help="Stop-loss fraction, e.g. 0.007")
-    ap.add_argument("--threshold", type=float, required=True, help="Probability threshold for signal generation, e.g. 0.55")
-    ap.add_argument("--fee", type=float, default=0.0004)
-    ap.add_argument("--slippage", type=float, default=0.0)
-    ap.add_argument("--horizon-bars", type=int, default=6)
-    ap.add_argument("--tie-breaker", choices=["SL", "TP"], default="SL")
-    ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
+    per_symbol_log = os.path.join(base_data, symbol, "predictions_log.jsonl")
+    per_symbol_data_dir = os.path.join(base_data, symbol)
+    per_symbol_report_dir = os.path.join(base_data, symbol, "reports")
 
-    ap.add_argument("--no-mt-filter", action="store_true", help="Disable 4h/1d multi-timeframe filter")
-    ap.add_argument(
-        "--mt-filter-mode",
-        choices=["strict", "relaxed", "regime", "conflict", "layered"],
-        default="conflict",
-        help=(
-            "MT filter mode (default: conflict = original production behavior, unchanged). "
-            "conflict rejects trades when 1d and 4h conflict; otherwise uses relaxed. "
-            "strict/relaxed/regime are alternative legacy modes. "
-            "layered uses the unified mt_gate (ALLOW_STRONG / ALLOW_WEAK / REJECT); "
-            "slightly more permissive — allows 4h=NEUTRAL+1d=same-direction as ALLOW_WEAK. "
-            "Only use 'layered' when explicitly opting in for comparison or gradual rollout."
-        ),
-    )
+    root_log = os.path.join(base_data, "predictions_log.jsonl")
+    root_data_dir = base_data
+    root_report_dir = os.path.join(base_data, "reports")
 
-    ap.add_argument("--report-dir", default="data/reports", help="Directory to write report files (default: data/reports)")
+    final_log = log_path or (per_symbol_log if os.path.exists(per_symbol_log) else root_log)
+    final_data_dir = data_dir or (per_symbol_data_dir if os.path.exists(per_symbol_data_dir) else root_data_dir)
+    final_report_dir = report_dir or (per_symbol_report_dir if os.path.exists(per_symbol_data_dir) else root_report_dir)
 
-    args = ap.parse_args()
+    return final_log, final_data_dir, final_report_dir
 
+
+def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
     # Resolve date
     if args.date:
         try:
@@ -659,13 +599,27 @@ def main() -> int:
     day_start = report_date
     day_end = report_date + timedelta(days=1)
 
+    effective_symbol = symbol if symbol is not None else args.symbol
+
+    if effective_symbol:
+        log_path, data_dir, report_dir = _resolve_symbol_paths(
+            symbol=effective_symbol,
+            log_path=args.log_path if args.log_path != "data/predictions_log.jsonl" else None,
+            data_dir=args.data_dir if args.data_dir != "data" else None,
+            report_dir=args.report_dir if args.report_dir != "data/reports" else None,
+        )
+    else:
+        log_path = args.log_path
+        data_dir = args.data_dir
+        report_dir = args.report_dir
+
     print(
-        f"Generating daily report for {date_str} ({day_start.isoformat()} → {day_end.isoformat()})",
+        f"Generating daily report for {date_str} symbol={effective_symbol or 'ALL_IN_LOG'} "
+        f"({day_start.isoformat()} → {day_end.isoformat()})",
         flush=True,
     )
 
-    # Load klines
-    klines_1h_path = os.path.join(args.data_dir, "klines_1h.json")
+    klines_1h_path = os.path.join(data_dir, "klines_1h.json")
     if not os.path.exists(klines_1h_path):
         print(f"ERROR: {klines_1h_path} not found", flush=True)
         return 2
@@ -676,9 +630,8 @@ def main() -> int:
         return 2
 
     idx_by_ts = {k["ts"]: i for i, k in enumerate(klines)}
-    print(f"Loaded {len(klines)} 1h klines", flush=True)
+    print(f"Loaded {len(klines)} 1h klines from {klines_1h_path}", flush=True)
 
-    # 4h / 1d for MT filter
     mt_filter = not args.no_mt_filter
     ts_4h: List = []
     trend_4h_list: List = []
@@ -687,8 +640,8 @@ def main() -> int:
 
     if mt_filter:
         try:
-            klines_4h = load_klines_1h(os.path.join(args.data_dir, "klines_4h.json"))
-            klines_1d = load_klines_1h(os.path.join(args.data_dir, "klines_1d.json"))
+            klines_4h = load_klines_1h(os.path.join(data_dir, "klines_4h.json"))
+            klines_1d = load_klines_1h(os.path.join(data_dir, "klines_1d.json"))
             trend_4h_list = _trend_series(klines_4h, fast=5, slow=20, eps=0.001)
             trend_1d_list = _trend_series(klines_1d, fast=5, slow=20, eps=0.001)
             ts_4h = [k["ts"] for k in klines_4h]
@@ -697,21 +650,20 @@ def main() -> int:
             print(f"WARNING: could not load 4h/1d klines ({e}), MT filter disabled", flush=True)
             mt_filter = False
 
-    # Load predictions
-    if not os.path.exists(args.log_path):
-        print(f"ERROR: prediction log not found: {args.log_path}", flush=True)
+    if not os.path.exists(log_path):
+        print(f"ERROR: prediction log not found: {log_path}", flush=True)
         return 2
 
     preds = _load_predictions_for_day(
-        path=args.log_path,
-        symbol=args.symbol,
+        path=log_path,
+        symbol=effective_symbol,
         interval=args.interval,
         active_model=args.active_model,
         day_start=day_start,
         day_end=day_end,
     )
 
-    print(f"Loaded {len(preds)} predictions for {date_str}", flush=True)
+    print(f"Loaded {len(preds)} predictions from {log_path}", flush=True)
 
     report = _build_report(
         date_str=date_str,
@@ -735,23 +687,21 @@ def main() -> int:
         model_version_override=args.model_version,
     )
 
-    # Write output files
-    os.makedirs(args.report_dir, exist_ok=True)
+    os.makedirs(report_dir, exist_ok=True)
 
-    json_path = os.path.join(args.report_dir, f"daily_eval_{date_str}.json")
+    json_path = os.path.join(report_dir, f"daily_eval_{date_str}.json")
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, default=str)
     print(f"JSON report written to {json_path}", flush=True)
 
-    md_path = os.path.join(args.report_dir, f"daily_eval_{date_str}.md")
+    md_path = os.path.join(report_dir, f"daily_eval_{date_str}.md")
     md_text = _render_markdown(report)
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md_text)
     print(f"Markdown report written to {md_path}", flush=True)
 
-    # Print summary to stdout
     print("\n" + "=" * 60, flush=True)
-    print(f"DAILY REPORT SUMMARY: {date_str}", flush=True)
+    print(f"DAILY REPORT SUMMARY: {date_str} symbol={effective_symbol or 'ALL_IN_LOG'}", flush=True)
     print(f"  model_version : {report['model_version']}", flush=True)
     ss = report["signal_stats"]
     print(f"  predictions   : {ss['total_predictions']}", flush=True)
@@ -769,6 +719,87 @@ def main() -> int:
     print("=" * 60, flush=True)
 
     return 0
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(
+        description="Generate daily evaluation reports (JSON + Markdown) from prediction logs"
+    )
+    ap.add_argument("--symbol", default=None, help="Single symbol, e.g. BTCUSDT")
+    ap.add_argument(
+        "--all-symbols",
+        action="store_true",
+        default=False,
+        help="Run daily evaluation for all enabled symbols from configs/symbols.yaml",
+    )
+    ap.add_argument(
+        "--log-path",
+        default="data/predictions_log.jsonl",
+        help="Path to predictions_log.jsonl (legacy explicit mode)",
+    )
+    ap.add_argument(
+        "--data-dir",
+        default="data",
+        help="Directory with klines json files (legacy explicit mode)",
+    )
+    ap.add_argument(
+        "--date",
+        default=None,
+        help="Date to evaluate in YYYY-MM-DD format (UTC). Default: yesterday.",
+    )
+    ap.add_argument("--interval", default="1h")
+    ap.add_argument("--active-model", default="event_v3")
+    ap.add_argument("--model-version", default=None, help="Override model_version in report")
+
+    ap.add_argument("--tp", type=float, required=True, help="Take-profit fraction, e.g. 0.0175")
+    ap.add_argument("--sl", type=float, required=True, help="Stop-loss fraction, e.g. 0.007")
+    ap.add_argument("--threshold", type=float, required=True, help="Probability threshold, e.g. 0.55")
+    ap.add_argument("--fee", type=float, default=0.0004)
+    ap.add_argument("--slippage", type=float, default=0.0)
+    ap.add_argument("--horizon-bars", type=int, default=6)
+    ap.add_argument("--tie-breaker", choices=["SL", "TP"], default="SL")
+    ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
+
+    ap.add_argument("--no-mt-filter", action="store_true", help="Disable 4h/1d multi-timeframe filter")
+    ap.add_argument(
+        "--mt-filter-mode",
+        choices=["strict", "relaxed", "regime", "conflict", "layered"],
+        default="conflict",
+        help=(
+            "MT filter mode (default: conflict). "
+            "conflict rejects trades when 1d and 4h conflict; otherwise uses relaxed."
+        ),
+    )
+
+    ap.add_argument(
+        "--report-dir",
+        default="data/reports",
+        help="Directory to write report files (legacy explicit mode)",
+    )
+
+    args = ap.parse_args()
+
+    if args.all_symbols:
+        try:
+            sp = _get_symbol_paths_module()
+        except ImportError as exc:
+            print(f"ERROR: could not import symbol_paths: {exc}", flush=True)
+            return 1
+
+        symbols = sp.list_enabled_symbols()
+        if not symbols:
+            print("WARNING: no enabled symbols found; nothing to do.", flush=True)
+            return 0
+
+        any_failed = False
+        for sym in symbols:
+            print(f"\n[eval] running for symbol={sym}", flush=True)
+            rc = _run_one_symbol(args, sym)
+            if rc != 0:
+                any_failed = True
+        return 1 if any_failed else 0
+
+    return _run_one_symbol(args, args.symbol)
 
 
 if __name__ == "__main__":
