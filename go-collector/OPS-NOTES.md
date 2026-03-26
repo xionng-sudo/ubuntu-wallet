@@ -19,9 +19,9 @@
 - `/home/ubuntu/ubuntu-wallet/notify-telegram.sh`：Telegram 发送脚本（Bot API）
 
 ### 1.3 运行时文件/日志
-- 锁文件（防并发）：`/run/ubuntu-wallet/check-go-collector.lock`
+- 锁文件（防并发）：`/home/ubuntu/ubuntu-wallet/data/tmp/check-go-collector.lock`
 - 最近重启记录：`/tmp/go-collector.last-restart`
-- 检查脚本输出日志（service 重定向追加）：`/home/ubuntu/ubuntu-wallet/check-go-collector.log`
+- 检查脚本输出日志（service 重定向追加）：`/home/ubuntu/ubuntu-wallet/data/logs/check-go-collector.log`
 
 ---
 
@@ -86,8 +86,9 @@ tail -n 200 /home/ubuntu/ubuntu-wallet/check-go-collector.log
   - 但仍然发 Telegram 通知（避免“默默不工作”）
 
 ### 4.3 并发控制
-- 使用 `flock` + 锁文件：`/run/ubuntu-wallet/check-go-collector.lock`
+- 使用 `flock` + 锁文件：`/home/ubuntu/ubuntu-wallet/data/tmp/check-go-collector.lock`
 - 目的：防止 timer 重叠执行导致重复重启/重复告警
+- **注意**：锁文件路径必须使用项目数据目录下的可写路径。历史上曾使用 `/run/ubuntu-wallet/check-go-collector.lock`，但该目录需要 root 权限创建，导致 service 以 `ubuntu` 用户运行时反复失败（`Permission denied`）。已在 Phase 2 修复为当前路径（见 `scripts/ops/check-go-collector.sh`）。
 
 ---
 
