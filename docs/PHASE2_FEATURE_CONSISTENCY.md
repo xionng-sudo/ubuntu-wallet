@@ -22,15 +22,22 @@ mkdir: cannot create directory '/run/ubuntu-wallet': Permission denied
 
 This caused the service to exit with `status=1/FAILURE` every minute for an extended period.
 
-### Fix
-The lock path was changed (hotfix applied locally, now persisted in git) to:
+### Status
+**The fix was already committed to the repository before Phase 2**, in commit `ac0cca0` ("fix: update report scripts and collector health-check lock path"):
 ```
 LOCK_FILE="/home/ubuntu/ubuntu-wallet/data/tmp/check-go-collector.lock"
 ```
-This path is writable by the `ubuntu` user and resides within the project data directory.
+This path is writable by the `ubuntu` user.
 
-**File changed:** `scripts/ops/check-go-collector.sh` (line 5)
-**Documentation updated:** `go-collector/OPS-NOTES.md` sections 1.3 and 4.3
+**Phase 2 did NOT change `scripts/ops/check-go-collector.sh`** — that file was already correct. Phase 2 only updated `go-collector/OPS-NOTES.md` to fix documentation that still referenced the old broken path (`/run/ubuntu-wallet/...`).
+
+To verify the script is correct:
+```bash
+head -6 scripts/ops/check-go-collector.sh
+# LOCK_FILE="/home/ubuntu/ubuntu-wallet/data/tmp/check-go-collector.lock"  ← correct
+```
+
+**Documentation updated:** `go-collector/OPS-NOTES.md` sections 1.3 and 4.3 (docs only, no script change)
 
 ---
 
@@ -85,12 +92,23 @@ for col in ["trader_buy_ratio", "trader_sell_ratio", "trader_net_flow"]:
 
 Any model trained without real trader-flow data will record `mean=0, std=0` in its stats file.
 
-### Fix in this PR
-The `invalid_baseline` detection introduced in Section B automatically catches all trader-flow features (and any other all-zero features). They are now surfaced in the "Invalid Training Baseline" section instead of producing enormous drift numbers.
+### What Phase 2 does: **mitigation only, not a root cause fix**
 
-### Remaining work (not in this PR)
-- **If real trader-flow data is available in the training set:** regenerate `train_feature_stats.json` using that data. The reported `invalid_baseline` features will then switch to normal drift monitoring automatically.
-- **If real trader-flow data is not available:** accept that these features are unmonitored and document them explicitly in per-symbol model metadata.
+This PR does **not** fix the root cause. `train_feature_stats.json` is a runtime artifact (in `models/<SYMBOL>/current/`) that is not stored in the repository. This PR makes no change to the training pipeline, no retraining is performed, and no stats are regenerated.
+
+The `invalid_baseline` detection in `report_drift.py` (Section B) catches all trader-flow features automatically because their `train_std = 0`. They are now surfaced in the "Invalid Training Baseline" section of drift reports instead of producing enormous bogus drift numbers.
+
+**Before Phase 2:** `trader_buy_ratio` → `mean_drift = 500000` (misleading high-drift alert)  
+**After Phase 2:** `trader_buy_ratio` → `mean_drift = null`, listed in "Invalid Training Baseline" section
+
+### Root cause fix: required follow-up action
+
+The root cause can only be fixed by regenerating `train_feature_stats.json` with real training data:
+
+- **If real trader-flow data is available in the training set:** re-run the training pipeline (`python-analyzer/train_event_stack_v3.py`) with data that includes real `trader_buy_ratio` / `trader_sell_ratio` / `trader_net_flow` values. The new stats will have nonzero std, and `invalid_baseline` will become `False` automatically — no code change needed.
+- **If real trader-flow data is not available:** the placeholder-zero baseline is structural. Accept that these features are unmonitored until real data is available. Document this in per-symbol model metadata.
+
+**This is an explicit acceptance of the risk for this PR.** The mitigation prevents the reporting system from showing misleading values. The underlying model quality risk (model trained with all-zero trader-flow features) remains until retraining with real data.
 
 ---
 
@@ -168,9 +186,9 @@ The following items remain open after Phase 2 and should be addressed in future 
 
 ## Acceptance criteria (Phase 2)
 
-- [x] `check-go-collector.service` no longer fails with `/run/ubuntu-wallet` permission error
+- [x] `check-go-collector.service` no longer fails with `/run/ubuntu-wallet` permission error (fix was already in repo from commit `ac0cca0`; Phase 2 corrected docs only)
 - [x] Drift reports no longer show bogus enormous values for features with `train_std=0`
-- [x] `trader_buy_ratio`, `trader_sell_ratio`, `trader_net_flow` (and tf variants) appear in "Invalid Training Baseline" section instead of "High-Drift Features"
+- [x] `trader_buy_ratio`, `trader_sell_ratio`, `trader_net_flow` (and tf variants) appear in "Invalid Training Baseline" section instead of "High-Drift Features" — **this is a reporting mitigation only; the root cause (all-zero training data) requires a separate retraining step**
 - [x] Additional parity tests cover `rolling_mean`, `rolling_std` (ddof gap documented), VWAP (semantic gap documented), `volume_ratio`
 - [x] All tests pass in CI (`go test ./features/...`, Python unit tests for drift report)
 - [x] Documentation clearly marks this as Phase 2 incremental work with remaining items listed
@@ -181,8 +199,8 @@ The following items remain open after Phase 2 and should be addressed in future 
 
 | File | Change |
 |------|--------|
-| `scripts/ops/check-go-collector.sh` | Lock path already fixed (hotfix preserved in git) |
-| `go-collector/OPS-NOTES.md` | Updated lock path references in sections 1.3 and 4.3; added Phase 2 context note |
+| `scripts/ops/check-go-collector.sh` | **NOT changed in Phase 2** — already had correct path from commit `ac0cca0` |
+| `go-collector/OPS-NOTES.md` | Updated lock path references in sections 1.3 and 4.3 (docs only, no script change) |
 | `scripts/report_drift.py` | Added `invalid_baseline` detection, `None` drift for zero-std features, separate markdown section |
 | `go-collector/features/parity_test.go` | Added Phase 2 parity tests: rolling_mean, rolling_std ddof, VWAP windowed, volume_ratio |
 | `tests/test_train_feature_stats.py` | Fixed pre-existing test bugs (wrong kwarg names); added invalid_baseline test class |
