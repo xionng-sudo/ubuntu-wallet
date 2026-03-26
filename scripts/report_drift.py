@@ -231,9 +231,22 @@ def run_drift_report(
         )
         live_missing = missing_count / n_live if n_live > 0 else 0.0
 
-        denom_std = max(abs(train_std), 1e-6)
-        mean_drift = abs(live_mean - train_mean) / denom_std
-        std_drift = abs(live_std - train_std) / denom_std
+        # Detect degenerate training baselines (all-zero training data such as
+        # trader-flow features that were placeholder-filled during training).
+        # When train_std ≈ 0 the normalised drift formula produces meaningless
+        # enormous numbers (e.g. live_mean=0.5, denom=1e-6 → drift=500 000).
+        # Mark these as invalid_baseline and skip numeric drift calculation.
+        invalid_baseline = abs(train_std) < 1e-8
+
+        mean_drift: Optional[float]
+        std_drift: Optional[float]
+        if invalid_baseline:
+            mean_drift = None
+            std_drift = None
+        else:
+            denom_std = abs(train_std)
+            mean_drift = abs(live_mean - train_mean) / denom_std
+            std_drift = abs(live_std - train_std) / denom_std
 
         train_values: Optional[List[float]] = None
         raw_vals = stats.get("values")
@@ -243,10 +256,13 @@ def run_drift_report(
             except (TypeError, ValueError):
                 train_values = None
 
-        if train_values:
-            psi = _compute_psi_bootstrap(train_values, live_vals) if live_vals else None
+        if not invalid_baseline:
+            if train_values:
+                psi = _compute_psi_bootstrap(train_values, live_vals) if live_vals else None
+            else:
+                psi = _compute_psi_cdf_baseline(train_mean, train_std, live_vals) if live_vals else None
         else:
-            psi = _compute_psi_cdf_baseline(train_mean, train_std, live_vals) if live_vals else None
+            psi = None
 
         results[feat] = {
             "train_mean": round(train_mean, 6),
@@ -255,11 +271,12 @@ def run_drift_report(
             "live_mean": round(live_mean, 6),
             "live_std": round(live_std, 6),
             "live_missing_rate": round(live_missing, 4),
-            "mean_drift": round(mean_drift, 4),
-            "std_drift": round(std_drift, 4),
+            "mean_drift": round(mean_drift, 4) if mean_drift is not None else None,
+            "std_drift": round(std_drift, 4) if std_drift is not None else None,
             "psi": psi,
             "psi_baseline": "bootstrap" if train_values else "gaussian_cdf",
             "n_live_vals": len(live_vals),
+            "invalid_baseline": invalid_baseline,
         }
 
     today = date.today().isoformat()
@@ -285,15 +302,26 @@ def run_drift_report(
         json.dump(report, f, indent=2)
     print(f"Drift report JSON  → {json_path}")
 
-    high_drift = [(k, v) for k, v in results.items() if v["mean_drift"] > 1.0]
+    # Features with valid baselines and drift > 1σ
+    high_drift = [
+        (k, v) for k, v in results.items()
+        if not v.get("invalid_baseline") and v["mean_drift"] is not None and v["mean_drift"] > 1.0
+    ]
     high_drift.sort(key=lambda x: x[1]["mean_drift"], reverse=True)
+
+    # Features whose training baseline is invalid (train_std ≈ 0)
+    invalid_baseline_feats = [
+        (k, v) for k, v in results.items() if v.get("invalid_baseline")
+    ]
+    invalid_baseline_feats.sort(key=lambda x: x[0])
 
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(f"# Feature Drift Report — {today}\n\n")
         f.write(f"- Live rows analysed: **{n_live}** (window={window_rows})\n")
         f.write(f"- Features monitored: **{len(results)}**\n")
         f.write(f"- Live source: **{live_features_path}**\n")
-        f.write(f"- Features with mean_drift > 1σ: **{len(high_drift)}**\n\n")
+        f.write(f"- Features with mean_drift > 1σ: **{len(high_drift)}**\n")
+        f.write(f"- Features with invalid training baseline (train_std≈0): **{len(invalid_baseline_feats)}**\n\n")
 
         f.write("## High-Drift Features (mean_drift > 1σ)\n\n")
         if high_drift:
@@ -306,6 +334,25 @@ def run_drift_report(
                 )
         else:
             f.write("_No features exceed 1σ drift threshold._\n")
+
+        f.write("\n## Features with Invalid Training Baseline (train_std ≈ 0)\n\n")
+        f.write(
+            "> These features had `train_std ≈ 0` in the training baseline "
+            "(likely placeholder-zero filled during training, e.g. `trader_*` flow features). "
+            "Drift cannot be meaningfully computed; they are excluded from the High-Drift section above. "
+            "**Action required:** regenerate `train_feature_stats.json` with real training data "
+            "for these features, or accept that they are unmonitored until then.\n\n"
+        )
+        if invalid_baseline_feats:
+            f.write("| Feature | train_mean | train_std | live_mean | live_std | live_missing_rate |\n")
+            f.write("|---------|-----------|-----------|-----------|----------|-------------------|\n")
+            for feat_name, fd in invalid_baseline_feats:
+                f.write(
+                    f"| {feat_name} | {fd['train_mean']:.6f} | {fd['train_std']:.6f} | "
+                    f"{fd['live_mean']:.6f} | {fd['live_std']:.6f} | {fd['live_missing_rate']:.3f} |\n"
+                )
+        else:
+            f.write("_No features with invalid training baseline detected._\n")
 
     print(f"Drift report MD    → {md_path}")
     return report

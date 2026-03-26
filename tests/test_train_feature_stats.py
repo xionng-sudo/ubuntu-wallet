@@ -1,8 +1,8 @@
 """Tests for train_feature_stats.json generation, archiving, and drift-monitor compatibility."""
 from __future__ import annotations
 
+import datetime
 import json
-import math
 import os
 import shutil
 import sys
@@ -177,7 +177,7 @@ class TestRunDriftReportWithFlatStats(unittest.TestCase):
 
         report = run_drift_report(
             train_stats_path=stats_path,
-            log_path=log_path,
+            live_features_path=log_path,
             output_dir=output_dir,
             window_rows=50,
             dry_run=True,
@@ -199,7 +199,7 @@ class TestRunDriftReportWithFlatStats(unittest.TestCase):
                 sys.executable,
                 os.path.join(SCRIPTS_DIR, "report_drift.py"),
                 "--train-stats", os.path.join(self._tmpdir, "nonexistent.json"),
-                "--log-path", log_path,
+                "--live-features-path", log_path,
                 "--output-dir", self._tmpdir,
             ],
             capture_output=True,
@@ -217,6 +217,132 @@ class TestRunDriftReportWithFlatStats(unittest.TestCase):
             result.stderr,
             "Error message should clearly indicate the train-stats file is missing",
         )
+
+
+
+# ---------------------------------------------------------------------------
+# Test: invalid_baseline detection for zero-std training features
+# ---------------------------------------------------------------------------
+
+class TestInvalidBaselineDetection(unittest.TestCase):
+    """Phase 2: drift report must mark train_std≈0 features as invalid_baseline
+    and must NOT produce bogus enormous drift values for them."""
+
+    def setUp(self) -> None:
+        self._tmpdir = tempfile.mkdtemp(prefix="uw-invalid-baseline-tests-")
+
+    def tearDown(self) -> None:
+        shutil.rmtree(self._tmpdir)
+
+    def _write_train_stats_with_zero_std(self, features_zero: list[str], features_normal: list[str]) -> str:
+        """Write train stats where some features have std=0 and some have normal std."""
+        stats: dict = {}
+        for feat in features_zero:
+            stats[feat] = {"mean": 0.0, "std": 0.0, "missing_rate": 0.0}
+        for i, feat in enumerate(features_normal):
+            stats[feat] = {"mean": float(i) * 0.1 + 1.0, "std": 0.5 + float(i) * 0.1, "missing_rate": 0.0}
+        path = os.path.join(self._tmpdir, "train_feature_stats.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(stats, f)
+        return path
+
+    def _write_live_features(self, features: list[str], n_rows: int = 10) -> str:
+        """Write live feature history with non-zero values for all features."""
+        path = os.path.join(self._tmpdir, "features_1h_history.jsonl")
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(n_rows):
+                row = {feat: 0.5 + float(i) * 0.1 for feat in features}
+                f.write(json.dumps({"features": row}) + "\n")
+        return path
+
+    def test_zero_std_features_are_marked_invalid_baseline(self) -> None:
+        """Features with train_std=0 must have invalid_baseline=True in the report."""
+        zero_feats = ["trader_buy_ratio", "trader_sell_ratio", "trader_net_flow"]
+        normal_feats = ["rolling_mean_5", "price_to_ma_5"]
+        all_feats = zero_feats + normal_feats
+
+        stats_path = self._write_train_stats_with_zero_std(zero_feats, normal_feats)
+        live_path = self._write_live_features(all_feats)
+        output_dir = os.path.join(self._tmpdir, "reports")
+
+        report = run_drift_report(
+            train_stats_path=stats_path,
+            live_features_path=live_path,
+            output_dir=output_dir,
+            window_rows=50,
+            dry_run=True,
+        )
+
+        feats = report["features"]
+        for feat in zero_feats:
+            self.assertTrue(
+                feats[feat].get("invalid_baseline"),
+                f"{feat}: expected invalid_baseline=True when train_std=0",
+            )
+            self.assertIsNone(
+                feats[feat]["mean_drift"],
+                f"{feat}: mean_drift must be None for invalid_baseline feature (not a huge number)",
+            )
+            self.assertIsNone(
+                feats[feat]["std_drift"],
+                f"{feat}: std_drift must be None for invalid_baseline feature",
+            )
+
+        for feat in normal_feats:
+            self.assertFalse(
+                feats[feat].get("invalid_baseline"),
+                f"{feat}: expected invalid_baseline=False for normal feature",
+            )
+            self.assertIsNotNone(
+                feats[feat]["mean_drift"],
+                f"{feat}: mean_drift must not be None for normal feature",
+            )
+
+    def test_invalid_baseline_features_excluded_from_high_drift_report(self) -> None:
+        """Features with train_std=0 must NOT appear in the High-Drift section of the .md report."""
+        zero_feats = ["trader_buy_ratio", "trader_net_flow"]
+        normal_feats = ["some_normal_feat"]
+        all_feats = zero_feats + normal_feats
+
+        stats_path = self._write_train_stats_with_zero_std(zero_feats, normal_feats)
+        live_path = self._write_live_features(all_feats, n_rows=20)
+        output_dir = os.path.join(self._tmpdir, "reports")
+
+        run_drift_report(
+            train_stats_path=stats_path,
+            live_features_path=live_path,
+            output_dir=output_dir,
+            window_rows=50,
+            dry_run=False,
+        )
+
+        today = datetime.date.today().isoformat()
+        md_path = os.path.join(output_dir, f"drift_{today}.md")
+        with open(md_path, "r", encoding="utf-8") as f:
+            md_content = f.read()
+
+        # Find the High-Drift section and check zero-std features are not in it
+        high_drift_section = md_content.split("## High-Drift Features")[1].split("##")[0]
+        for feat in zero_feats:
+            self.assertNotIn(
+                feat,
+                high_drift_section,
+                f"{feat} (train_std=0) must not appear in High-Drift Features section of report",
+            )
+
+        # Invalid baseline section must list them
+        self.assertIn(
+            "Invalid Training Baseline",
+            md_content,
+            "Report must contain an 'Invalid Training Baseline' section",
+        )
+        invalid_section = md_content.split("Invalid Training Baseline")[1]
+        for feat in zero_feats:
+            self.assertIn(
+                feat,
+                invalid_section,
+                f"{feat} must be listed in the Invalid Training Baseline section",
+            )
 
 
 if __name__ == "__main__":
