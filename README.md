@@ -915,10 +915,28 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 >
 > 修改 `configs/symbols.yaml` 后，只需重启 ml-service 和交易脚本，三层即自动对齐。
 
+**参数一致 vs 逻辑一致（PR #27/#28 vs PR #29）**
+
+> - **PR #27/#28（参数一致）**：统一了 threshold/tp/sl/horizon/interval 的配置来源（均来自 `configs/symbols.yaml`）。
+> - **PR #29（逻辑一致）**：统一了决策逻辑——引入共享模块 `scripts/decision_pipeline.py`，使回测和模拟交易对同一 K 线和同一 `/predict` 输出产生相同的 per-bar 决策（LONG/SHORT/FLAT）。
+>
+> **逻辑层参数优先级（CLI > YAML > 默认值）：**
+>
+> | 参数 | 默认值 | 说明 |
+> |---|---|---|
+> | `--mt-filter-mode` | `daily_guard` | 多周期趋势过滤模式（可选：off/layered/strict/… 共 10 种） |
+> | `--side-source` | `probs` | 信号来源：`probs`=校准概率，`signal`=模型直接输出 |
+> | `--timeout-exit` | `close` | 超时出场价格：`close`=当根收盘，`open_next`=下根开盘 |
+> | `--tie-breaker` | `SL` | TP/SL 同 bar 触发时优先方 |
+> | `--position-mode` | `single` | 持仓模式：`single`=单仓，`stack`=叠仓 |
+>
+> 两个脚本（backtest/simulated）均支持以上所有 flag，默认值完全一致。
+
 ### 12.2 快速验证（使用 --symbol 确保与线上参数一致）
 
 ```bash
 # 使用 --symbol，参数自动从 configs/symbols.yaml 读取，无需手动指定 threshold/tp/sl/horizon
+# 默认 mt_filter_mode=daily_guard，side_source=probs（与模拟交易脚本完全一致）
 cd ~/ubuntu-wallet
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir data/ETHUSDT \
@@ -929,13 +947,25 @@ cd ~/ubuntu-wallet
   --fee 0.0004 \
   --objective avg_ret_mdd_daily \
   --min-signals-per-week 1.0 \
-  --position-mode single
+  --position-mode single \
+  --mt-filter-mode daily_guard
+
+# 使用 layered 模式（更宽松，允许 4h NEUTRAL + 1d 同向）
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
+  --data-dir data/BTCUSDT \
+  --symbol BTCUSDT \
+  --base-url http://127.0.0.1:9000 \
+  --since 2026-03-01T00:00:00Z \
+  --until 2026-03-10T00:00:00Z \
+  --position-mode single \
+  --mt-filter-mode layered
 ```
 
 启动后会打印参数来源，例如：
 
 ```
 [config] symbol=ETHUSDT  interval=1h (YAML)  horizon_bars=6 (YAML)  thresholds=0.58:0.58:0.01 (YAML)  tp_grid=0.0175:0.0175:0.001 (YAML)  sl_grid=0.009:0.009:0.001 (YAML)
+Exec: horizon=6 bars, ..., side_source=probs, mt_filter_mode=daily_guard
 ```
 
 这样可以确认回测与线上推理、模拟/实盘交易使用完全相同的参数。若需要覆盖某个参数，直接在命令行追加对应 flag（`CLI` 优先级高于 `YAML`）。
@@ -1011,18 +1041,29 @@ cd ~/ubuntu-wallet
 ### 13.1 模拟交易（历史回放）
 
 使用通用脚本 `scripts/live_trader_perp_simulated.py` 对任意已配置币种进行历史 K 线回放，
-模拟完整的交易逻辑（入场、出场、多周期趋势过滤、风控）。
+模拟完整的交易逻辑（入场、出场、多周期趋势过滤、风控），与回测脚本共享同一决策管道。
+
+**逻辑参数默认值（与回测完全一致）：**
+- `--mt-filter-mode daily_guard`：多周期趋势过滤（仅限 1d 方向约束）
+- `--side-source probs`：使用校准概率作为信号来源
+- `--timeout-exit close`：超时出场用当根收盘价
+- `--tie-breaker SL`：TP/SL 同 bar 触发时以 SL 为准
+- `--position-mode single`：单仓模式
 
 **单币种运行（参数自动从 `configs/symbols.yaml` 读取）**：
 
 ```bash
 cd ~/ubuntu-wallet
-# ETHUSDT（默认）
-~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py
-
-# 指定其他币种
+# ETHUSDT（默认），使用 daily_guard 过滤（默认，与回测一致）
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
-  --symbol BTCUSDT
+  --symbol ETHUSDT \
+  --mt-filter-mode daily_guard \
+  --side-source probs
+
+# 切换到 layered 过滤（与回测使用 --mt-filter-mode layered 时一致）
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+  --symbol BTCUSDT \
+  --mt-filter-mode layered
 
 # 覆盖参数（否则从 configs/symbols.yaml 自动读取）
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
@@ -1042,11 +1083,34 @@ cd ~/ubuntu-wallet
   --all-symbols
 ```
 
+**对齐验证（使用 pred_cache 确保与回测使用完全相同的 /predict 输入）**：
+
+> 当回测写出 `data/pred_cache/pred_cache__XXXX.jsonl` 后，
+> 将该文件传入 `--pred-cache-file`，模拟交易将直接读取缓存而无需调用 ml-service，
+> 从而保证输入完全相同，任何结果差异均源于逻辑差异（而非 HTTP 超时或模型版本漂移）。
+
+```bash
+# 1. 先用回测生成 pred_cache（--pred-cache on 默认开启）
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
+  --data-dir data/BTCUSDT --symbol BTCUSDT \
+  --base-url http://127.0.0.1:9000 \
+  --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z \
+  --position-mode single --mt-filter-mode daily_guard
+# 输出类似：Wrote prediction cache: data/pred_cache/pred_cache__<hash>.jsonl
+
+# 2. 再用模拟交易读取同一 pred_cache 进行对齐验证
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+  --symbol BTCUSDT \
+  --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z \
+  --mt-filter-mode daily_guard \
+  --pred-cache-file data/pred_cache/pred_cache__<hash>.jsonl
+```
+
 **输出内容**：逐笔模拟交易记录，包含入场时间、信号方向、置信度、出场原因（TP/SL/TIMEOUT）、模拟盈亏等。  
 权益曲线写入 `data/<SYMBOL>/sim_equity.jsonl`。
 
-> **注意**：前 120 根 K 线（模型预热阶段）会自动静默跳过（不再刷屏打印 503 错误），仅在
-> 第一次预热跳过时打印一条提示。
+> **注意**：前 N 根 K 线（模型预热阶段）会自动静默跳过（不再刷屏打印 503 错误），仅在
+> 第一次预热跳过时打印一条提示。可使用 `--warmup-bars 200`（与回测默认一致）跳过前 200 根。
 >
 > **旧版入口保留（已废弃）**：`live_trader_eth_perp_simulated.py` 等价于
 > `live_trader_perp_simulated.py --symbol ETHUSDT`，两者共享相同实现。
