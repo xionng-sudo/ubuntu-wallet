@@ -9,6 +9,7 @@ __pycache__/
 
 # 数据
 data/
+!data/binance_perp_trader.md
 models/
 !go-collector/models/
 !go-collector/models/**/*.go
