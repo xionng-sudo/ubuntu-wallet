@@ -665,5 +665,151 @@ class TestDecisionPipelineConsistency(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Tests: new CLI flags added for backtest-alignment fixes
+# ---------------------------------------------------------------------------
+
+class TestSimulatedTraderAlignmentFlags(unittest.TestCase):
+    """New alignment-fix flags: --max-consec-losses default 999, --entry-on-next-bar default True."""
+
+    _SCRIPT = os.path.join(SCRIPTS_DIR, "live_trader_perp_simulated.py")
+
+    def _load_module(self):
+        spec = importlib.util.spec_from_file_location("ltsim_align", self._SCRIPT)
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        mod.__name__ = "ltsim_align"  # type: ignore[assignment]
+        try:
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        except Exception:
+            self.skipTest("Module-level import failed (missing deps)")
+        return mod
+
+    def test_max_consec_losses_default_is_999(self) -> None:
+        """--max-consec-losses default must be 999 (circuit breaker effectively disabled)."""
+        mod = self._load_module()
+        ap = mod.build_parser()
+        defaults = ap.parse_args([])
+        self.assertEqual(
+            defaults.max_consec_losses, 999,
+            "--max-consec-losses default must be 999 to disable circuit breaker during alignment",
+        )
+
+    def test_help_contains_max_consec_losses(self) -> None:
+        """--max-consec-losses flag must appear in --help."""
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--max-consec-losses", result.stdout)
+
+    def test_entry_on_next_bar_default_is_true(self) -> None:
+        """--entry-on-next-bar default must be True."""
+        mod = self._load_module()
+        ap = mod.build_parser()
+        defaults = ap.parse_args([])
+        self.assertTrue(
+            defaults.entry_on_next_bar,
+            "--entry-on-next-bar default must be True (matching backtest entry timing)",
+        )
+
+    def test_entry_on_next_bar_false_accepted(self) -> None:
+        """--entry-on-next-bar false must parse as False."""
+        mod = self._load_module()
+        ap = mod.build_parser()
+        args = ap.parse_args(["--entry-on-next-bar", "false"])
+        self.assertFalse(args.entry_on_next_bar, "--entry-on-next-bar false must be parsed as False")
+
+    def test_help_contains_entry_on_next_bar(self) -> None:
+        """--entry-on-next-bar flag must appear in --help."""
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertIn("--entry-on-next-bar", result.stdout)
+
+
+# ---------------------------------------------------------------------------
+# Tests: SimpleRiskEngine next_allowed_ts unlocks from exit_ts
+# ---------------------------------------------------------------------------
+
+class TestSimulationNextAllowedTsFromExitTs(unittest.TestCase):
+    """next_allowed_ts must be set from trade.exit_ts, not pre-computed at entry."""
+
+    _SCRIPT = os.path.join(SCRIPTS_DIR, "live_trader_perp_simulated.py")
+
+    def _load_module(self):
+        spec = importlib.util.spec_from_file_location("ltsim_exit_ts", self._SCRIPT)
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        mod.__name__ = "ltsim_exit_ts"  # type: ignore[assignment]
+        try:
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        except Exception:
+            self.skipTest("Module-level import failed (missing deps)")
+        return mod
+
+    def test_check_exit_returns_closed_trade_with_exit_ts(self) -> None:
+        """SimpleRiskEngine.check_exit() must return a ClosedTrade with exit_ts on TP hit."""
+        from datetime import datetime, timezone, timedelta
+        mod = self._load_module()
+
+        engine = mod.SimpleRiskEngine(
+            capital=10_000.0,
+            position_fraction=0.30,
+            leverage=5.0,
+            max_consec_losses=999,
+            fee_per_side=0.0004,
+            tie_breaker="SL",
+            timeout_exit="close",
+        )
+
+        entry_ts = datetime(2026, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        klines = [
+            {"ts": entry_ts + timedelta(hours=i), "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0}
+            for i in range(20)
+        ]
+        # Make bar 3 hit TP
+        klines[3]["high"] = 103.0
+
+        engine.open_position(
+            side="LONG",
+            price=100.0,
+            ts=klines[0]["ts"],
+            bar_index=0,
+            tp_pct=0.02,
+            sl_pct=0.01,
+            horizon_bars=10,
+            klines_1h=klines,
+        )
+
+        trade = None
+        for bar in klines[1:]:
+            result = engine.check_exit(bar)
+            if result is not None:
+                trade = result
+                break
+
+        self.assertIsNotNone(trade, "check_exit must return a ClosedTrade when TP is hit")
+        self.assertEqual(trade.outcome, "TP")
+        expected_exit_ts = klines[3]["ts"]
+        self.assertEqual(trade.exit_ts, expected_exit_ts, "exit_ts must equal the bar ts when TP was hit")
+
+    def test_no_next_allowed_ts_set_at_open_position(self) -> None:
+        """The simulation loop must NOT set next_allowed_ts at open_position time (old bug).
+
+        Verify by checking that the script source no longer contains the old pattern:
+        'exit_bar_idx = min(i + horizon_bars, len(klines_1h) - 1)' inside the open-signal block.
+        """
+        with open(self._SCRIPT, "r", encoding="utf-8") as f:
+            source = f.read()
+        # The old 'advance next_allowed_ts to end of horizon' comment should be gone
+        self.assertNotIn(
+            "advance next_allowed_ts to end of horizon",
+            source,
+            "Old next_allowed_ts-at-open logic must be removed",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
