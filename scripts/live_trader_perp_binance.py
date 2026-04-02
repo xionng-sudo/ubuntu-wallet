@@ -3,7 +3,7 @@
 """
 Generic Binance USDT-M Perp live trader (event_v3 1h) — DRY-RUN by default.
 
-Key goals (PR-1):
+Key goals (PR-1 / PR-2A):
 - Unify single/multi/all symbols selection
 - Provide safe DRY-RUN ↔ LIVE toggle:
   - default is DRY-RUN (safe)
@@ -12,12 +12,10 @@ Key goals (PR-1):
       - type: no               -> exit
       - anything else          -> exit
     and a 15-second countdown
-- NOTE: As of PR-1, real Binance order placement is NOT implemented in this repo.
-  Even in `--mode live`, this script will NOT place real orders; it will print a
-  prominent warning and continue running the DRY-RUN engine behavior.
-
-For real trading, implement PR-2 to replace DRY-RUN exchange methods with real
-Binance Futures REST order placement (or SDK).
+- PR-2A: real Binance Futures REST execution is now wired in.
+  In `--mode live`, startup self-checks run first (API key presence,
+  server time, exchangeInfo, symbol validation), then each bar fetches
+  the mark price and places real MARKET orders via BinanceFuturesClient.
 """
 
 from __future__ import annotations
@@ -42,6 +40,7 @@ from eth_perp_engine_binance import EthPerpStrategyEngineBinance, Side  # noqa: 
 from mt_trend_utils import MTTrendContext  # noqa: E402
 from backtest_event_v3_http import load_klines_1h  # noqa: E402
 from mt_filter import mt_gate, gate_allows, gate_is_strong, exec_confirm_15m, ENTER  # noqa: E402
+from binance_futures_rest import BinanceFuturesClient, BinanceAPIError  # noqa: E402
 
 
 load_dotenv()
@@ -51,6 +50,9 @@ DEFAULT_ML_SERVICE_URL = "http://127.0.0.1:9000/predict"
 # legacy weights (same as current ETH-only script)
 WEIGHT_NEUTRAL = 0.85
 WEIGHT_REVERSE = 0.70
+
+# Clock drift threshold: warn if local clock is this many ms off from Binance server time.
+MAX_ACCEPTABLE_CLOCK_DRIFT_MS = 2000
 
 
 @dataclass(frozen=True)
@@ -174,6 +176,34 @@ def _confirm_live_or_exit() -> None:
     raise SystemExit(2)
 
 
+def _confirm_prod_or_exit() -> None:
+    """
+    Extra confirmation required when targeting the Binance PROD (real-money) environment.
+    Shown AFTER the general live confirmation, before the countdown.
+    """
+    print("\n" + "!" * 72)
+    print("【警告】你选择的是 Binance PROD 正式环境！")
+    print("这将使用真实资金，成交产生真实盈亏，无法撤销。")
+    print("如果你想在测试环境验证，请用 --env testnet。")
+    print("如果你确认要使用 PROD 正式环境，请再次输入：PROD")
+    print("如果你不确认，请输入：no")
+    print("!" * 72)
+    try:
+        v = input("请输入 (PROD/no): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[EXIT] 未确认 PROD 环境，已安全退出。")
+        raise SystemExit(2)
+
+    if v == "PROD":
+        return
+    if v.lower() == "no":
+        print("[EXIT] 你选择不使用 PROD 环境，已安全退出。")
+        raise SystemExit(0)
+
+    print("[EXIT] 输入不匹配（未输入 PROD），已安全退出。")
+    raise SystemExit(2)
+
+
 def _countdown(seconds: int = 15) -> None:
     for i in range(seconds, 0, -1):
         print(f"[LIVE] 将在 {i:02d} 秒后开始…（Ctrl+C 可退出）", flush=True)
@@ -283,10 +313,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--env",
         choices=["prod", "testnet"],
-        default="prod",
+        default="testnet",
         help=(
-            "Binance environment selector. PR-1 does NOT place real orders. "
-            "In PR-2, this will control endpoints. Default: prod."
+            "Binance environment selector. "
+            "'prod' uses fapi.binance.com (real funds — use with extreme caution). "
+            "'testnet' uses testnet.binancefuture.com (test funds, safe for validation). "
+            "Default: testnet. Using --mode live --env prod requires a second confirmation."
         ),
     )
 
@@ -341,16 +373,78 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def _print_live_not_implemented_banner(env: str) -> None:
-    print("\n" + "!" * 72)
-    print("【重要提示】你已进入 LIVE 分支（已确认 + 倒计时结束）。")
-    print("但：当前仓库 PR-1 尚未接入真实 Binance 下单逻辑。")
-    print("因此：即使在 LIVE 模式，本脚本也不会真正��单，只会继续 DRY-RUN 打印。")
-    print(f"env={env}（PR-2 将使用该参数决定 PROD/TESTNET endpoint）")
-    print("!" * 72 + "\n")
+def _run_live_self_checks(client: BinanceFuturesClient, symbols: List[str]) -> None:
+    """
+    Pre-flight self-checks before entering the live trading loop.
+    Exits the process on any failure so we never trade with bad state.
+    """
+    print("\n[LIVE] Running startup self-checks…")
+
+    # 1) Server time
+    try:
+        server_ts = client.get_server_time()
+        local_ts = int(time.time() * 1000)
+        drift_ms = abs(server_ts - local_ts)
+        print(f"  [OK] Server time: {server_ts}  local={local_ts}  drift={drift_ms}ms")
+        if drift_ms > MAX_ACCEPTABLE_CLOCK_DRIFT_MS:
+            print(f"  [WARN] Clock drift {drift_ms}ms is large; consider syncing system clock.")
+    except Exception as exc:
+        print(f"  [FAIL] Cannot reach Binance server time: {exc}")
+        raise SystemExit(1)
+
+    # 2) Load exchange info
+    try:
+        sym_cache = client.load_exchange_info()
+        print(f"  [OK] Loaded exchangeInfo ({len(sym_cache)} symbols)")
+    except Exception as exc:
+        print(f"  [FAIL] Cannot load exchangeInfo: {exc}")
+        raise SystemExit(1)
+
+    # 3) Validate each target symbol
+    for sym in symbols:
+        si = sym_cache.get(sym)
+        if si is None:
+            print(f"  [FAIL] Symbol {sym!r} not found in exchangeInfo")
+            raise SystemExit(1)
+        if not si.is_trading():
+            print(f"  [FAIL] Symbol {sym!r} is not in TRADING status (status={si.status})")
+            raise SystemExit(1)
+        print(
+            f"  [OK] {sym}: status=TRADING  stepSize={si.qty_step}  "
+            f"tickSize={si.price_tick}  minQty={si.min_qty}"
+        )
+
+    print("[LIVE] All self-checks passed.\n")
 
 
-def run_for_one_symbol(symbol: str, args: argparse.Namespace, runtime: RuntimeMode) -> None:
+def _print_pr2a_scope_warning(env: str) -> None:
+    """
+    Prominently remind the operator about PR-2A's scope limitations.
+    Shown once after self-checks, before the trading loop begins.
+    """
+    print("\n" + "*" * 72)
+    print("【PR-2A 范围说明 / Scope Notice】")
+    print(f"  环境 (env): {env.upper()}")
+    print("  本版本 (PR-2A) 已接入真实 Binance Futures REST 下单能力。")
+    print("  但以下回测/模拟执行语义尚未在 live trader 中实现：")
+    print("    - next-bar open entry")
+    print("    - same-bar TP / SL")
+    print("    - tie_breaker")
+    print("    - timeout_exit / horizon 退出")
+    print("    - position_mode=single 完整状态机")
+    print("    - 已开仓后的系统性退出检查（持仓生命周期未闭环）")
+    print("  PR-2A 仅打通真实下单基础设施。")
+    print("  在 PR-2B 完成之前，不建议直接用于 PROD 实盘。")
+    print("  建议先在 TESTNET 验证完整流程后再切换到 PROD。")
+    print("*" * 72 + "\n")
+
+
+def run_for_one_symbol(
+    symbol: str,
+    args: argparse.Namespace,
+    runtime: RuntimeMode,
+    exchange_client: Optional[BinanceFuturesClient] = None,
+) -> None:
     # Load multi-timeframe klines
     data_dir = args.data_dir
     klines_4h = load_klines_1h(os.path.join(data_dir, "klines_4h.json"))
@@ -364,6 +458,8 @@ def run_for_one_symbol(symbol: str, args: argparse.Namespace, runtime: RuntimeMo
         max_consec_losses=int(args.max_consec_losses),
         max_positions=int(args.max_positions),
         symbol=symbol,
+        trading_mode=args.mode,
+        exchange_client=exchange_client,
     )
 
     last_bar_close: Optional[datetime] = None
@@ -420,15 +516,20 @@ def run_for_one_symbol(symbol: str, args: argparse.Namespace, runtime: RuntimeMo
         else:
             side = Side.FLAT
 
-        # NOTE: price is still placeholder in this repo's current dry-run architecture
+        # Fetch current mark price in LIVE mode; use 0.0 placeholder in DRY-RUN
         price = 0.0
+        if runtime.is_live and exchange_client is not None and side != Side.FLAT:
+            try:
+                price = exchange_client.get_mark_price(symbol)
+            except Exception as exc:
+                print(f"  [WARN] Could not fetch mark price for {symbol}: {exc}  skipping signal")
+                continue
 
         print(
             f"  symbol={symbol} side={side_str} weight={weight:.2f} exec={exec_result} "
             f"confidence={confidence} cal_conf={cal_conf} model_version={model_version} price={price}"
         )
 
-        # Engine is DRY-RUN in PR-1
         engine.on_new_signal(bar_close, side, price, weight=weight)
 
 
@@ -440,23 +541,42 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
 
     runtime = RuntimeMode(mode=args.mode)
 
-    if runtime.is_live:
-        _confirm_live_or_exit()
-        _countdown(15)
-        _print_live_not_implemented_banner(args.env)
-
-    # Key presence check (still useful even in dry-run so user sees early)
+    # Key presence check (early, before confirmation)
     api_key = os.getenv("BINANCE_API_KEY", "")
     api_secret = os.getenv("BINANCE_API_SECRET", "")
-    if not api_key or not api_secret:
-        print("[WARN] BINANCE_API_KEY / BINANCE_API_SECRET not set（当前不会真下单）")
+
+    exchange_client: Optional[BinanceFuturesClient] = None
+
+    if runtime.is_live:
+        if not api_key or not api_secret:
+            print("[ERROR] BINANCE_API_KEY and BINANCE_API_SECRET must be set for LIVE mode.")
+            raise SystemExit(1)
+
+        _confirm_live_or_exit()
+
+        # Extra confirmation step when targeting real-money PROD environment
+        if args.env == "prod":
+            _confirm_prod_or_exit()
+
+        _countdown(15)
+
+        exchange_client = BinanceFuturesClient(
+            api_key=api_key,
+            api_secret=api_secret,
+            env=args.env,
+        )
+        _run_live_self_checks(exchange_client, symbols)
+        _print_pr2a_scope_warning(args.env)
+    else:
+        if not api_key or not api_secret:
+            print("[WARN] BINANCE_API_KEY / BINANCE_API_SECRET not set（DRY-RUN 模式下无所谓）")
 
     if len(symbols) == 1:
-        run_for_one_symbol(symbols[0], args, runtime)
+        run_for_one_symbol(symbols[0], args, runtime, exchange_client=exchange_client)
         return
 
     # Multi-symbol: simple sequential loop per bar close.
-    # (No threading in PR-1 to keep behavior deterministic & simple.)
+    # (No threading to keep behavior deterministic & simple.)
     print(f"Starting {'LIVE' if runtime.is_live else 'DRY-RUN'} multi-symbol runner: {symbols}")
 
     # For multi-symbol, we keep per-symbol engines and contexts
@@ -473,6 +593,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             max_consec_losses=int(args.max_consec_losses),
             max_positions=int(args.max_positions),
             symbol=s,
+            trading_mode=args.mode,
+            exchange_client=exchange_client,
         )
         for s in symbols
     }
@@ -522,7 +644,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             else:
                 side = Side.FLAT
 
+            # Fetch current mark price in LIVE mode; use 0.0 in DRY-RUN
             price = 0.0
+            if runtime.is_live and exchange_client is not None and side != Side.FLAT:
+                try:
+                    price = exchange_client.get_mark_price(symbol)
+                except Exception as exc:
+                    print(f"  [WARN] Could not fetch mark price for {symbol}: {exc}  skipping signal")
+                    continue
+
             print(
                 f"  symbol={symbol} side={side_str} weight={weight:.2f} exec={exec_result} "
                 f"confidence={confidence} cal_conf={cal_conf} model_version={model_version} price={price}"
