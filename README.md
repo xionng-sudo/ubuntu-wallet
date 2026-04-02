@@ -909,7 +909,7 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 > | 层 | 如何读取配置 |
 > |---|---|
 > | **回测** (`backtest_event_v3_http.py`) | `--symbol XXXUSDT` 自动从 YAML 读取 threshold/tp/sl/horizon/interval |
-> | **模拟交易** (`live_trader_perp_simulated.py`) | `--symbol` 自动从 YAML 读取，CLI flag 可覆盖 |
+> | **模拟交易** (`live_trader_perp_simulated.py`) | 通过 `symbol_config.get_symbol_config()` 读取 YAML，CLI flag 可覆盖 |
 > | **实盘交易** (`live_trader_eth_perp_binance.py`) | 通过 `symbol_config.get_symbol_config()` 读取 YAML |
 > | **线上推理** (`ml-service/app.py`) | `symbols_config.py` 实时读取 YAML（支持 mtime 热更新） |
 >

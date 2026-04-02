@@ -386,5 +386,51 @@ class TestBacktestEventV3CLI(unittest.TestCase):
             shutil.rmtree(tmpdir)
 
 
+# ---------------------------------------------------------------------------
+# Tests: live_trader_perp_simulated.py uses shared config loader (no local def)
+# ---------------------------------------------------------------------------
+
+class TestSimulatedTraderUsesSharedConfig(unittest.TestCase):
+    """Regression: live_trader_perp_simulated.py must not define a local get_symbol_config."""
+
+    _SCRIPT = os.path.join(SCRIPTS_DIR, "live_trader_perp_simulated.py")
+
+    def test_no_local_get_symbol_config_definition(self) -> None:
+        """Source of live_trader_perp_simulated.py must not contain 'def get_symbol_config'."""
+        with open(self._SCRIPT, "r", encoding="utf-8") as f:
+            source = f.read()
+        self.assertNotIn(
+            "def get_symbol_config",
+            source,
+            "live_trader_perp_simulated.py must not define a local get_symbol_config(); "
+            "use the shared loader from symbol_config instead.",
+        )
+
+    def test_imports_get_symbol_config_from_symbol_config(self) -> None:
+        """live_trader_perp_simulated.py must import get_symbol_config from symbol_config."""
+        import ast
+
+        with open(self._SCRIPT, "r", encoding="utf-8") as f:
+            source = f.read()
+
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            self.fail(f"live_trader_perp_simulated.py has a syntax error: {exc}")
+
+        # Walk the AST looking for: from symbol_config import (..., get_symbol_config, ...)
+        found = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "symbol_config"
+            and any(alias.name == "get_symbol_config" for alias in node.names)
+            for node in ast.walk(tree)
+        )
+        self.assertTrue(
+            found,
+            "live_trader_perp_simulated.py must have 'from symbol_config import get_symbol_config' "
+            "(or include it in a multi-name import from symbol_config).",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

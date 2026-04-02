@@ -68,31 +68,11 @@ if SCRIPT_DIR not in sys.path:
 
 from mt_trend_utils import MTTrendContext  # type: ignore
 
-try:
-    from symbol_config import (  # type: ignore
-        get_symbol_config,
-        list_enabled_symbols,
-        data_dir as _data_dir,
-    )
-except ImportError:
-    # Graceful fallback when symbol_config is not available
-    def get_symbol_config(symbol: str) -> Dict[str, Any]:  # type: ignore[misc]
-        return {
-            "enabled": True,
-            "interval": "1h",
-            "threshold": 0.65,
-            "tp": 0.0175,
-            "sl": 0.009,
-            "horizon": 12,
-            "calibration": "isotonic",
-        }
-
-    def list_enabled_symbols() -> List[str]:  # type: ignore[misc]
-        return ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT"]
-
-    def _data_dir(symbol: str, base_data_dir: Optional[str] = None) -> str:  # type: ignore[misc]
-        base = base_data_dir or os.path.join(REPO_ROOT, "data")
-        return os.path.join(base, symbol)
+from symbol_config import (  # type: ignore
+    get_symbol_config,
+    list_enabled_symbols,
+    data_dir as _data_dir,
+)
 
 
 # ---------------------------------------------------------------------------
