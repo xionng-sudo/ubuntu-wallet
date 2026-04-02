@@ -12,25 +12,6 @@ Per-symbol output files:
 Primary-symbol compatibility fallback:
   data/reports/daily_eval_YYYY-MM-DD.json
   data/reports/daily_eval_YYYY-MM-DD.md
-
-Usage
------
-  # Single symbol, auto-resolve per-symbol paths
-  python scripts/generate_daily_report.py \
-    --symbol BTCUSDT \
-    --tp 0.0175 --sl 0.007 --threshold 0.55
-
-  # All enabled symbols
-  python scripts/generate_daily_report.py \
-    --all-symbols \
-    --tp 0.0175 --sl 0.007 --threshold 0.55
-
-  # Explicit paths (legacy mode)
-  python scripts/generate_daily_report.py \
-    --log-path data/predictions_log.jsonl \
-    --data-dir data \
-    --report-dir data/reports \
-    --tp 0.0175 --sl 0.007 --threshold 0.55
 """
 from __future__ import annotations
 
@@ -51,10 +32,15 @@ from backtest_event_v3_http import (  # noqa: E402
     load_klines_1h,
     simulate_trade,
     compute_metrics,
-    decide_side,
     _trend_series,
 )
-from mt_filter import mt_gate, gate_allows  # noqa: E402
+from signal_logic import (  # noqa: E402
+    normalize_log_prediction,
+    select_effective_probs,
+    decide_side,
+    apply_mt_filter_common,
+    normalize_mt_mode,
+)
 
 
 def _get_symbol_paths_module():
@@ -109,16 +95,7 @@ def _load_predictions_for_day(
             out.append(
                 {
                     "ts": ts,
-                    "proba_long": j.get("proba_long"),
-                    "proba_short": j.get("proba_short"),
-                    "proba_flat": j.get("proba_flat"),
-                    "cal_proba_long": j.get("cal_proba_long"),
-                    "cal_proba_short": j.get("cal_proba_short"),
-                    "signal": j.get("signal"),
-                    "confidence": j.get("confidence"),
-                    "calibrated_confidence": j.get("calibrated_confidence"),
-                    "model_version": j.get("model_version"),
-                    "active_model": j.get("active_model"),
+                    "raw": j,
                 }
             )
 
@@ -130,105 +107,11 @@ def _pick_model_version(preds: List[Dict[str, Any]], override: Optional[str]) ->
     if override:
         return override
     for p in reversed(preds):
-        mv = p.get("model_version")
+        raw = p.get("raw") or {}
+        mv = raw.get("model_version")
         if mv:
             return str(mv)
     return "unknown"
-
-
-def _mt_filter_side(
-    *,
-    side_initial: str,
-    t4: str,
-    t1d: str,
-    mode: str,
-    mt_reject_reasons: Counter,
-) -> str:
-    mode = (mode or "strict").lower().strip()
-    if side_initial not in ("LONG", "SHORT"):
-        return side_initial
-
-    if mode not in ("strict", "relaxed", "regime", "conflict", "layered"):
-        raise ValueError(f"Unknown --mt-filter-mode: {mode}")
-
-    if mode == "layered":
-        gate = mt_gate(side_initial, t4, t1d)
-        if not gate_allows(gate):
-            mt_reject_reasons[f"layered_reject_{side_initial.lower()}"] += 1
-            return "FLAT"
-        return side_initial
-
-    def _strict() -> str:
-        if side_initial == "LONG":
-            if t4 != "UP":
-                mt_reject_reasons["long_4h_not_up"] += 1
-                return "FLAT"
-            if t1d == "DOWN":
-                mt_reject_reasons["long_1d_is_down"] += 1
-                return "FLAT"
-            return "LONG"
-
-        if t4 != "DOWN":
-            mt_reject_reasons["short_4h_not_down"] += 1
-            return "FLAT"
-        if t1d == "UP":
-            mt_reject_reasons["short_1d_is_up"] += 1
-            return "FLAT"
-        return "SHORT"
-
-    def _relaxed() -> str:
-        if side_initial == "LONG":
-            if t1d == "DOWN":
-                mt_reject_reasons["long_1d_is_down"] += 1
-                return "FLAT"
-            if t4 == "DOWN":
-                mt_reject_reasons["long_4h_is_down"] += 1
-                return "FLAT"
-            return "LONG"
-
-        if t1d == "UP":
-            mt_reject_reasons["short_1d_is_up"] += 1
-            return "FLAT"
-        if t4 == "UP":
-            mt_reject_reasons["short_4h_is_up"] += 1
-            return "FLAT"
-        return "SHORT"
-
-    if mode == "strict":
-        return _strict()
-
-    if mode == "relaxed":
-        return _relaxed()
-
-    if mode == "regime":
-        if t1d == "UP":
-            if side_initial == "SHORT":
-                mt_reject_reasons["regime_1d_up_reject_short"] += 1
-                return "FLAT"
-            return "LONG"
-
-        if t1d == "DOWN":
-            if side_initial == "LONG":
-                mt_reject_reasons["regime_1d_down_reject_long"] += 1
-                return "FLAT"
-            return "SHORT"
-
-        if side_initial == "LONG":
-            if t4 == "DOWN":
-                mt_reject_reasons["regime_1d_neutral_long_4h_down"] += 1
-                return "FLAT"
-            return "LONG"
-        else:
-            if t4 == "UP":
-                mt_reject_reasons["regime_1d_neutral_short_4h_up"] += 1
-                return "FLAT"
-            return "SHORT"
-
-    if (t1d == "UP" and t4 == "DOWN") or (t1d == "DOWN" and t4 == "UP"):
-        mt_reject_reasons["conflict_1d_vs_4h"] += 1
-        return "FLAT"
-
-    return _relaxed()
 
 
 def _build_report(
@@ -280,25 +163,20 @@ def _build_report(
     trend_4h_counts = Counter()
     trend_1d_counts = Counter()
     mt_reject_reasons = Counter()
+    selected_prob_sources = Counter()
 
     for p in preds:
         ts = p["ts"]
+        raw = p["raw"]
+
         i = idx_by_ts.get(ts)
         if i is None or i + horizon >= len(klines):
             skipped_no_kline += 1
             continue
 
-        cal_p_long = p.get("cal_proba_long")
-        cal_p_short = p.get("cal_proba_short")
-        p_long_raw = p.get("proba_long")
-        p_short_raw = p.get("proba_short")
-
-        if cal_p_long is not None and cal_p_short is not None:
-            eff_p_long = float(cal_p_long)
-            eff_p_short = float(cal_p_short)
-        else:
-            eff_p_long = float(p_long_raw) if p_long_raw is not None else 0.0
-            eff_p_short = float(p_short_raw) if p_short_raw is not None else 0.0
+        snap = normalize_log_prediction(raw)
+        eff_p_long, eff_p_short, eff_p_flat, prob_source = select_effective_probs(snap)
+        selected_prob_sources[prob_source] += 1
 
         side_initial = decide_side(eff_p_long, eff_p_short, threshold)
         initial_side_counts[side_initial] += 1
@@ -316,8 +194,8 @@ def _build_report(
             trend_4h_counts[t4] += 1
             trend_1d_counts[t1] += 1
 
-            side_final = _mt_filter_side(
-                side_initial=side_initial,
+            side_final = apply_mt_filter_common(
+                side=side_initial,
                 t4=t4,
                 t1d=t1,
                 mode=mt_filter_mode,
@@ -364,7 +242,7 @@ def _build_report(
             "slippage_per_side": slippage,
             "horizon_bars": horizon,
             "mt_filter": mt_filter,
-            "mt_filter_mode": (mt_filter_mode if mt_filter else "off"),
+            "mt_filter_mode": (normalize_mt_mode(mt_filter_mode) if mt_filter else "off"),
         },
         "signal_stats": {
             "total_predictions": n_total,
@@ -381,6 +259,7 @@ def _build_report(
             "trend_4h_counts": dict(trend_4h_counts),
             "trend_1d_counts": dict(trend_1d_counts),
             "mt_reject_reasons": dict(mt_reject_reasons),
+            "selected_prob_sources": dict(selected_prob_sources),
         },
     }
 
@@ -448,8 +327,6 @@ def _render_markdown(report: Dict[str, Any]) -> str:
     sm = report.get("strategy_metrics")
     db = report.get("direction_breakdown", {})
 
-    has_new = "skipped_flat_model" in ss and "passed_mt" in ss
-
     lines = [
         f"# Daily Evaluation Report: {date}",
         "",
@@ -475,18 +352,9 @@ def _render_markdown(report: Dict[str, Any]) -> str:
         f"| --- | --- |",
         f"| total_predictions | {ss['total_predictions']} |",
         f"| skipped_no_kline  | {ss['skipped_no_kline']} |",
-    ]
-
-    if has_new:
-        lines += [
-            f"| skipped_flat_model | {ss['skipped_flat_model']} |",
-            f"| filtered_mt        | {ss['filtered_mt']} |",
-            f"| passed_mt          | {ss['passed_mt']} |",
-        ]
-    else:
-        lines += [f"| filtered_mt       | {ss['filtered_mt']} |"]
-
-    lines += [
+        f"| skipped_flat_model | {ss['skipped_flat_model']} |",
+        f"| filtered_mt        | {ss['filtered_mt']} |",
+        f"| passed_mt          | {ss['passed_mt']} |",
         f"| n_trades          | {ss['n_trades']} |",
         f"| coverage          | {ss['coverage']:.4f} |",
         "",
@@ -551,6 +419,7 @@ def _render_markdown(report: Dict[str, Any]) -> str:
             f"- trend_4h_counts: `{dbg.get('trend_4h_counts')}`",
             f"- trend_1d_counts: `{dbg.get('trend_1d_counts')}`",
             f"- mt_reject_reasons: `{dbg.get('mt_reject_reasons')}`",
+            f"- selected_prob_sources: `{dbg.get('selected_prob_sources')}`",
             "",
         ]
 
@@ -564,7 +433,6 @@ def _resolve_symbol_paths(
     data_dir: Optional[str],
     report_dir: Optional[str],
 ) -> Tuple[str, str, str]:
-    """Resolve per-symbol paths with root fallback for primary symbol compatibility."""
     base_data = data_dir or "data"
 
     per_symbol_log = os.path.join(base_data, symbol, "predictions_log.jsonl")
@@ -583,7 +451,6 @@ def _resolve_symbol_paths(
 
 
 def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
-    # Resolve date
     if args.date:
         try:
             report_date = datetime.strptime(args.date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -763,12 +630,9 @@ def main() -> int:
     ap.add_argument("--no-mt-filter", action="store_true", help="Disable 4h/1d multi-timeframe filter")
     ap.add_argument(
         "--mt-filter-mode",
-        choices=["strict", "relaxed", "regime", "conflict", "layered"],
-        default="conflict",
-        help=(
-            "MT filter mode (default: conflict). "
-            "conflict rejects trades when 1d and 4h conflict; otherwise uses relaxed."
-        ),
+        choices=["off", "long_only", "symmetric", "strict", "relaxed", "regime", "conflict", "layered"],
+        default="layered",
+        help="Unified MT filter mode.",
     )
 
     ap.add_argument(

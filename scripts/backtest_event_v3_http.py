@@ -6,8 +6,17 @@ Backtest event_v3 via local ml-service HTTP endpoint.
 Signal rule:
   signal at time t -> enter at open[t+1]
 
-Exit rule (triple barrier):
+Exit rule:
+  Supports single-stage or two-stage take-profit.
+
+Single-stage:
   within next horizon bars, hit TP or SL first; else TIMEOUT.
+
+Two-stage:
+  - initial SL active from entry
+  - if TP1 hit first, partially take profit
+  - remaining position gets protected by entry + be_offset
+  - remaining position exits at TP2 / protected stop / timeout
 
 Realism:
 - --horizon-bars
@@ -18,44 +27,56 @@ Realism:
 - max consecutive losses
 
 Position mode:
-- --position-mode stack  (default): open every eligible signal (current behavior)
+- --position-mode stack  (default): open every eligible signal
 - --position-mode single: only one position at a time; skip signals while in position
 
 Optimization:
 - --objective selects ranking function across grid
 
-Outputs:
-- TP/SL/TO decomposition:
-  avg_ret_tp, avg_ret_sl, avg_ret_to, timeout_win_rate
-
 Debug / alignment:
 - --side-source signal|probs
-- --mt-filter-mode off|long_only|symmetric|layered
+- --mt-filter-mode off|strict|relaxed|trend_guard|daily_guard|conflict|regime|layered
 - --debug-best prints side-count diagnostics for the best config
+
+Caching:
+- Adds "prediction disk cache" so same (symbol, interval, window, model_version) does not re-hit ml-service
+  for every grid config.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
+import os
 import statistics
 import sys
 import time
 from bisect import bisect_right
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
 import os as _os
 import sys as _sys
+
 _SCRIPT_DIR = _os.path.dirname(_os.path.abspath(__file__))
 if _SCRIPT_DIR not in _sys.path:
     _sys.path.insert(0, _SCRIPT_DIR)
 
-from mt_filter import mt_gate, gate_allows  # noqa: E402
+from signal_logic import (  # noqa: E402
+    normalize_predict_response,
+    select_effective_probs,
+    decide_side,
+    decide_side_from_signal,
+    apply_mt_filter_with_context,
+    normalize_mt_mode,
+)
 
 
 def _to_utc_dt(ts: Any) -> datetime:
@@ -113,20 +134,29 @@ def load_klines_1h(path: str) -> List[Dict[str, Any]]:
 
 
 @dataclass(frozen=True)
-class PredictOut:
-    signal: str
-    confidence: float
-    reasons: List[str]
-    model_version: str
-
-
-@dataclass(frozen=True)
 class CachedPred:
     signal: str
-    confidence: float
-    p_long: Optional[float]
-    p_short: Optional[float]
-    p_flat: Optional[float]
+    confidence: Optional[float]
+    calibrated_confidence: Optional[float]
+    calibration_method: Optional[str]
+
+    raw_p_long: Optional[float]
+    raw_p_short: Optional[float]
+    raw_p_flat: Optional[float]
+
+    cal_p_long: Optional[float]
+    cal_p_short: Optional[float]
+    cal_p_flat: Optional[float]
+
+    effective_long: Optional[float]
+    effective_short: Optional[float]
+
+    selected_prob_source: str
+    selected_p_long: Optional[float]
+    selected_p_short: Optional[float]
+    selected_p_flat: Optional[float]
+
+    threshold_enter: Optional[float]
     reasons: List[str]
     model_version: str
 
@@ -135,41 +165,141 @@ def predict_payload(interval: str, as_of_ts: str) -> Dict[str, Any]:
     return {"interval": interval, "as_of_ts": as_of_ts}
 
 
-def call_predict(base_url: str, payload: Dict[str, Any], timeout_s: int = 20) -> PredictOut:
+def call_predict(base_url: str, payload: Dict[str, Any], timeout_s: int = 60) -> Dict[str, Any]:
     url = base_url.rstrip("/") + "/predict"
     r = requests.post(url, json=payload, timeout=timeout_s)
     r.raise_for_status()
-    j = r.json()
-    return PredictOut(
-        signal=str(j.get("signal")),
-        confidence=float(j.get("confidence", 0.0)),
-        reasons=list(j.get("reasons") or []),
-        model_version=str(j.get("model_version") or ""),
+    return r.json()
+
+
+def _safe_mkdir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.replace(path)
+
+
+def _sha1(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+
+def _symbol_from_data_dir(data_dir: str) -> str:
+    # data_dir like "data/BTCUSDT" or "/home/.../data/BTCUSDT"
+    base = os.path.basename(os.path.normpath(data_dir.rstrip("/")))
+    return base
+
+
+def _cache_key(
+    *,
+    key_mode: str,
+    symbol: str,
+    interval: str,
+    since: Optional[str],
+    until: Optional[str],
+    warmup_bars: int,
+    model_version: str,
+) -> str:
+    """
+    Returns a stable cache key string, later hashed for filename safety.
+    """
+    key_mode = (key_mode or "").strip().lower()
+    if key_mode == "interval_window":
+        return f"symbol={symbol}|interval={interval}|since={since}|until={until}|warmup={warmup_bars}"
+    # default: include model_version to avoid stale cache across model updates
+    return f"symbol={symbol}|interval={interval}|since={since}|until={until}|warmup={warmup_bars}|model={model_version}"
+
+
+def _cache_path(pred_cache_dir: Path, cache_key: str, fmt: str) -> Path:
+    fmt = (fmt or "jsonl").strip().lower()
+    ext = "jsonl" if fmt == "jsonl" else "json"
+    return pred_cache_dir / f"pred_cache__{_sha1(cache_key)}.{ext}"
+
+
+def _serialize_cached_pred(cp: CachedPred) -> Dict[str, Any]:
+    return {
+        "signal": cp.signal,
+        "confidence": cp.confidence,
+        "calibrated_confidence": cp.calibrated_confidence,
+        "calibration_method": cp.calibration_method,
+        "raw_p_long": cp.raw_p_long,
+        "raw_p_short": cp.raw_p_short,
+        "raw_p_flat": cp.raw_p_flat,
+        "cal_p_long": cp.cal_p_long,
+        "cal_p_short": cp.cal_p_short,
+        "cal_p_flat": cp.cal_p_flat,
+        "effective_long": cp.effective_long,
+        "effective_short": cp.effective_short,
+        "selected_prob_source": cp.selected_prob_source,
+        "selected_p_long": cp.selected_p_long,
+        "selected_p_short": cp.selected_p_short,
+        "selected_p_flat": cp.selected_p_flat,
+        "threshold_enter": cp.threshold_enter,
+        "reasons": cp.reasons,
+        "model_version": cp.model_version,
+    }
+
+
+def _deserialize_cached_pred(d: Dict[str, Any]) -> CachedPred:
+    return CachedPred(
+        signal=str(d.get("signal", "")),
+        confidence=d.get("confidence", None),
+        calibrated_confidence=d.get("calibrated_confidence", None),
+        calibration_method=d.get("calibration_method", None),
+        raw_p_long=d.get("raw_p_long", None),
+        raw_p_short=d.get("raw_p_short", None),
+        raw_p_flat=d.get("raw_p_flat", None),
+        cal_p_long=d.get("cal_p_long", None),
+        cal_p_short=d.get("cal_p_short", None),
+        cal_p_flat=d.get("cal_p_flat", None),
+        effective_long=d.get("effective_long", None),
+        effective_short=d.get("effective_short", None),
+        selected_prob_source=str(d.get("selected_prob_source", "")),
+        selected_p_long=d.get("selected_p_long", None),
+        selected_p_short=d.get("selected_p_short", None),
+        selected_p_flat=d.get("selected_p_flat", None),
+        threshold_enter=d.get("threshold_enter", None),
+        reasons=list(d.get("reasons", [])) if d.get("reasons") is not None else [],
+        model_version=str(d.get("model_version", "")),
     )
 
 
-def parse_probs_from_reasons(reasons: List[str]) -> Tuple[Optional[float], Optional[float], Optional[float]]:
-    p_long = p_short = p_flat = None
-    for s in reasons:
-        if "p_long=" in s and "p_short=" in s and "p_flat=" in s:
-            parts = s.replace(":", " ").replace(",", " ").split()
-            for token in parts:
-                if token.startswith("p_long="):
-                    try:
-                        p_long = float(token.split("=", 1)[1])
-                    except Exception:
-                        pass
-                elif token.startswith("p_short="):
-                    try:
-                        p_short = float(token.split("=", 1)[1])
-                    except Exception:
-                        pass
-                elif token.startswith("p_flat="):
-                    try:
-                        p_flat = float(token.split("=", 1)[1])
-                    except Exception:
-                        pass
-    return p_long, p_short, p_flat
+def _load_pred_cache_jsonl(path: Path) -> Dict[str, CachedPred]:
+    """
+    JSONL format:
+    - First line: {"meta": {...}}
+    - Following lines: {"as_of_ts": "...Z", "pred": {...}}
+    """
+    if not path.exists():
+        return {}
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        return {}
+
+    out: Dict[str, CachedPred] = {}
+    # ignore meta line (line0), tolerate missing meta
+    for line in lines[1:] if lines else []:
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        as_of_ts = str(rec["as_of_ts"])
+        pred = _deserialize_cached_pred(rec["pred"])
+        out[as_of_ts] = pred
+    return out
+
+
+def _write_pred_cache_jsonl(path: Path, meta: Dict[str, Any], pred_map: Dict[str, CachedPred]) -> None:
+    # deterministic order
+    items = sorted(pred_map.items(), key=lambda kv: kv[0])
+    lines: List[str] = []
+    lines.append(json.dumps({"meta": meta}, ensure_ascii=False))
+    for as_of_ts, cp in items:
+        lines.append(json.dumps({"as_of_ts": as_of_ts, "pred": _serialize_cached_pred(cp)}, ensure_ascii=False))
+    _atomic_write_text(path, "\n".join(lines) + "\n")
 
 
 @dataclass
@@ -204,6 +334,23 @@ def _apply_slippage_exit(side: str, price: float, slippage: float) -> float:
     return price
 
 
+def _calc_leg_ret(side: str, entry_exec: float, exit_exec: float, fee_per_side: float) -> float:
+    ret_gross = (exit_exec - entry_exec) / entry_exec if side == "LONG" else (entry_exec - exit_exec) / entry_exec
+    return ret_gross - 2.0 * fee_per_side
+
+
+def _price_at_pct(side: str, entry: float, pct: float) -> float:
+    if side == "LONG":
+        return entry * (1.0 + pct)
+    return entry * (1.0 - pct)
+
+
+def _stop_price_at_offset(side: str, entry: float, offset: float) -> float:
+    if side == "LONG":
+        return entry * (1.0 + offset)
+    return entry * (1.0 - offset)
+
+
 def simulate_trade(
     klines: List[Dict[str, Any]],
     i: int,
@@ -215,6 +362,10 @@ def simulate_trade(
     horizon_bars: int,
     tie_breaker: str = "SL",
     timeout_exit: str = "close",
+    use_two_stage_tp: bool = False,
+    tp1_ratio: float = 0.70,
+    tp1_size: float = 0.60,
+    be_offset: float = 0.002,
 ) -> TradeResult:
     k = klines[i]
     if side == "FLAT":
@@ -228,48 +379,141 @@ def simulate_trade(
     entry_ts = entry_bar["ts"]
     entry_exec = _apply_slippage_entry(side, entry, slippage_per_side)
 
-    if side == "LONG":
-        tp = entry * (1.0 + tp_pct)
-        sl = entry * (1.0 - sl_pct)
-    else:
-        tp = entry * (1.0 - tp_pct)
-        sl = entry * (1.0 + sl_pct)
-
     last_idx = min(i + horizon_bars, len(klines) - 1)
+
+    if not use_two_stage_tp:
+        tp = _price_at_pct(side, entry, tp_pct)
+        sl = _price_at_pct("SHORT" if side == "LONG" else "LONG", entry, sl_pct)
+
+        for j in range(i + 1, last_idx + 1):
+            bar = klines[j]
+            high = float(bar["high"])
+            low = float(bar["low"])
+
+            if side == "LONG":
+                hit_tp = high >= tp
+                hit_sl = low <= sl
+            else:
+                hit_tp = low <= tp
+                hit_sl = high >= sl
+
+            if hit_tp and hit_sl:
+                if tie_breaker.upper() == "TP":
+                    hit_sl = False
+                else:
+                    hit_tp = False
+
+            if hit_tp:
+                exit_price = tp
+                exit_ts = bar["ts"]
+                exit_exec = _apply_slippage_exit(side, exit_price, slippage_per_side)
+                ret_net = _calc_leg_ret(side, entry_exec, exit_exec, fee_per_side)
+                return TradeResult("TP", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, j - (i + 1))
+
+            if hit_sl:
+                exit_price = sl
+                exit_ts = bar["ts"]
+                exit_exec = _apply_slippage_exit(side, exit_price, slippage_per_side)
+                ret_net = _calc_leg_ret(side, entry_exec, exit_exec, fee_per_side)
+                return TradeResult("SL", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, j - (i + 1))
+
+        bar = klines[last_idx]
+        exit_ts = bar["ts"]
+        if timeout_exit == "open_next" and last_idx + 1 < len(klines):
+            exit_price = float(klines[last_idx + 1]["open"])
+            exit_ts = klines[last_idx + 1]["ts"]
+            bars_held = (last_idx + 1) - (i + 1)
+        else:
+            exit_price = float(bar["close"])
+            bars_held = last_idx - (i + 1)
+
+        exit_exec = _apply_slippage_exit(side, exit_price, slippage_per_side)
+        ret_net = _calc_leg_ret(side, entry_exec, exit_exec, fee_per_side)
+        return TradeResult("TIMEOUT", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, bars_held)
+
+    tp1_pct = tp_pct * tp1_ratio
+    tp1_size = max(0.0, min(1.0, tp1_size))
+    rem_size = 1.0 - tp1_size
+
+    tp1_price = _price_at_pct(side, entry, tp1_pct)
+    tp2_price = _price_at_pct(side, entry, tp_pct)
+    init_sl_price = _price_at_pct("SHORT" if side == "LONG" else "LONG", entry, sl_pct)
+    be_stop_price = _stop_price_at_offset(side, entry, be_offset)
+
+    tp1_hit = False
+    tp1_exit_ts = None
+    tp1_exit_price = None
+    bars_held = 0
 
     for j in range(i + 1, last_idx + 1):
         bar = klines[j]
         high = float(bar["high"])
         low = float(bar["low"])
+        bars_held = j - (i + 1)
 
-        if side == "LONG":
-            hit_tp = high >= tp
-            hit_sl = low <= sl
-        else:
-            hit_tp = low <= tp
-            hit_sl = high >= sl
-
-        if hit_tp and hit_sl:
-            if tie_breaker.upper() == "TP":
-                hit_sl = False
+        if not tp1_hit:
+            if side == "LONG":
+                hit_tp1 = high >= tp1_price
+                hit_sl = low <= init_sl_price
             else:
-                hit_tp = False
+                hit_tp1 = low <= tp1_price
+                hit_sl = high >= init_sl_price
 
-        if hit_tp:
-            exit_price = tp
-            exit_ts = bar["ts"]
-            exit_exec = _apply_slippage_exit(side, exit_price, slippage_per_side)
-            ret_gross = (exit_exec - entry_exec) / entry_exec if side == "LONG" else (entry_exec - exit_exec) / entry_exec
-            ret_net = ret_gross - 2.0 * fee_per_side
-            return TradeResult("TP", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, j - (i + 1))
+            if hit_tp1 and hit_sl:
+                if tie_breaker.upper() == "TP":
+                    hit_sl = False
+                else:
+                    hit_tp1 = False
 
-        if hit_sl:
-            exit_price = sl
-            exit_ts = bar["ts"]
-            exit_exec = _apply_slippage_exit(side, exit_price, slippage_per_side)
-            ret_gross = (exit_exec - entry_exec) / entry_exec if side == "LONG" else (entry_exec - exit_exec) / entry_exec
-            ret_net = ret_gross - 2.0 * fee_per_side
-            return TradeResult("SL", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, j - (i + 1))
+            if hit_sl:
+                exit_price = init_sl_price
+                exit_ts = bar["ts"]
+                exit_exec = _apply_slippage_exit(side, exit_price, slippage_per_side)
+                ret_net = _calc_leg_ret(side, entry_exec, exit_exec, fee_per_side)
+                return TradeResult("SL", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, bars_held)
+
+            if hit_tp1:
+                tp1_hit = True
+                tp1_exit_ts = bar["ts"]
+                tp1_exit_price = tp1_price
+                if rem_size <= 1e-12:
+                    exit_exec = _apply_slippage_exit(side, tp1_price, slippage_per_side)
+                    ret_net = _calc_leg_ret(side, entry_exec, exit_exec, fee_per_side)
+                    return TradeResult("TP1", side, entry_ts, entry, entry_exec, tp1_exit_ts, tp1_price, exit_exec, ret_net, bars_held)
+                continue
+
+        else:
+            if side == "LONG":
+                hit_tp2 = high >= tp2_price
+                hit_be = low <= be_stop_price
+            else:
+                hit_tp2 = low <= tp2_price
+                hit_be = high >= be_stop_price
+
+            if hit_tp2 and hit_be:
+                if tie_breaker.upper() == "TP":
+                    hit_be = False
+                else:
+                    hit_tp2 = False
+
+            tp1_exit_exec = _apply_slippage_exit(side, tp1_exit_price, slippage_per_side)
+            ret_part1 = _calc_leg_ret(side, entry_exec, tp1_exit_exec, fee_per_side)
+
+            if hit_tp2:
+                exit_price = tp2_price
+                exit_ts = bar["ts"]
+                exit_exec = _apply_slippage_exit(side, exit_price, slippage_per_side)
+                ret_part2 = _calc_leg_ret(side, entry_exec, exit_exec, fee_per_side)
+                ret_net = tp1_size * ret_part1 + rem_size * ret_part2
+                return TradeResult("TP2", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, bars_held)
+
+            if hit_be:
+                exit_price = be_stop_price
+                exit_ts = bar["ts"]
+                exit_exec = _apply_slippage_exit(side, exit_price, slippage_per_side)
+                ret_part2 = _calc_leg_ret(side, entry_exec, exit_exec, fee_per_side)
+                ret_net = tp1_size * ret_part1 + rem_size * ret_part2
+                return TradeResult("TP1_BE", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, bars_held)
 
     bar = klines[last_idx]
     exit_ts = bar["ts"]
@@ -282,9 +526,16 @@ def simulate_trade(
         bars_held = last_idx - (i + 1)
 
     exit_exec = _apply_slippage_exit(side, exit_price, slippage_per_side)
-    ret_gross = (exit_exec - entry_exec) / entry_exec if side == "LONG" else (entry_exec - exit_exec) / entry_exec
-    ret_net = ret_gross - 2.0 * fee_per_side
-    return TradeResult("TIMEOUT", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, bars_held)
+
+    if not tp1_hit:
+        ret_net = _calc_leg_ret(side, entry_exec, exit_exec, fee_per_side)
+        return TradeResult("TIMEOUT", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, bars_held)
+
+    tp1_exit_exec = _apply_slippage_exit(side, tp1_exit_price, slippage_per_side)
+    ret_part1 = _calc_leg_ret(side, entry_exec, tp1_exit_exec, fee_per_side)
+    ret_part2 = _calc_leg_ret(side, entry_exec, exit_exec, fee_per_side)
+    ret_net = tp1_size * ret_part1 + rem_size * ret_part2
+    return TradeResult("TP1_TIMEOUT", side, entry_ts, entry, entry_exec, exit_ts, exit_price, exit_exec, ret_net, bars_held)
 
 
 def _percentile(sorted_vals: List[int], p: float) -> float:
@@ -395,9 +646,9 @@ def compute_metrics(trades: List[TradeResult], total_bars: int, bars_per_week: f
     n_long = sum(1 for t in trades if t.side == "LONG")
     n_short = sum(1 for t in trades if t.side == "SHORT")
 
-    tp_trades = [t for t in trades if t.outcome == "TP"]
+    tp_trades = [t for t in trades if t.outcome in ("TP", "TP1", "TP2", "TP1_BE", "TP1_TIMEOUT")]
     sl_trades = [t for t in trades if t.outcome == "SL"]
-    to_trades = [t for t in trades if t.outcome == "TIMEOUT"]
+    to_trades = [t for t in trades if t.outcome in ("TIMEOUT", "TP1_TIMEOUT")]
 
     tp = len(tp_trades)
     sl = len(sl_trades)
@@ -476,23 +727,6 @@ def _score_metrics(m: Metrics, objective: str) -> Tuple[float, ...]:
     raise ValueError(f"Unknown objective: {objective}")
 
 
-def decide_side(p_long: Optional[float], p_short: Optional[float], threshold: float) -> str:
-    if p_long is None or p_short is None:
-        return "FLAT"
-    if p_long >= threshold and p_long >= p_short:
-        return "LONG"
-    if p_short >= threshold and p_short > p_long:
-        return "SHORT"
-    return "FLAT"
-
-
-def decide_side_from_signal(signal: str) -> str:
-    s = (signal or "").upper().strip()
-    if s in ("LONG", "SHORT", "FLAT"):
-        return s
-    return "FLAT"
-
-
 def _sma(vals: List[float], window: int) -> List[Optional[float]]:
     out: List[Optional[float]] = []
     s = 0.0
@@ -513,7 +747,6 @@ def _trend_series(
     slow: int = 20,
     eps: float = 0.001,
 ) -> List[str]:
-    """Return per-bar trend: 'UP' / 'DOWN' / 'NEUTRAL' based on fast/slow SMA."""
     closes = [float(k["close"]) for k in klines]
     ma_fast = _sma(closes, fast)
     ma_slow = _sma(closes, slow)
@@ -528,60 +761,6 @@ def _trend_series(
         else:
             out.append("NEUTRAL")
     return out
-
-
-def apply_mt_filter(
-    side: str,
-    sig_ts: datetime,
-    trend_4h_at,
-    trend_1d_at,
-    mode: str,
-) -> Tuple[str, Optional[str], Optional[str], Optional[str]]:
-    """
-    Returns:
-      (final_side, trend_4h, trend_1d, reject_reason)
-    """
-    mode = (mode or "off").lower().strip()
-
-    if side not in ("LONG", "SHORT"):
-        return side, None, None, None
-
-    if mode == "off":
-        return side, None, None, None
-
-    t4 = trend_4h_at(sig_ts)
-    t1d = trend_1d_at(sig_ts)
-
-    if mode == "long_only":
-        if side == "LONG":
-            if t4 != "UP":
-                return "FLAT", t4, t1d, "long_t4_not_up"
-            if t1d == "DOWN":
-                return "FLAT", t4, t1d, "long_t1d_down"
-        return side, t4, t1d, None
-
-    if mode == "symmetric":
-        if side == "LONG":
-            if t4 != "UP":
-                return "FLAT", t4, t1d, "long_t4_not_up"
-            if t1d == "DOWN":
-                return "FLAT", t4, t1d, "long_t1d_down"
-            return side, t4, t1d, None
-
-        if side == "SHORT":
-            if t4 != "DOWN":
-                return "FLAT", t4, t1d, "short_t4_not_down"
-            if t1d == "UP":
-                return "FLAT", t4, t1d, "short_t1d_up"
-            return side, t4, t1d, None
-
-    if mode == "layered":
-        gate = mt_gate(side, t4, t1d)
-        if gate_allows(gate):
-            return side, t4, t1d, None
-        return "FLAT", t4, t1d, f"layered_reject_{side.lower()}"
-
-    raise ValueError(f"Unknown mt filter mode: {mode}")
 
 
 def print_backtest_summary(
@@ -602,6 +781,10 @@ def print_backtest_summary(
     position_mode: str,
     side_source: str,
     mt_filter_mode: str,
+    use_two_stage_tp: bool,
+    tp1_ratio: float,
+    tp1_size: float,
+    be_offset: float,
 ) -> None:
     print(f"Model version: {model_version}")
     print(f"Grid: thresholds={n_thresholds} tp={n_tp} sl={n_sl}")
@@ -609,16 +792,10 @@ def print_backtest_summary(
         f"Backtest bars: {n_bars} from {start_ts} to {end_ts}\n"
         f"Exec: horizon={horizon} bars, fee/side={fee*100:.4f}%, slippage/side={slippage*100:.4f}%, "
         f"timeout_exit={timeout_exit}, tie={tie_breaker}, objective={objective}, "
-        f"position_mode={position_mode}, side_source={side_source}, mt_filter_mode={mt_filter_mode}"
+        f"position_mode={position_mode}, side_source={side_source}, mt_filter_mode={normalize_mt_mode(mt_filter_mode)}"
     )
     print(
-        "\n[回测摘要]\n"
-        f"- 模型版本: {model_version}\n"
-        f"- 网格规模: 阈值 {n_thresholds} 个 × TP {n_tp} 个 × SL {n_sl} 个\n"
-        f"- 回测区间: 共 {n_bars} 根 1h K 线，时间 {start_ts} → {end_ts}\n"
-        f"- 执行设定: 持有期 {horizon} 根K线, 单边手续费 {fee*100:.4f}%, 单边滑点 {slippage*100:.4f}%\n"
-        f"           超时平仓方式={timeout_exit}, TP/SL 同时触发时优先={tie_breaker}, 目标函数={objective}, 仓位模式={position_mode}\n"
-        f"           信号来源={side_source}, 多周期过滤={mt_filter_mode}\n"
+        f"Two-stage TP: enabled={use_two_stage_tp} tp1_ratio={tp1_ratio:.2f} tp1_size={tp1_size:.2f} be_offset={be_offset*100:.2f}%"
     )
 
 
@@ -644,8 +821,22 @@ def main() -> int:
     ap.add_argument("--sleep-ms", type=int, default=0)
 
     ap.add_argument("--side-source", choices=["signal", "probs"], default="probs")
-    ap.add_argument("--mt-filter-mode", choices=["off", "long_only", "symmetric", "layered"], default="long_only")
+    ap.add_argument(
+        "--mt-filter-mode",
+        choices=["off", "long_only", "symmetric", "strict", "relaxed", "trend_guard", "daily_guard", "conflict", "regime", "layered"],
+        default="layered",
+    )
+    ap.add_argument("--use-two-stage-tp", action="store_true")
+    ap.add_argument("--tp1-ratio", type=float, default=0.70)
+    ap.add_argument("--tp1-size", type=float, default=0.60)
+    ap.add_argument("--be-offset", type=float, default=0.002)
     ap.add_argument("--debug-best", action="store_true")
+
+    # prediction disk cache options
+    ap.add_argument("--pred-cache", choices=["on", "off"], default="on")
+    ap.add_argument("--pred-cache-dir", default="data/pred_cache")
+    ap.add_argument("--pred-cache-format", choices=["jsonl"], default="jsonl")
+    ap.add_argument("--pred-cache-key", choices=["interval_window", "model_interval_window"], default="model_interval_window")
 
     args = ap.parse_args()
 
@@ -716,21 +907,40 @@ def main() -> int:
 
     pred_cache: Dict[str, CachedPred] = {}
 
-    def get_pred(as_of_ts: str) -> CachedPred:
+    # disk cache setup (loaded AFTER we discover model_version)
+    disk_cache_enabled = (args.pred_cache == "on")
+    pred_cache_dir = Path(args.pred_cache_dir)
+    if disk_cache_enabled:
+        _safe_mkdir(pred_cache_dir)
+
+    def get_pred_no_disk(as_of_ts: str) -> CachedPred:
         if as_of_ts in pred_cache:
             return pred_cache[as_of_ts]
 
-        out = call_predict(args.base_url, predict_payload(args.interval, as_of_ts))
-        p_long, p_short, p_flat = parse_probs_from_reasons(out.reasons)
+        raw = call_predict(args.base_url, predict_payload(args.interval, as_of_ts))
+        snap = normalize_predict_response(raw)
+        sel_p_long, sel_p_short, sel_p_flat, sel_source = select_effective_probs(snap)
 
         cp = CachedPred(
-            signal=out.signal,
-            confidence=out.confidence,
-            p_long=p_long,
-            p_short=p_short,
-            p_flat=p_flat,
-            reasons=out.reasons,
-            model_version=out.model_version,
+            signal=snap.signal,
+            confidence=snap.confidence,
+            calibrated_confidence=snap.calibrated_confidence,
+            calibration_method=snap.calibration_method,
+            raw_p_long=snap.p_long,
+            raw_p_short=snap.p_short,
+            raw_p_flat=snap.p_flat,
+            cal_p_long=snap.cal_p_long,
+            cal_p_short=snap.cal_p_short,
+            cal_p_flat=snap.cal_p_flat,
+            effective_long=snap.effective_long,
+            effective_short=snap.effective_short,
+            selected_prob_source=sel_source,
+            selected_p_long=sel_p_long,
+            selected_p_short=sel_p_short,
+            selected_p_flat=sel_p_flat,
+            threshold_enter=snap.threshold_enter,
+            reasons=snap.reasons,
+            model_version=snap.model_version,
         )
         pred_cache[as_of_ts] = cp
 
@@ -744,12 +954,71 @@ def main() -> int:
         print(f"ERROR: usable bars too few: {len(usable)}", file=sys.stderr)
         return 2
 
+    # ---- precompute predictions (with disk cache) ----
     print(f"Precomputing predictions for {len(usable)} bars via {args.base_url} ...")
-    model_version = ""
-    for i in usable:
+
+    # Step 1: call one prediction to learn model_version (so cache key can include it)
+    first_ts = klines[usable[0]]["ts"].isoformat().replace("+00:00", "Z")
+    first_cp = get_pred_no_disk(first_ts)
+    model_version = first_cp.model_version or ""
+    selected_prob_sources = Counter()
+    selected_prob_sources[first_cp.selected_prob_source] += 1
+
+    # Step 2: if disk cache enabled, try load cache file for this window
+    symbol = _symbol_from_data_dir(args.data_dir)
+    cache_key = _cache_key(
+        key_mode=args.pred_cache_key,
+        symbol=symbol,
+        interval=args.interval,
+        since=args.since,
+        until=args.until,
+        warmup_bars=int(args.warmup_bars),
+        model_version=model_version,
+    )
+    cache_path = _cache_path(pred_cache_dir, cache_key, args.pred_cache_format)
+
+    disk_loaded: Dict[str, CachedPred] = {}
+    if disk_cache_enabled and cache_path.exists():
+        try:
+            disk_loaded = _load_pred_cache_jsonl(cache_path)
+            # merge into in-memory cache
+            pred_cache.update(disk_loaded)
+            # we already have first_cp in pred_cache; that's fine
+            print(f"Loaded prediction cache: {cache_path} (rows={len(disk_loaded)})")
+        except Exception as e:
+            print(f"WARNING: failed to read pred cache {cache_path}: {e}", file=sys.stderr)
+
+    def get_pred(as_of_ts: str) -> CachedPred:
+        # in-memory cache first (may include disk-loaded)
+        if as_of_ts in pred_cache:
+            return pred_cache[as_of_ts]
+        # otherwise call service
+        return get_pred_no_disk(as_of_ts)
+
+    # Step 3: precompute remaining bars
+    for i in usable[1:]:
         as_of_ts = klines[i]["ts"].isoformat().replace("+00:00", "Z")
         cp = get_pred(as_of_ts)
         model_version = cp.model_version or model_version
+        selected_prob_sources[cp.selected_prob_source] += 1
+
+    # Step 4: write disk cache (only if enabled)
+    if disk_cache_enabled:
+        try:
+            meta = {
+                "symbol": symbol,
+                "interval": args.interval,
+                "since": args.since,
+                "until": args.until,
+                "warmup_bars": int(args.warmup_bars),
+                "model_version": model_version,
+                "created_at_utc": datetime.now(timezone.utc).isoformat(),
+                "cache_key_mode": args.pred_cache_key,
+            }
+            _write_pred_cache_jsonl(cache_path, meta=meta, pred_map=pred_cache)
+            print(f"Wrote prediction cache: {cache_path} (rows={len(pred_cache)})")
+        except Exception as e:
+            print(f"WARNING: failed to write pred cache {cache_path}: {e}", file=sys.stderr)
 
     print_backtest_summary(
         model_version=model_version,
@@ -768,7 +1037,12 @@ def main() -> int:
         position_mode=args.position_mode,
         side_source=args.side_source,
         mt_filter_mode=args.mt_filter_mode,
+        use_two_stage_tp=args.use_two_stage_tp,
+        tp1_ratio=args.tp1_ratio,
+        tp1_size=args.tp1_size,
+        be_offset=args.be_offset,
     )
+    print(f"Selected probability source counts: {dict(selected_prob_sources)}")
 
     best: Optional[Tuple[float, float, float, Metrics, Tuple[float, ...], Dict[str, Any]]] = None
     total_bars = len(usable)
@@ -777,7 +1051,6 @@ def main() -> int:
         for tp in tp_grid:
             for sl in sl_grid:
                 trades: List[TradeResult] = []
-
                 next_allowed_ts: Optional[datetime] = None
 
                 raw_long = raw_short = raw_flat = 0
@@ -787,7 +1060,7 @@ def main() -> int:
                 signal_long = signal_short = signal_flat = 0
                 probs_long = probs_short = probs_flat = 0
 
-                mt_reject_reasons: Dict[str, int] = {}
+                mt_reject_reasons: Counter = Counter()
 
                 for i in usable:
                     sig_ts = klines[i]["ts"]
@@ -807,7 +1080,7 @@ def main() -> int:
                     else:
                         signal_flat += 1
 
-                    probs_side = decide_side(cp.p_long, cp.p_short, thr)
+                    probs_side = decide_side(cp.selected_p_long, cp.selected_p_short, thr)
                     if probs_side == "LONG":
                         probs_long += 1
                     elif probs_side == "SHORT":
@@ -825,20 +1098,19 @@ def main() -> int:
                         raw_flat += 1
 
                     side_before_filter = side
-                    side, t4, t1d, reject_reason = apply_mt_filter(
+                    side, _t4, _t1d, _reject_reason = apply_mt_filter_with_context(
                         side=side,
                         sig_ts=sig_ts,
                         trend_4h_at=trend_4h_at,
                         trend_1d_at=trend_1d_at,
                         mode=args.mt_filter_mode,
+                        mt_reject_reasons=mt_reject_reasons,
                     )
 
                     if side_before_filter == "LONG" and side == "FLAT":
                         filtered_long += 1
                     if side_before_filter == "SHORT" and side == "FLAT":
                         filtered_short += 1
-                    if reject_reason:
-                        mt_reject_reasons[reject_reason] = mt_reject_reasons.get(reject_reason, 0) + 1
 
                     if side == "LONG":
                         final_long += 1
@@ -859,6 +1131,10 @@ def main() -> int:
                         horizon_bars=horizon,
                         tie_breaker=args.tie_breaker,
                         timeout_exit=args.timeout_exit,
+                        use_two_stage_tp=args.use_two_stage_tp,
+                        tp1_ratio=args.tp1_ratio,
+                        tp1_size=args.tp1_size,
+                        be_offset=args.be_offset,
                     )
                     if tr.outcome == "NO_TRADE":
                         continue
@@ -886,10 +1162,7 @@ def main() -> int:
                     best = (thr, tp, sl, m, score, debug_info)
 
     if best is None:
-        msg_en = "No config satisfies min signals/week constraint. Try lowering --min-signals-per-week."
-        msg_zh = "没有任何参数组合满足每周最少信号数的约束，可以尝试降低 --min-signals-per-week。"
-        print(msg_en, file=sys.stderr)
-        print(msg_zh, file=sys.stderr)
+        print("No config satisfies min signals/week constraint. Try lowering --min-signals-per-week.", file=sys.stderr)
         return 3
 
     thr, tp, sl, m, _score, debug_info = best
@@ -899,7 +1172,8 @@ def main() -> int:
         f"fee/side={args.fee*100:.4f}% slippage/side={args.slippage*100:.4f}% "
         f"horizon={horizon} timeout_exit={args.timeout_exit} tie={args.tie_breaker} "
         f"objective={args.objective} position_mode={args.position_mode} "
-        f"side_source={args.side_source} mt_filter_mode={args.mt_filter_mode}"
+        f"side_source={args.side_source} mt_filter_mode={normalize_mt_mode(args.mt_filter_mode)} "
+        f"use_two_stage_tp={args.use_two_stage_tp} tp1_ratio={args.tp1_ratio:.2f} tp1_size={args.tp1_size:.2f} be_offset={args.be_offset*100:.2f}%"
     )
     print(
         "metrics: "

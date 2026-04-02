@@ -34,7 +34,7 @@ symbols:
   BTCUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.65
+    threshold: 0.84
     tp: 0.0175
     sl: 0.009
     horizon: 12
@@ -43,16 +43,16 @@ symbols:
   ETHUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.65
+    threshold: 0.58
     tp: 0.0175
     sl: 0.009
-    horizon: 12
+    horizon: 6
     calibration: "isotonic"
 
   SOLUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.65
+    threshold: 0.84
     tp: 0.020
     sl: 0.010
     horizon: 12
@@ -61,7 +61,7 @@ symbols:
   BNBUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.65
+    threshold: 0.84
     tp: 0.0175
     sl: 0.009
     horizon: 12
@@ -72,7 +72,7 @@ symbols:
   XRPUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.65
+    threshold: 0.84
     tp: 0.020
     sl: 0.010
     horizon: 12
@@ -81,7 +81,7 @@ symbols:
   DOGEUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.65
+    threshold: 0.84
     tp: 0.020
     sl: 0.010
     horizon: 12
@@ -90,7 +90,7 @@ symbols:
   ADAUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.65
+    threshold: 0.84
     tp: 0.020
     sl: 0.010
     horizon: 12
