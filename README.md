@@ -902,12 +902,50 @@ curl -s -X POST http://127.0.0.1:9000/predict \
 - 支持参数网格搜索（`--thresholds`、`--tp-grid`、`--sl-grid`）
 - 内置多周期方向过滤（4h/1d 趋势约束，方案 B）
 
-### 12.2 完整回测命令（网格搜索）
+**单一配置源（Single Source of Truth）：`configs/symbols.yaml`**
+
+> 所有层（回测 / 模拟交易 / 实盘交易 / 线上推理）共享同一套参数，均来自 `configs/symbols.yaml`：
+>
+> | 层 | 如何读取配置 |
+> |---|---|
+> | **回测** (`backtest_event_v3_http.py`) | `--symbol XXXUSDT` 自动从 YAML 读取 threshold/tp/sl/horizon/interval |
+> | **模拟交易** (`live_trader_perp_simulated.py`) | `--symbol` 自动从 YAML 读取，CLI flag 可覆盖 |
+> | **实盘交易** (`live_trader_eth_perp_binance.py`) | 通过 `symbol_config.get_symbol_config()` 读取 YAML |
+> | **线上推理** (`ml-service/app.py`) | `symbols_config.py` 实时读取 YAML（支持 mtime 热更新） |
+>
+> 修改 `configs/symbols.yaml` 后，只需重启 ml-service 和交易脚本，三层即自动对齐。
+
+### 12.2 快速验证（使用 --symbol 确保与线上参数一致）
+
+```bash
+# 使用 --symbol，参数自动从 configs/symbols.yaml 读取，无需手动指定 threshold/tp/sl/horizon
+cd ~/ubuntu-wallet
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
+  --data-dir data/ETHUSDT \
+  --symbol ETHUSDT \
+  --base-url http://127.0.0.1:9000 \
+  --since 2026-02-01T00:00:00Z \
+  --until 2026-03-10T23:00:00Z \
+  --fee 0.0004 \
+  --objective avg_ret_mdd_daily \
+  --min-signals-per-week 1.0 \
+  --position-mode single
+```
+
+启动后会打印参数来源，例如：
+
+```
+[config] symbol=ETHUSDT  interval=1h (YAML)  horizon_bars=6 (YAML)  thresholds=0.58:0.58:0.01 (YAML)  tp_grid=0.0175:0.0175:0.001 (YAML)  sl_grid=0.009:0.009:0.001 (YAML)
+```
+
+这样可以确认回测与线上推理、模拟/实盘交易使用完全相同的参数。若需要覆盖某个参数，直接在命令行追加对应 flag（`CLI` 优先级高于 `YAML`）。
+
+### 12.3 完整回测命令（网格搜索）
 
 ```bash
 cd ~/ubuntu-wallet
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
-  --data-dir data \
+  --data-dir data/ETHUSDT \
   --base-url http://127.0.0.1:9000 \
   --interval 1h \
   --since 2026-02-01T00:00:00Z \
@@ -923,26 +961,27 @@ cd ~/ubuntu-wallet
   --position-mode single
 ```
 
-### 12.3 参数说明
+### 12.4 参数说明
 
 | 参数 | 示例值 | 说明 |
 |---|---|---|
-| `--data-dir` | `data` | K 线数据目录 |
+| `--data-dir` | `data/ETHUSDT` | 币种 K 线数据目录（建议写到具体币种子目录） |
+| `--symbol` | `ETHUSDT` | **（推荐）** 提供时自动从 `configs/symbols.yaml` 读默认值，省去手动指定 threshold/tp/sl/horizon |
 | `--base-url` | `http://127.0.0.1:9000` | ml-service 地址 |
-| `--interval` | `1h` | 交易时间框架 |
+| `--interval` | `1h` | 交易时间框架（未指定且有 `--symbol` 时从 YAML 读取） |
 | `--since` | `2026-02-01T00:00:00Z` | 回测开始时间（ISO 8601 UTC） |
 | `--until` | `2026-03-10T23:00:00Z` | 回测结束时间（ISO 8601 UTC） |
-| `--thresholds` | `0.55:0.85:0.02` | 阈值网格（起点:终点:步长），置信度低于此值的信号被忽略 |
-| `--tp-grid` | `0.005:0.030:0.0025` | 止盈比例网格 |
-| `--sl-grid` | `0.003:0.020:0.001` | 止损比例网格 |
-| `--horizon-bars` | `6` | 最大持仓时间（bar 数，1h × 6 = 6 小时）|
+| `--thresholds` | `0.55:0.85:0.02` | 阈值网格（起点:终点:步长）；有 `--symbol` 时默认为 YAML 单点范围 |
+| `--tp-grid` | `0.005:0.030:0.0025` | 止盈比例网格；有 `--symbol` 时默认为 YAML 单点范围 |
+| `--sl-grid` | `0.003:0.020:0.001` | 止损比例网格；有 `--symbol` 时默认为 YAML 单点范围 |
+| `--horizon-bars` | `6` | 最大持仓时间（bar 数，1h × 6 = 6 小时）；有 `--symbol` 时从 YAML 读取 |
 | `--fee` | `0.0004` | 单边手续费（0.04%）|
 | `--slippage` | `0.0` | 额外滑点（0 表示不考虑）|
 | `--objective` | `avg_ret_mdd_daily` | 优化目标函数 |
 | `--min-signals-per-week` | `1.0` | 最低信号频率过滤 |
 | `--position-mode` | `single` | 持仓模式（`stack`=默认，每个信号都开仓；`single`=单仓，上一笔未平仓时忽略新信号） |
 
-### 12.4 多周期方向过滤规则
+### 12.5 多周期方向过滤规则
 
 脚本内部实现了基于 4h/1d K 线的趋势过滤（方案 B）：
 
@@ -950,18 +989,20 @@ cd ~/ubuntu-wallet
 - **做空条件**：4h 趋势必须为 DOWN，且 1d 趋势不能为 UP
 - 趋势判断基于 SMA(5) 与 SMA(20) 的相对位置（容忍区间 0.1%）
 
-### 12.5 当前推荐参数
+### 12.6 当前推荐参数
 
 详细回测记录见 [README_backtest_event_v3_1h.md](README_backtest_event_v3_1h.md)。
 
-| 参数 | 推荐值 |
-|---|---|
-| threshold | 0.55（calibrated_confidence 可用时建议 0.65） |
-| tp | 1.75% |
-| sl | 0.90% |
-| horizon | 6 小时（6 根 1h bar） |
-| interval | 1h |
-| 多周期过滤 | 方案 B（4h/1d 趋势约束） |
+> **推荐做法**：将确认后的参数写入 `configs/symbols.yaml`，使用 `--symbol` 运行回测验证，然后重启服务确保线上参数对齐。
+
+| 参数 | 推荐值（示例） | 来源 |
+|---|---|---|
+| threshold | 见 `configs/symbols.yaml` 各币种字段 | YAML 单一真源 |
+| tp | 见 `configs/symbols.yaml` 各币种字段 | YAML 单一真源 |
+| sl | 见 `configs/symbols.yaml` 各币种字段 | YAML 单一真源 |
+| horizon | 见 `configs/symbols.yaml` 各币种字段 | YAML 单一真源 |
+| interval | 见 `configs/symbols.yaml` 各币种字段 | YAML 单一真源 |
+| 多周期过滤 | 方案 B（4h/1d 趋势约束） | CLI `--mt-filter-mode` |
 
 ---
 
@@ -1206,11 +1247,18 @@ sudo systemctl restart ml-service.service
   --label-method ternary --horizon 12 --up-thresh 0.015 \
   --calibration isotonic
 
-# ── 快速回测（单组参数） ──────────────────────────────────
+# ── 快速回测（使用 --symbol 自动读取 YAML 参数，确保与线上对齐） ──
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
-  --data-dir data --base-url http://127.0.0.1:9000 \
+  --data-dir data/ETHUSDT --symbol ETHUSDT \
+  --base-url http://127.0.0.1:9000 \
+  --since 2026-02-01T00:00:00Z --until 2026-03-10T23:00:00Z \
+  --fee 0.0004 --objective avg_ret_mdd_daily --position-mode single
+
+# ── 快速回测（手动指定参数，网格搜索） ───────────────────
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
+  --data-dir data/ETHUSDT --base-url http://127.0.0.1:9000 \
   --interval 1h \
-  --threshold 0.65 \
+  --thresholds 0.55:0.85:0.02 \
   --tp-grid 0.0175:0.0175:0.001 \
   --sl-grid 0.007:0.007:0.001 \
   --horizon-bars 6
@@ -1370,7 +1418,38 @@ curl -fsS http://127.0.0.1:8080/api/healthz | jq .
 
 ---
 
-## 17. 风险提示与免责声明
+## 17. 参数对齐操作清单
+
+在调完回测参数并写入 `configs/symbols.yaml` 后，按以下步骤确保"回测 = 模拟交易 = 实盘 = 线上推理"完全对齐：
+
+- [ ] **1. 更新 `configs/symbols.yaml`**：将确认后的 `threshold/tp/sl/horizon/interval` 写入对应币种条目
+- [ ] **2. 提交并推送到 main**：`git add configs/symbols.yaml && git commit -m "chore: update symbol params" && git push`
+- [ ] **3. 服务器拉取最新代码**：`cd ~/ubuntu-wallet && git pull`
+- [ ] **4. 重启 ml-service**（线上推理立即使用新阈值）：`sudo systemctl restart ml-service.service`
+- [ ] **5. 重启模拟/实盘交易脚本**（参数从 YAML 自动读取）：停止旧进程后重新启动 `live_trader_perp_simulated.py --symbol XXXUSDT`
+- [ ] **6. 回测验证对齐**：用 `--symbol` 跑一次回测，确认输出中所有参数来源均为 `YAML`：
+  ```bash
+  ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
+    --data-dir data/ETHUSDT --symbol ETHUSDT \
+    --base-url http://127.0.0.1:9000 \
+    --since 2026-02-01T00:00:00Z --until 2026-03-10T23:00:00Z \
+    --fee 0.0004 --position-mode single
+  ```
+  验证控制台输出含 `(YAML)` 标注：
+  ```
+  [config] symbol=ETHUSDT  interval=1h (YAML)  horizon_bars=6 (YAML)  thresholds=0.58:0.58:0.01 (YAML)  ...
+  ```
+- [ ] **7. 线上推理验证**：调用 `/predict` 接口，确认返回的 `threshold_enter` 与 YAML 一致：
+  ```bash
+  curl -s http://127.0.0.1:9000/predict \
+    -H 'Content-Type: application/json' \
+    -d '{"symbol":"ETHUSDT","interval":"1h","as_of":"2026-03-10T12:00:00Z"}' \
+    | python3 -m json.tool | grep threshold
+  ```
+
+---
+
+## 18. 风险提示与免责声明
 
 **请在使用本系统前仔细阅读以下说明：**
 

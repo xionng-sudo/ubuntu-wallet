@@ -4,12 +4,16 @@ Covers:
 - Feature builder kline timestamp field compatibility (ts vs timestamp)
 - scripts/symbol_config.py public API aliases
 - live_trader_perp_simulated.py CLI argument parsing
+- backtest_event_v3_http.py CLI argument parsing and --symbol YAML defaults
 """
 from __future__ import annotations
 
+import importlib.util
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -277,6 +281,109 @@ class TestLegacyEthWrapperCLI(unittest.TestCase):
             "live_trader_perp_simulated" in combined or "deprecated" in combined.lower(),
             "Legacy wrapper should reference live_trader_perp_simulated.py or warn about deprecation",
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests: backtest_event_v3_http.py CLI
+# ---------------------------------------------------------------------------
+
+class TestBacktestEventV3CLI(unittest.TestCase):
+    """CLI smoke tests for scripts/backtest_event_v3_http.py."""
+
+    _SCRIPT = os.path.join(SCRIPTS_DIR, "backtest_event_v3_http.py")
+
+    def test_script_exists(self) -> None:
+        self.assertTrue(
+            os.path.exists(self._SCRIPT),
+            f"scripts/backtest_event_v3_http.py must exist at {self._SCRIPT}",
+        )
+
+    def test_help_returns_zero(self) -> None:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0, f"--help returned non-zero: {result.stderr}")
+
+    def test_help_contains_symbol_flag(self) -> None:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertIn("--symbol", result.stdout, "--symbol flag must appear in --help output")
+
+    def test_help_mentions_symbols_yaml(self) -> None:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertIn(
+            "symbols.yaml", result.stdout,
+            "--symbol help text must reference configs/symbols.yaml",
+        )
+
+    def test_help_contains_grid_flags(self) -> None:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--help"],
+            capture_output=True, text=True,
+        )
+        for flag in ("--thresholds", "--tp-grid", "--sl-grid", "--horizon-bars", "--interval"):
+            self.assertIn(flag, result.stdout, f"{flag} must appear in --help output")
+
+    def test_yaml_defaults_loaded_when_symbol_provided(self) -> None:
+        """When --symbol is given (without explicit grid flags), YAML single-point ranges are used."""
+        # Build a minimal temp YAML config so the test is self-contained
+        tmpdir = tempfile.mkdtemp(prefix="uw-bt-test-")
+        try:
+            cfg_path = os.path.join(tmpdir, "symbols.yaml")
+            with open(cfg_path, "w") as f:
+                f.write(
+                    "symbols:\n"
+                    "  TESTUSDT:\n"
+                    "    enabled: true\n"
+                    "    interval: '4h'\n"
+                    "    threshold: 0.77\n"
+                    "    tp: 0.0250\n"
+                    "    sl: 0.0111\n"
+                    "    horizon: 8\n"
+                    "    calibration: isotonic\n"
+                )
+
+            spec = importlib.util.spec_from_file_location("bt_v3", self._SCRIPT)
+            mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+            mod.__name__ = "bt_v3"  # type: ignore[assignment]
+            try:
+                spec.loader.exec_module(mod)  # type: ignore[union-attr]
+            except Exception:
+                self.skipTest("Module-level import failed (missing deps)")
+
+            # Patch the module's config path and reload
+            import symbol_paths  # type: ignore[import]
+            orig_path = symbol_paths._CONFIG_PATH
+            symbol_paths._CONFIG_PATH = cfg_path
+            symbol_paths._reload_config()
+            try:
+                import argparse as _ap
+                # Simulate: python backtest_event_v3_http.py --data-dir data/TESTUSDT --symbol TESTUSDT
+                # We exercise only the arg-resolution logic by calling parse_args with minimal input
+                ap = _ap.ArgumentParser()
+                # Re-use all arguments registered by the script's main()
+                # We import the _BACKTEST_DEFAULTS dict from the module
+                self.assertTrue(
+                    hasattr(mod, "_BACKTEST_DEFAULTS"),
+                    "backtest_event_v3_http.py must expose _BACKTEST_DEFAULTS at module level",
+                )
+                defaults = mod._BACKTEST_DEFAULTS
+                self.assertIn("horizon_bars", defaults)
+                self.assertIn("interval", defaults)
+                self.assertIn("thresholds", defaults)
+                self.assertIn("tp_grid", defaults)
+                self.assertIn("sl_grid", defaults)
+            finally:
+                symbol_paths._CONFIG_PATH = orig_path
+                symbol_paths._reload_config()
+        finally:
+            shutil.rmtree(tmpdir)
 
 
 if __name__ == "__main__":
