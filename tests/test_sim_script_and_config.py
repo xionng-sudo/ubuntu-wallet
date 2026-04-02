@@ -811,5 +811,307 @@ class TestSimulationNextAllowedTsFromExitTs(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Tests: same-bar exit fix (entry_on_next_bar=True, TP/SL on entry bar)
+# ---------------------------------------------------------------------------
+
+class TestSameBarExit(unittest.TestCase):
+    """Verify that the simulated trader checks TP/SL on the entry bar itself.
+
+    When entry_on_next_bar=True, the position is opened at bar i+1's open.
+    The engine must immediately check TP/SL on that same bar (bar i+1), matching
+    backtest simulate_trade() which starts scanning from j=i+1.
+    """
+
+    _SCRIPT = os.path.join(SCRIPTS_DIR, "live_trader_perp_simulated.py")
+
+    def _load_module(self):
+        spec = importlib.util.spec_from_file_location("ltsim_same_bar", self._SCRIPT)
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        mod.__name__ = "ltsim_same_bar"  # type: ignore[assignment]
+        sys.modules["ltsim_same_bar"] = mod
+        try:
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        except Exception:
+            sys.modules.pop("ltsim_same_bar", None)
+            self.skipTest("Module-level import failed (missing deps)")
+        return mod
+
+    def _make_klines(self, n=20):
+        """Build a list of flat klines starting at 2026-03-04T00:00:00Z."""
+        from datetime import datetime, timezone, timedelta
+        base = datetime(2026, 3, 4, 0, 0, 0, tzinfo=timezone.utc)
+        return [
+            {
+                "ts": base + timedelta(hours=i),
+                "open": 100.0,
+                "high": 100.5,
+                "low": 99.5,
+                "close": 100.0,
+            }
+            for i in range(n)
+        ]
+
+    def test_same_bar_tp_exit_long(self) -> None:
+        """LONG: when entry bar high >= TP, position closes on the entry bar (exit_ts == entry_ts)."""
+        from datetime import timedelta
+        mod = self._load_module()
+
+        klines = self._make_klines(20)
+        # Bar 5 is the signal bar; bar 6 is the entry bar (entry_on_next_bar=True)
+        # Set bar 6 high above TP level (entry=100.0, tp_pct=0.02 → TP=102.0)
+        klines[6]["high"] = 103.0  # > 102.0, so TP is hit on entry bar
+
+        engine = mod.SimpleRiskEngine(
+            capital=10_000.0,
+            position_fraction=0.30,
+            leverage=5.0,
+            max_consec_losses=999,
+            fee_per_side=0.0004,
+            tie_breaker="SL",
+            timeout_exit="close",
+        )
+
+        # Open position at bar 6 (entry bar open=100.0)
+        engine.open_position(
+            side="LONG",
+            price=klines[6]["open"],
+            ts=klines[6]["ts"],
+            bar_index=6,
+            tp_pct=0.02,
+            sl_pct=0.01,
+            horizon_bars=10,
+            klines_1h=klines,
+        )
+
+        # Same-bar check must trigger
+        trade = engine.check_exit(klines[6])
+
+        self.assertIsNotNone(trade, "check_exit on entry bar must return a ClosedTrade when high >= TP")
+        self.assertEqual(trade.outcome, "TP", "Outcome must be TP")
+        self.assertEqual(
+            trade.exit_ts, klines[6]["ts"],
+            "exit_ts must equal entry bar ts (same-bar exit → bars_held=0)",
+        )
+        self.assertEqual(
+            trade.entry_ts, trade.exit_ts,
+            "entry_ts and exit_ts must be equal for a same-bar exit",
+        )
+
+    def test_same_bar_sl_exit_long(self) -> None:
+        """LONG: when entry bar low <= SL, position closes on the entry bar."""
+        mod = self._load_module()
+
+        klines = self._make_klines(20)
+        # Set bar 6 low below SL (entry=100.0, sl_pct=0.01 → SL=99.0)
+        klines[6]["low"] = 98.5  # < 99.0, so SL is hit on entry bar
+        klines[6]["high"] = 100.5  # not high enough to trigger TP (TP=102.0)
+
+        engine = mod.SimpleRiskEngine(
+            capital=10_000.0,
+            position_fraction=0.30,
+            leverage=5.0,
+            max_consec_losses=999,
+            fee_per_side=0.0004,
+            tie_breaker="SL",
+            timeout_exit="close",
+        )
+
+        engine.open_position(
+            side="LONG",
+            price=klines[6]["open"],
+            ts=klines[6]["ts"],
+            bar_index=6,
+            tp_pct=0.02,
+            sl_pct=0.01,
+            horizon_bars=10,
+            klines_1h=klines,
+        )
+
+        trade = engine.check_exit(klines[6])
+
+        self.assertIsNotNone(trade, "check_exit on entry bar must return a ClosedTrade when low <= SL")
+        self.assertEqual(trade.outcome, "SL", "Outcome must be SL")
+        self.assertEqual(trade.exit_ts, klines[6]["ts"], "exit_ts must equal entry bar ts")
+
+    def test_same_bar_tp_exit_short(self) -> None:
+        """SHORT: when entry bar low <= TP, position closes on the entry bar."""
+        mod = self._load_module()
+
+        klines = self._make_klines(20)
+        # SHORT entry=100.0, tp_pct=0.02 → TP=98.0
+        klines[6]["low"] = 97.0   # < 98.0, so TP is hit on entry bar
+        klines[6]["high"] = 100.5  # not high enough to trigger SL (SL=101.0)
+
+        engine = mod.SimpleRiskEngine(
+            capital=10_000.0,
+            position_fraction=0.30,
+            leverage=5.0,
+            max_consec_losses=999,
+            fee_per_side=0.0004,
+            tie_breaker="SL",
+            timeout_exit="close",
+        )
+
+        engine.open_position(
+            side="SHORT",
+            price=klines[6]["open"],
+            ts=klines[6]["ts"],
+            bar_index=6,
+            tp_pct=0.02,
+            sl_pct=0.01,
+            horizon_bars=10,
+            klines_1h=klines,
+        )
+
+        trade = engine.check_exit(klines[6])
+
+        self.assertIsNotNone(trade, "SHORT: check_exit on entry bar must return ClosedTrade when low <= TP")
+        self.assertEqual(trade.outcome, "TP", "Outcome must be TP")
+        self.assertEqual(trade.exit_ts, klines[6]["ts"], "exit_ts must equal entry bar ts")
+
+    def test_no_same_bar_exit_when_tp_sl_not_hit(self) -> None:
+        """When entry bar does not hit TP or SL, check_exit returns None (no premature close)."""
+        mod = self._load_module()
+
+        klines = self._make_klines(20)
+        # Entry bar has high=100.5, low=99.5 → TP=102.0 not hit, SL=99.0 not hit
+        engine = mod.SimpleRiskEngine(
+            capital=10_000.0,
+            position_fraction=0.30,
+            leverage=5.0,
+            max_consec_losses=999,
+            fee_per_side=0.0004,
+            tie_breaker="SL",
+            timeout_exit="close",
+        )
+
+        engine.open_position(
+            side="LONG",
+            price=klines[6]["open"],
+            ts=klines[6]["ts"],
+            bar_index=6,
+            tp_pct=0.02,
+            sl_pct=0.01,
+            horizon_bars=10,
+            klines_1h=klines,
+        )
+
+        trade = engine.check_exit(klines[6])
+
+        self.assertIsNone(trade, "check_exit must return None when entry bar does not hit TP or SL")
+        self.assertIsNotNone(engine.position, "Position must still be open when entry bar does not exit")
+
+    def test_same_bar_exit_via_run_simulation_uses_entry_bar(self) -> None:
+        """Full simulation loop: when entry bar high >= TP, trade exits on entry bar.
+
+        Constructs a minimal pred_cache-driven scenario: signal fires at bar 5,
+        position opens at bar 6 (entry_on_next_bar=True), and bar 6 high exceeds TP.
+        The resulting closed trade must have exit_ts == bar 6 ts (bars_held == 0).
+        """
+        from datetime import datetime, timezone, timedelta
+        import json
+        mod = self._load_module()
+
+        base = datetime(2026, 3, 4, 0, 0, 0, tzinfo=timezone.utc)
+
+        # Build 15 bars; bar 5 carries the signal, bar 6 hits TP immediately
+        klines = []
+        for i in range(15):
+            klines.append({
+                "ts": base + timedelta(hours=i),
+                "open": 100.0,
+                "high": 100.5,
+                "low": 99.5,
+                "close": 100.0,
+            })
+        # Bar 6: entry bar high > TP (entry=100.0, tp_pct=0.0175 → TP=101.75)
+        klines[6]["high"] = 102.0
+
+        # Write klines and pred_cache to temp dir
+        tmpdir = tempfile.mkdtemp(prefix="uw-same-bar-test-")
+        try:
+            sym_dir = os.path.join(tmpdir, "TESTUSDT")
+            os.makedirs(sym_dir, exist_ok=True)
+
+            def _write_klines_json(path, bars):
+                rows = []
+                for bar in bars:
+                    row = dict(bar)
+                    row["ts"] = bar["ts"].isoformat().replace("+00:00", "Z")
+                    rows.append(row)
+                with open(path, "w") as f:
+                    json.dump(rows, f)
+
+            _write_klines_json(os.path.join(sym_dir, "klines_1h.json"), klines)
+            # 4h and 1d klines: provide minimal data to satisfy the loader
+            _write_klines_json(os.path.join(sym_dir, "klines_4h.json"), klines[:4])
+            _write_klines_json(os.path.join(sym_dir, "klines_1d.json"), klines[:2])
+
+            # pred_cache JSONL format:
+            #   Line 0: meta (skipped by loader)
+            #   Lines 1+: {"as_of_ts": "...", "pred": {...}}
+            cache_path = os.path.join(sym_dir, "pred_cache.jsonl")
+            with open(cache_path, "w") as f:
+                f.write(json.dumps({"meta": {"symbol": "TESTUSDT", "interval": "1h"}}) + "\n")
+                for bar in klines:
+                    ts_str = bar["ts"].isoformat().replace("+00:00", "Z")
+                    pred = {
+                        "signal": "FLAT",
+                        "selected_p_long": 0.10,
+                        "selected_p_short": 0.05,
+                        "selected_p_flat": 0.85,
+                        "selected_prob_source": "effective",
+                    }
+                    if bar is klines[5]:
+                        pred = {
+                            "signal": "LONG",
+                            "selected_p_long": 0.90,
+                            "selected_p_short": 0.05,
+                            "selected_p_flat": 0.05,
+                            "selected_prob_source": "effective",
+                        }
+                    f.write(json.dumps({"as_of_ts": ts_str, "pred": pred}) + "\n")
+
+            # Run simulation via subprocess to avoid import conflicts
+            equity_path = os.path.join(tmpdir, "equity.jsonl")
+            result = subprocess.run(
+                [
+                    sys.executable, self._SCRIPT,
+                    "--symbol", "TESTUSDT",
+                    "--data-base-dir", tmpdir,
+                    "--base-url", "http://127.0.0.1:9999",  # unused; pred_cache overrides
+                    "--pred-cache-file", cache_path,
+                    "--tp", "0.0175",
+                    "--sl", "0.009",
+                    "--horizon", "12",
+                    "--threshold", "0.84",
+                    "--mt-filter-mode", "off",
+                    "--entry-on-next-bar", "true",
+                    "--output-equity", equity_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            output = result.stdout + result.stderr
+
+            # Check that the trade closed with outcome TP and that entry bar ts appears as exit_ts
+            entry_bar_ts = klines[6]["ts"].isoformat()
+            self.assertIn(
+                "TP",
+                output,
+                f"Simulation output must contain a TP exit. Got:\n{output}",
+            )
+            # The [CLOSE] line should reference the entry bar ts (same-bar exit)
+            self.assertIn(
+                entry_bar_ts[:16],  # match "2026-03-04T06:00"
+                output,
+                f"Exit ts in [CLOSE] line must be the entry bar ts ({entry_bar_ts[:16]}). Got:\n{output}",
+            )
+        finally:
+            shutil.rmtree(tmpdir)
+
+
 if __name__ == "__main__":
     unittest.main()
