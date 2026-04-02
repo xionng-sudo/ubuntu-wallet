@@ -1859,9 +1859,31 @@ sudo systemctl restart ml-service
 --tie-breaker              SL                   TP/SL 同时触发时优先方：SL | TP
 --warmup-bars              200                  预热跳过的 bar 数
 --side-source              probs                信号来源：signal | probs
---mt-filter-mode           long_only            趋势过滤：off | long_only | symmetric | layered
+--mt-filter-mode           daily_guard          趋势过滤：off | long_only | symmetric | strict | relaxed | trend_guard | daily_guard | conflict | regime | layered
 --sleep-ms                 0                    每次 HTTP 调用间隔（毫秒，调试用）
 --debug-best               (关闭)               打印最优配置的详细诊断信息
+```
+
+## 23.2a `scripts/live_trader_perp_simulated.py`（PR #29 新增逻辑参数）
+
+```
+用途：历史 K 线回放模拟交易（DRY-RUN），与 backtest_event_v3_http.py 共享同一决策管道
+
+调用示例（与回测完全对齐，默认参数完全一致）：
+  ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+    --symbol BTCUSDT --mt-filter-mode daily_guard --side-source probs
+
+逻辑参数（均与 backtest_event_v3_http.py 对齐，默认值相同）：
+
+参数                  默认值              说明
+------------------   ----------------    -----------------------------------------------
+--mt-filter-mode     daily_guard         趋势过滤：off | daily_guard | layered | ...（共 10 种）
+--side-source        probs               信号来源：signal | probs
+--timeout-exit       close               超时退出价格：close | open_next
+--tie-breaker        SL                  TP/SL 同时触发时优先方：SL | TP
+--position-mode      single              持仓模式：single | stack
+--warmup-bars        0                   跳过前 N 根 K 线（设为 200 与回测对齐）
+--pred-cache-file    (无)                回测生成的 pred_cache JSONL 路径（用于对齐验证）
 ```
 
 ---

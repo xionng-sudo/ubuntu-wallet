@@ -101,6 +101,8 @@ from signal_logic import (  # noqa: E402
     normalize_mt_mode,
 )
 
+from decision_pipeline import decide_side_from_cached_pred  # noqa: E402
+
 
 def _to_utc_dt(ts: Any) -> datetime:
     if ts is None:
@@ -888,7 +890,7 @@ def main() -> int:
     ap.add_argument(
         "--mt-filter-mode",
         choices=["off", "long_only", "symmetric", "strict", "relaxed", "trend_guard", "daily_guard", "conflict", "regime", "layered"],
-        default="layered",
+        default="daily_guard",
     )
     ap.add_argument("--use-two-stage-tp", action="store_true")
     ap.add_argument("--tp1-ratio", type=float, default=0.70)
@@ -1218,7 +1220,18 @@ def main() -> int:
                     as_of_ts = sig_ts.isoformat().replace("+00:00", "Z")
                     cp = pred_cache[as_of_ts]
 
+                    # Use shared decision pipeline (same logic as live_trader_perp_simulated.py)
+                    _cached_dict = {
+                        "signal": cp.signal,
+                        "selected_p_long": cp.selected_p_long,
+                        "selected_p_short": cp.selected_p_short,
+                        "selected_p_flat": cp.selected_p_flat,
+                        "selected_prob_source": cp.selected_prob_source,
+                    }
+                    # Always compute both sides for debug statistics
                     signal_side = decide_side_from_signal(cp.signal)
+                    probs_side = decide_side(cp.selected_p_long, cp.selected_p_short, thr)
+
                     if signal_side == "LONG":
                         signal_long += 1
                     elif signal_side == "SHORT":
@@ -1226,7 +1239,6 @@ def main() -> int:
                     else:
                         signal_flat += 1
 
-                    probs_side = decide_side(cp.selected_p_long, cp.selected_p_short, thr)
                     if probs_side == "LONG":
                         probs_long += 1
                     elif probs_side == "SHORT":
@@ -1234,7 +1246,11 @@ def main() -> int:
                     else:
                         probs_flat += 1
 
-                    side = signal_side if args.side_source == "signal" else probs_side
+                    side, _dbg = decide_side_from_cached_pred(
+                        _cached_dict,
+                        side_source=args.side_source,
+                        threshold=thr,
+                    )
 
                     if side == "LONG":
                         raw_long += 1

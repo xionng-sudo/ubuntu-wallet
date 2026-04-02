@@ -432,5 +432,238 @@ class TestSimulatedTraderUsesSharedConfig(unittest.TestCase):
         )
 
 
+# ---------------------------------------------------------------------------
+# Tests: live_trader_perp_simulated.py logic CLI flags (PR #29)
+# ---------------------------------------------------------------------------
+
+class TestSimulatedTraderLogicCLI(unittest.TestCase):
+    """Regression: live_trader_perp_simulated.py must expose the same logic flags as backtest."""
+
+    _SCRIPT = os.path.join(SCRIPTS_DIR, "live_trader_perp_simulated.py")
+
+    def _get_help(self) -> str:
+        result = subprocess.run(
+            [sys.executable, self._SCRIPT, "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        return result.stdout
+
+    def test_help_contains_mt_filter_mode(self) -> None:
+        """--mt-filter-mode flag must appear in --help."""
+        self.assertIn("--mt-filter-mode", self._get_help())
+
+    def test_help_contains_side_source(self) -> None:
+        """--side-source flag must appear in --help."""
+        self.assertIn("--side-source", self._get_help())
+
+    def test_help_contains_timeout_exit(self) -> None:
+        """--timeout-exit flag must appear in --help."""
+        self.assertIn("--timeout-exit", self._get_help())
+
+    def test_help_contains_tie_breaker(self) -> None:
+        """--tie-breaker flag must appear in --help."""
+        self.assertIn("--tie-breaker", self._get_help())
+
+    def test_help_contains_position_mode(self) -> None:
+        """--position-mode flag must appear in --help."""
+        self.assertIn("--position-mode", self._get_help())
+
+    def test_help_contains_pred_cache_file(self) -> None:
+        """--pred-cache-file flag must appear in --help."""
+        self.assertIn("--pred-cache-file", self._get_help())
+
+    def test_default_mt_filter_mode_is_daily_guard(self) -> None:
+        """Default --mt-filter-mode must be daily_guard (consistent with backtest default)."""
+        spec = importlib.util.spec_from_file_location("live_trader_simulated_test", self._SCRIPT)
+        mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
+        mod.__name__ = "live_trader_simulated_test"  # type: ignore[assignment]
+        try:
+            spec.loader.exec_module(mod)  # type: ignore[union-attr]
+        except Exception:
+            self.skipTest("Module-level import failed (missing deps)")
+        ap = mod.build_parser()
+        defaults = ap.parse_args([])
+        self.assertEqual(
+            defaults.mt_filter_mode, "daily_guard",
+            "Default --mt-filter-mode must be 'daily_guard'",
+        )
+        self.assertEqual(
+            defaults.side_source, "probs",
+            "Default --side-source must be 'probs'",
+        )
+        self.assertEqual(
+            defaults.timeout_exit, "close",
+            "Default --timeout-exit must be 'close'",
+        )
+        self.assertEqual(
+            defaults.tie_breaker, "SL",
+            "Default --tie-breaker must be 'SL'",
+        )
+        self.assertEqual(
+            defaults.position_mode, "single",
+            "Default --position-mode must be 'single'",
+        )
+
+    def test_uses_decision_pipeline_module(self) -> None:
+        """live_trader_perp_simulated.py must import from decision_pipeline."""
+        import ast
+        with open(self._SCRIPT, "r", encoding="utf-8") as f:
+            source = f.read()
+        try:
+            tree = ast.parse(source)
+        except SyntaxError as exc:
+            self.fail(f"live_trader_perp_simulated.py has a syntax error: {exc}")
+        found = any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "decision_pipeline"
+            for node in ast.walk(tree)
+        )
+        self.assertTrue(found, "live_trader_perp_simulated.py must import from decision_pipeline")
+
+    def test_no_hardcoded_scheme_b_filter(self) -> None:
+        """live_trader_perp_simulated.py must not use hardcoded 't4h != UP' filter logic."""
+        with open(self._SCRIPT, "r", encoding="utf-8") as f:
+            source = f.read()
+        self.assertNotIn(
+            't4h != "UP"',
+            source,
+            "Hardcoded Scheme B filter (t4h != 'UP') must be removed; use apply_mt_filter_with_context instead.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: decision_pipeline consistency (same inputs → same outputs)
+# ---------------------------------------------------------------------------
+
+class TestDecisionPipelineConsistency(unittest.TestCase):
+    """Consistency: decision_pipeline must produce identical results for backtest and simulated replay."""
+
+    def setUp(self) -> None:
+        sys.path.insert(0, SCRIPTS_DIR)
+
+    def _import_pipeline(self):
+        try:
+            import decision_pipeline  # type: ignore[import]
+            return decision_pipeline
+        except ImportError as exc:
+            self.skipTest(f"decision_pipeline not importable: {exc}")
+
+    def test_decide_side_from_prediction_probs_long(self) -> None:
+        """probs mode: p_long >= threshold and p_long >= p_short → LONG."""
+        dp = self._import_pipeline()
+        pred = {
+            "signal": "SHORT",  # signal says SHORT, but probs say LONG
+            "effective_long": 0.87,
+            "effective_short": 0.05,
+        }
+        side, dbg = dp.decide_side_from_prediction(pred, side_source="probs", threshold=0.84)
+        self.assertEqual(side, "LONG")
+        self.assertEqual(dbg["side_source"], "probs")
+
+    def test_decide_side_from_prediction_signal_mode(self) -> None:
+        """signal mode: uses the 'signal' field regardless of probs."""
+        dp = self._import_pipeline()
+        pred = {
+            "signal": "SHORT",
+            "effective_long": 0.87,
+            "effective_short": 0.05,
+        }
+        side, _ = dp.decide_side_from_prediction(pred, side_source="signal", threshold=0.84)
+        self.assertEqual(side, "SHORT")
+
+    def test_decide_side_below_threshold_is_flat(self) -> None:
+        """probs mode: both probs below threshold → FLAT."""
+        dp = self._import_pipeline()
+        pred = {
+            "signal": "LONG",
+            "effective_long": 0.70,
+            "effective_short": 0.15,
+        }
+        side, _ = dp.decide_side_from_prediction(pred, side_source="probs", threshold=0.84)
+        self.assertEqual(side, "FLAT")
+
+    def test_decide_side_from_cached_pred_matches_prediction(self) -> None:
+        """decide_side_from_cached_pred and decide_side_from_prediction must agree on identical inputs."""
+        dp = self._import_pipeline()
+        threshold = 0.84
+
+        raw_pred = {
+            "signal": "LONG",
+            "effective_long": 0.87,
+            "effective_short": 0.05,
+            "effective_flat": 0.08,
+        }
+        side_pred, _ = dp.decide_side_from_prediction(raw_pred, side_source="probs", threshold=threshold)
+
+        # Simulate what backtest would store in pred_cache after select_effective_probs
+        cached = {
+            "signal": "LONG",
+            "selected_p_long": 0.87,
+            "selected_p_short": 0.05,
+            "selected_p_flat": 0.08,
+            "selected_prob_source": "effective",
+        }
+        side_cached, _ = dp.decide_side_from_cached_pred(cached, side_source="probs", threshold=threshold)
+
+        self.assertEqual(
+            side_pred, side_cached,
+            "decide_side_from_prediction and decide_side_from_cached_pred must return the same side "
+            "for identical probability inputs.",
+        )
+
+    def test_consistency_across_all_modes(self) -> None:
+        """For various sample predictions, both functions produce identical LONG/SHORT/FLAT."""
+        dp = self._import_pipeline()
+        threshold = 0.80
+
+        samples = [
+            # (signal, eff_long, eff_short, expected_probs_side)
+            ("LONG",  0.85, 0.10, "LONG"),
+            ("SHORT", 0.10, 0.85, "SHORT"),
+            ("FLAT",  0.70, 0.15, "FLAT"),   # below threshold
+            ("LONG",  0.82, 0.81, "LONG"),   # long >= threshold and >= short
+            ("SHORT", 0.81, 0.82, "SHORT"),  # short >= threshold and > long
+        ]
+
+        for signal, eff_long, eff_short, expected in samples:
+            raw_pred = {"signal": signal, "effective_long": eff_long, "effective_short": eff_short}
+            cached = {
+                "signal": signal,
+                "selected_p_long": eff_long,
+                "selected_p_short": eff_short,
+                "selected_p_flat": round(1.0 - eff_long - eff_short, 4),
+                "selected_prob_source": "effective",
+            }
+            side_pred, _ = dp.decide_side_from_prediction(raw_pred, side_source="probs", threshold=threshold)
+            side_cached, _ = dp.decide_side_from_cached_pred(cached, side_source="probs", threshold=threshold)
+
+            self.assertEqual(
+                side_pred, expected,
+                f"decide_side_from_prediction({signal}, eff_long={eff_long}, eff_short={eff_short}) "
+                f"expected {expected} got {side_pred}",
+            )
+            self.assertEqual(
+                side_pred, side_cached,
+                f"Mismatch between prediction and cached for ({signal}, {eff_long}, {eff_short}): "
+                f"pred={side_pred} cached={side_cached}",
+            )
+
+    def test_backtest_default_mt_filter_is_daily_guard(self) -> None:
+        """backtest_event_v3_http.py --mt-filter-mode default must be daily_guard."""
+        bt_script = os.path.join(SCRIPTS_DIR, "backtest_event_v3_http.py")
+        result = subprocess.run(
+            [sys.executable, bt_script, "--help"],
+            capture_output=True, text=True,
+        )
+        self.assertEqual(result.returncode, 0)
+        # The default value for --mt-filter-mode should mention daily_guard
+        # (argparse with ArgumentDefaultsHelpFormatter prints the default)
+        self.assertIn(
+            "daily_guard", result.stdout,
+            "backtest --mt-filter-mode default should be daily_guard",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

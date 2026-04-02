@@ -106,19 +106,55 @@ result = exec_confirm_15m(side, klines_15m, enabled=True)
 
 ### 3.1 backtest_event_v3_http.py
 
-新增 `--mt-filter-mode layered` 选项：
+新增 `--mt-filter-mode` 选项（PR #29 后默认为 `daily_guard`）：
 
 ```bash
-# 使用原有 symmetric 模式（默认保持不变）
-~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py --data-dir data --mt-filter-mode symmetric
+# 使用 daily_guard（默认）：仅限制 1d 方向，4h 不约束
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
+  --data-dir data/BTCUSDT --symbol BTCUSDT \
+  --base-url http://127.0.0.1:9000 \
+  --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z \
+  --position-mode single --mt-filter-mode daily_guard
 
-# 使用新 layered gate（稍宽松：允许 4h NEUTRAL + 1d 同向）
-~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py --data-dir data --mt-filter-mode layered
+# 使用 layered gate（允许 4h NEUTRAL + 1d 同向）
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
+  --data-dir data/BTCUSDT --symbol BTCUSDT \
+  --base-url http://127.0.0.1:9000 \
+  --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z \
+  --position-mode single --mt-filter-mode layered
 ```
 
-可选值：`off` | `long_only` | `symmetric` | `layered`（新增）
+可选值：`off` | `long_only` | `symmetric` | `strict` | `relaxed` | `trend_guard` | `daily_guard` | `conflict` | `regime` | `layered`
 
-默认：`long_only`（不变）
+**默认：`daily_guard`**（PR #29 起，与 `live_trader_perp_simulated.py` 默认一致）
+
+### 3.1a live_trader_perp_simulated.py（PR #29 新增）
+
+`live_trader_perp_simulated.py` 现已通过共享模块 `decision_pipeline.py` 与回测使用完全相同的决策逻辑，并暴露与回测一致的 CLI 参数：
+
+```bash
+# 使用 daily_guard（默认，与回测一致）
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+  --symbol BTCUSDT --mt-filter-mode daily_guard --side-source probs
+
+# 切换到 layered 过滤（与回测 --mt-filter-mode layered 完全等价）
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+  --symbol BTCUSDT --mt-filter-mode layered
+
+# 对齐验证：使用回测生成的 pred_cache 读取预测，确保输入完全一致
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+  --symbol BTCUSDT \
+  --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z \
+  --mt-filter-mode daily_guard \
+  --pred-cache-file data/pred_cache/pred_cache__<hash>.jsonl
+```
+
+可选值（与回测完全对齐）：  
+`--mt-filter-mode`：同 backtest，默认 `daily_guard`  
+`--side-source {signal,probs}`：默认 `probs`  
+`--timeout-exit {close,open_next}`：默认 `close`  
+`--tie-breaker {SL,TP}`：默认 `SL`  
+`--position-mode {single,stack}`：默认 `single`
 
 ### 3.2 evaluate_from_logs.py
 

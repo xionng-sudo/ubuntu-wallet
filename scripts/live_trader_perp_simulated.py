@@ -7,13 +7,20 @@ Generic perpetual contract SIMULATED replay / DRY-RUN live trader.
 
 Replays historical 1h klines sequentially for any configured symbol, calling
 ml-service /predict for each bar (just as the live system would), then applies:
-  - Multi-timeframe filtering (4h/1d trend, Scheme B)
+  - Multi-timeframe filtering via shared decision_pipeline (configurable mode)
   - Single-position risk engine (circuit breaker)
   - Triple-barrier exits: TP / SL / horizon timeout
   - Capital / equity curve tracking
 
 All per-symbol parameters (tp, sl, horizon, threshold, interval) are loaded
 automatically from ``configs/symbols.yaml`` when not overridden on the CLI.
+
+Logic parameters default to the same values as backtest_event_v3_http.py:
+  - mt_filter_mode : daily_guard (configurable via --mt-filter-mode)
+  - side_source    : probs       (configurable via --side-source)
+  - timeout_exit   : close       (configurable via --timeout-exit)
+  - tie_breaker    : SL          (configurable via --tie-breaker)
+  - position_mode  : single      (configurable via --position-mode)
 
 Output:
   - Per-bar log to console
@@ -38,6 +45,14 @@ Usage:
         --capital 10000 \\
         --since 2026-01-01T00:00:00Z \\
         --until 2026-03-01T00:00:00Z
+
+    # Use daily_guard filter (default) with probs source:
+    python scripts/live_trader_perp_simulated.py \\
+        --symbol BTCUSDT --mt-filter-mode daily_guard --side-source probs
+
+    # Replay using pred_cache from backtest (for alignment verification):
+    python scripts/live_trader_perp_simulated.py \\
+        --symbol BTCUSDT --pred-cache-file data/pred_cache/pred_cache__XXXX.jsonl
 
 Requirements:
     - ml-service running and accessible (default: http://127.0.0.1:9000)
@@ -72,6 +87,17 @@ from symbol_config import (  # type: ignore
     get_symbol_config,
     list_enabled_symbols,
     data_dir as _data_dir,
+)
+
+from signal_logic import (  # type: ignore
+    apply_mt_filter_with_context,
+    normalize_mt_mode,
+)
+
+from decision_pipeline import (  # type: ignore
+    decide_side_from_prediction,
+    decide_side_from_cached_pred,
+    DEFAULTS as _PIPELINE_DEFAULTS,
 )
 
 
@@ -163,6 +189,28 @@ def get_warmup_detail(exc: Exception) -> Optional[str]:
         return None
 
 
+def _load_pred_cache_jsonl(path: str) -> Dict[str, Dict[str, Any]]:
+    """Load a pred_cache JSONL file produced by backtest_event_v3_http.py.
+
+    Format:
+      Line 0: {"meta": {...}}
+      Lines 1+: {"as_of_ts": "2026-...", "pred": {...}}
+
+    Returns a dict mapping as_of_ts → pred dict.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    with open(path, "r", encoding="utf-8") as fh:
+        lines = fh.readlines()
+    for line in lines[1:]:
+        line = line.strip()
+        if not line:
+            continue
+        rec = json.loads(line)
+        as_of_ts = str(rec["as_of_ts"])
+        out[as_of_ts] = rec["pred"]
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Position / trade tracking
 # ---------------------------------------------------------------------------
@@ -206,6 +254,8 @@ class SimpleRiskEngine:
         leverage: float = 5.0,
         max_consec_losses: int = 3,
         fee_per_side: float = 0.0004,
+        tie_breaker: str = "SL",
+        timeout_exit: str = "close",
     ):
         self.capital = capital
         self.initial_capital = capital
@@ -213,12 +263,23 @@ class SimpleRiskEngine:
         self.leverage = leverage
         self.max_consec_losses = max_consec_losses
         self.fee_per_side = fee_per_side
+        self.tie_breaker = tie_breaker.upper()
+        self.timeout_exit = timeout_exit.lower()
 
         self.position: Optional[Position] = None
         self.consec_losses: int = 0
         self.paused: bool = False
         self.closed_trades: List[ClosedTrade] = []
         self.equity_curve: List[Dict[str, Any]] = []
+        # Tracks deferred timeout exits.
+        # When timeout_exit=open_next, a timeout sets this flag and the position is closed
+        # at the next bar's open price.  When timeout_exit=close, positions close immediately
+        # at the current bar's close price and this flag is never set.
+        self._pending_timeout: bool = False
+
+    def has_pending_exit(self) -> bool:
+        """Return True if a deferred timeout exit is waiting for the next bar's open."""
+        return self._pending_timeout
 
     def can_open(self) -> bool:
         return not self.paused and self.position is None
@@ -271,6 +332,13 @@ class SimpleRiskEngine:
         lo = kline["low"]
         ts = kline["ts"]
 
+        # Handle deferred timeout exit (timeout_exit=open_next)
+        if self._pending_timeout:
+            self._pending_timeout = False
+            exit_price = kline["open"]
+            outcome = "TIMEOUT"
+            return self._close_position(pos, exit_price, ts, outcome)
+
         outcome = None
         exit_price = None
 
@@ -278,36 +346,51 @@ class SimpleRiskEngine:
             hit_tp = h >= pos.tp_price
             hit_sl = lo <= pos.sl_price
             if hit_tp and hit_sl:
-                outcome = "SL"
-                exit_price = pos.sl_price
-            elif hit_tp:
+                if self.tie_breaker == "TP":
+                    hit_sl = False
+                else:
+                    hit_tp = False
+            if hit_tp:
                 outcome = "TP"
                 exit_price = pos.tp_price
             elif hit_sl:
                 outcome = "SL"
                 exit_price = pos.sl_price
             elif pos.horizon_exit_ts and ts >= pos.horizon_exit_ts:
+                if self.timeout_exit == "open_next":
+                    self._pending_timeout = True
+                    return None
                 outcome = "TIMEOUT"
                 exit_price = kline["close"]
         else:  # SHORT
             hit_tp = lo <= pos.tp_price
             hit_sl = h >= pos.sl_price
             if hit_tp and hit_sl:
-                outcome = "SL"
-                exit_price = pos.sl_price
-            elif hit_tp:
+                if self.tie_breaker == "TP":
+                    hit_sl = False
+                else:
+                    hit_tp = False
+            if hit_tp:
                 outcome = "TP"
                 exit_price = pos.tp_price
             elif hit_sl:
                 outcome = "SL"
                 exit_price = pos.sl_price
             elif pos.horizon_exit_ts and ts >= pos.horizon_exit_ts:
+                if self.timeout_exit == "open_next":
+                    self._pending_timeout = True
+                    return None
                 outcome = "TIMEOUT"
                 exit_price = kline["close"]
 
         if outcome is None:
             return None
 
+        return self._close_position(pos, exit_price, ts, outcome)
+
+    def _close_position(
+        self, pos: "Position", exit_price: float, ts: datetime, outcome: str
+    ) -> "ClosedTrade":
         if pos.side == "LONG":
             pnl_pct = (exit_price - pos.entry_price) / pos.entry_price
         else:
@@ -380,7 +463,23 @@ def run_simulation(
     request_delay_s: float = 0.0,
     interval: str = "1h",
     output_equity_path: Optional[str] = None,
+    mt_filter_mode: str = _PIPELINE_DEFAULTS["mt_filter_mode"],
+    side_source: str = _PIPELINE_DEFAULTS["side_source"],
+    timeout_exit: str = _PIPELINE_DEFAULTS["timeout_exit"],
+    tie_breaker: str = _PIPELINE_DEFAULTS["tie_breaker"],
+    position_mode: str = _PIPELINE_DEFAULTS["position_mode"],
+    warmup_bars: int = 0,
+    pred_cache_file: Optional[str] = None,
 ) -> None:
+    # ---- Load pred_cache if provided ----
+    pred_cache: Dict[str, Dict[str, Any]] = {}
+    if pred_cache_file is not None:
+        try:
+            pred_cache = _load_pred_cache_jsonl(pred_cache_file)
+            print(f"[sim:{symbol}] Loaded pred_cache from {pred_cache_file} ({len(pred_cache)} rows)")
+        except Exception as exc:
+            print(f"[sim:{symbol}] WARNING: failed to load pred_cache {pred_cache_file}: {exc}", file=sys.stderr)
+
     print(f"\n[sim:{symbol}] Loading klines from {data_dir} ...")
     try:
         klines_1h = load_klines(os.path.join(data_dir, "klines_1h.json"))
@@ -401,6 +500,8 @@ def run_simulation(
         leverage=leverage,
         max_consec_losses=max_consec_losses,
         fee_per_side=fee_per_side,
+        tie_breaker=tie_breaker,
+        timeout_exit=timeout_exit,
     )
 
     since_dt = _to_utc_dt(since) if since else None
@@ -410,15 +511,26 @@ def run_simulation(
     if until_dt:
         klines_1h = [k for k in klines_1h if k["ts"] <= until_dt]
 
+    # Print alignment summary (mirrors backtest_event_v3_http.py output)
+    effective_mt_mode = normalize_mt_mode(mt_filter_mode)
     print(
         f"[sim:{symbol}] Replaying {len(klines_1h)} 1h bars. "
         f"tp={tp_pct*100:.2f}% sl={sl_pct*100:.2f}% horizon={horizon_bars}h "
         f"threshold={threshold} capital={capital:.2f}"
     )
+    print(
+        f"[sim:{symbol}] Logic: side_source={side_source} mt_filter_mode={effective_mt_mode} "
+        f"timeout_exit={timeout_exit} tie_breaker={tie_breaker} position_mode={position_mode} "
+        f"warmup_bars={warmup_bars}"
+    )
+    if pred_cache:
+        print(f"[sim:{symbol}] Using pred_cache ({len(pred_cache)} entries) — HTTP calls bypassed")
 
     n_signals = 0
     n_flat_mt = 0
     n_warmup = 0
+    # For position_mode=single, track when a trade's horizon ends to skip signals during trade
+    next_allowed_ts: Optional[datetime] = None
 
     for i, bar in enumerate(klines_1h):
         ts = bar["ts"]
@@ -430,58 +542,65 @@ def run_simulation(
         if i % 24 == 0:
             engine.record_equity(ts)
 
-        try:
-            result = call_predict(
-                base_url=base_url,
-                symbol=symbol,
-                as_of_ts=as_of_ts,
-                interval=interval,
+        # Skip warmup bars (aligns with backtest --warmup-bars)
+        if i < warmup_bars:
+            n_warmup += 1
+            continue
+
+        # position_mode=single: skip bars while a trade is active
+        if position_mode == "single" and next_allowed_ts is not None and ts < next_allowed_ts:
+            continue
+
+        # ---- Get prediction ----
+        if as_of_ts in pred_cache:
+            side, _dbg = decide_side_from_cached_pred(
+                pred_cache[as_of_ts],
+                side_source=side_source,
+                threshold=threshold,
             )
-        except Exception as e:
-            if is_warmup_error(e):
-                n_warmup += 1
-                detail = get_warmup_detail(e) or str(e)
-                if n_warmup == 1:
-                    # Only print on first warmup so we don't spam
-                    print(f"  [WARMUP] {as_of_ts}: {detail} (subsequent warmup bars suppressed)")
+        else:
+            try:
+                result = call_predict(
+                    base_url=base_url,
+                    symbol=symbol,
+                    as_of_ts=as_of_ts,
+                    interval=interval,
+                )
+            except Exception as e:
+                if is_warmup_error(e):
+                    n_warmup += 1
+                    detail = get_warmup_detail(e) or str(e)
+                    if n_warmup == 1:
+                        print(f"  [WARMUP] {as_of_ts}: {detail} (subsequent warmup bars suppressed)")
+                    if request_delay_s > 0:
+                        time.sleep(request_delay_s)
+                    continue
+                print(f"  [SKIP] {as_of_ts}: predict failed: {e}")
                 if request_delay_s > 0:
                     time.sleep(request_delay_s)
                 continue
-            print(f"  [SKIP] {as_of_ts}: predict failed: {e}")
-            if request_delay_s > 0:
-                time.sleep(request_delay_s)
-            continue
+            side, _dbg = decide_side_from_prediction(
+                result,
+                side_source=side_source,
+                threshold=threshold,
+            )
 
-        signal = result.get("signal", "FLAT")
-        confidence = result.get("confidence", 0.0)
-        eff_confidence = result.get("calibrated_confidence") or confidence
+        # ---- Apply mt_filter ----
+        side_before_filter = side
+        side, _t4, _t1d, _reject_reason = apply_mt_filter_with_context(
+            side=side,
+            sig_ts=ts,
+            trend_4h_at=mt_ctx.trend_4h_at,
+            trend_1d_at=mt_ctx.trend_1d_at,
+            mode=mt_filter_mode,
+        )
+        if side_before_filter != "FLAT" and side == "FLAT":
+            n_flat_mt += 1
 
-        if signal == "LONG":
-            t4h = mt_ctx.trend_4h_at(ts)
-            t1d = mt_ctx.trend_1d_at(ts)
-            if t4h != "UP":
-                n_flat_mt += 1
-                signal = "FLAT"
-            elif t1d == "DOWN":
-                n_flat_mt += 1
-                signal = "FLAT"
-        elif signal == "SHORT":
-            t4h = mt_ctx.trend_4h_at(ts)
-            t1d = mt_ctx.trend_1d_at(ts)
-            if t4h != "DOWN":
-                n_flat_mt += 1
-                signal = "FLAT"
-            elif t1d == "UP":
-                n_flat_mt += 1
-                signal = "FLAT"
-
-        if signal != "FLAT" and eff_confidence < threshold:
-            signal = "FLAT"
-
-        if signal in ("LONG", "SHORT") and engine.can_open():
+        if side in ("LONG", "SHORT") and engine.can_open():
             n_signals += 1
             engine.open_position(
-                side=signal,
+                side=side,
                 price=price,
                 ts=ts,
                 bar_index=i,
@@ -490,27 +609,22 @@ def run_simulation(
                 horizon_bars=horizon_bars,
                 klines_1h=klines_1h,
             )
+            # position_mode=single: advance next_allowed_ts to end of horizon
+            if position_mode == "single":
+                exit_bar_idx = min(i + horizon_bars, len(klines_1h) - 1)
+                next_allowed_ts = klines_1h[exit_bar_idx]["ts"]
 
         if request_delay_s > 0:
             time.sleep(request_delay_s)
 
     # Close any open position at end of replay
-    if engine.position is not None and klines_1h:
+    if (engine.position is not None or engine.has_pending_exit()) and klines_1h:
         last = klines_1h[-1]
-        exit_price = last["close"]
         pos = engine.position
-        if pos.side == "LONG":
-            pnl_pct = (exit_price - pos.entry_price) / pos.entry_price
-        else:
-            pnl_pct = (pos.entry_price - exit_price) / pos.entry_price
-        fee = fee_per_side * 2 * pos.notional_usdt
-        pnl_usdt = pnl_pct * pos.notional_usdt * leverage - fee
-        engine.capital += pnl_usdt
-        print(
-            f"  [EOD-CLOSE] {pos.side} @ {exit_price:.4f} "
-            f"pnl={pnl_pct*100:.3f}% pnl_usdt={pnl_usdt:.2f} capital={engine.capital:.2f}"
-        )
-        engine.position = None
+        if pos is not None:
+            exit_price = last["close"]
+            engine._close_position(pos, exit_price, last["ts"], "TIMEOUT")
+            print(f"  [EOD-CLOSE] {pos.side} @ {exit_price:.4f} capital={engine.capital:.2f}")
 
     if klines_1h:
         engine.record_equity(klines_1h[-1]["ts"])
@@ -648,6 +762,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds to wait between /predict calls (set >0 to reduce load on ml-service).",
     )
     ap.add_argument("--output-equity", default=None, help="Path for equity curve JSONL output.")
+
+    # Logic flags — aligned with backtest_event_v3_http.py
+    ap.add_argument(
+        "--mt-filter-mode",
+        choices=["off", "long_only", "symmetric", "strict", "relaxed", "trend_guard",
+                 "daily_guard", "conflict", "regime", "layered"],
+        default=_PIPELINE_DEFAULTS["mt_filter_mode"],
+        help="Multi-timeframe filter mode.  Default: %(default)s.",
+    )
+    ap.add_argument(
+        "--side-source",
+        choices=["signal", "probs"],
+        default=_PIPELINE_DEFAULTS["side_source"],
+        help="Signal source: 'probs' uses calibrated/effective probabilities (recommended); "
+             "'signal' uses the signal field directly.  Default: %(default)s.",
+    )
+    ap.add_argument(
+        "--timeout-exit",
+        choices=["close", "open_next"],
+        default=_PIPELINE_DEFAULTS["timeout_exit"],
+        help="Price used when exiting at horizon timeout.  Default: %(default)s.",
+    )
+    ap.add_argument(
+        "--tie-breaker",
+        choices=["SL", "TP"],
+        default=_PIPELINE_DEFAULTS["tie_breaker"],
+        help="When TP and SL are both hit on the same bar, which wins.  Default: %(default)s.",
+    )
+    ap.add_argument(
+        "--position-mode",
+        choices=["single", "stack"],
+        default=_PIPELINE_DEFAULTS["position_mode"],
+        help="'single': skip new signals while a position is open; "
+             "'stack': allow opening new positions (not yet fully supported).  Default: %(default)s.",
+    )
+    ap.add_argument(
+        "--warmup-bars",
+        type=int,
+        default=0,
+        help="Skip this many initial bars (aligns with backtest --warmup-bars).  Default: %(default)s.",
+    )
+
+    # Pred-cache flags — read cached predictions from backtest JSONL for alignment verification
+    ap.add_argument(
+        "--pred-cache-file",
+        default=None,
+        help=(
+            "Path to a pred_cache JSONL file produced by backtest_event_v3_http.py.  "
+            "When provided, predictions are read from this file instead of calling ml-service, "
+            "enabling identical-input replay against the backtest results."
+        ),
+    )
     return ap
 
 
@@ -690,6 +856,13 @@ def run_for_symbol(symbol: str, args: argparse.Namespace) -> None:
         request_delay_s=args.delay,
         interval=interval,
         output_equity_path=output_equity,
+        mt_filter_mode=args.mt_filter_mode,
+        side_source=args.side_source,
+        timeout_exit=args.timeout_exit,
+        tie_breaker=args.tie_breaker,
+        position_mode=args.position_mode,
+        warmup_bars=args.warmup_bars,
+        pred_cache_file=args.pred_cache_file,
     )
 
 
