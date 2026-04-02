@@ -1099,10 +1099,14 @@ cd ~/ubuntu-wallet
 # 输出类似：Wrote prediction cache: data/pred_cache/pred_cache__<hash>.jsonl
 
 # 2. 再用模拟交易读取同一 pred_cache 进行对齐验证
+# 注意：--max-consec-losses 999 禁用 circuit breaker（对齐验证时建议禁用，避免连续 loss 后跳过信号）
+# 注意：--entry-on-next-bar true（默认）使 entry 用 next bar open，与回测一致
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
   --symbol BTCUSDT \
   --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z \
   --mt-filter-mode daily_guard \
+  --max-consec-losses 999 \
+  --entry-on-next-bar true \
   --pred-cache-file data/pred_cache/pred_cache__<hash>.jsonl
 ```
 

@@ -457,7 +457,7 @@ def run_simulation(
     position_fraction: float = 0.30,
     leverage: float = 5.0,
     fee_per_side: float = 0.0004,
-    max_consec_losses: int = 3,
+    max_consec_losses: int = 999,
     since: Optional[str] = None,
     until: Optional[str] = None,
     request_delay_s: float = 0.0,
@@ -470,6 +470,7 @@ def run_simulation(
     position_mode: str = _PIPELINE_DEFAULTS["position_mode"],
     warmup_bars: int = 0,
     pred_cache_file: Optional[str] = None,
+    entry_on_next_bar: bool = True,
 ) -> None:
     # ---- Load pred_cache if provided ----
     pred_cache: Dict[str, Dict[str, Any]] = {}
@@ -529,18 +530,41 @@ def run_simulation(
     n_signals = 0
     n_flat_mt = 0
     n_warmup = 0
-    # For position_mode=single, track when a trade's horizon ends to skip signals during trade
+    # For position_mode=single, track when the most-recent trade closed to skip
+    # new signals until the bar after the exit bar.  Updated from the actual
+    # exit_ts returned by engine.check_exit() (Problem 1 fix).
     next_allowed_ts: Optional[datetime] = None
+    # Pending open: when entry_on_next_bar=True, store the side decided on bar i
+    # so we can open at bar i+1's open price (matching backtest behaviour).
+    pending_open_side: Optional[str] = None
 
     for i, bar in enumerate(klines_1h):
         ts = bar["ts"]
-        price = bar["close"]
         as_of_ts = ts.isoformat().replace("+00:00", "Z")
 
-        engine.check_exit(bar)
+        # ---- Check exits before anything else ----
+        trade = engine.check_exit(bar)
+        # Problem 1: unlock after the bar on which the trade actually closed
+        if position_mode == "single" and trade is not None:
+            next_allowed_ts = trade.exit_ts
 
         if i % 24 == 0:
             engine.record_equity(ts)
+
+        # ---- Open position deferred from previous bar's signal ----
+        # (entry_on_next_bar=True: use this bar's open as entry price)
+        if pending_open_side is not None:
+            engine.open_position(
+                side=pending_open_side,
+                price=bar["open"],
+                ts=ts,
+                bar_index=i,
+                tp_pct=tp_pct,
+                sl_pct=sl_pct,
+                horizon_bars=horizon_bars,
+                klines_1h=klines_1h,
+            )
+            pending_open_side = None
 
         # Skip warmup bars (aligns with backtest --warmup-bars)
         if i < warmup_bars:
@@ -599,20 +623,23 @@ def run_simulation(
 
         if side in ("LONG", "SHORT") and engine.can_open():
             n_signals += 1
-            engine.open_position(
-                side=side,
-                price=price,
-                ts=ts,
-                bar_index=i,
-                tp_pct=tp_pct,
-                sl_pct=sl_pct,
-                horizon_bars=horizon_bars,
-                klines_1h=klines_1h,
-            )
-            # position_mode=single: advance next_allowed_ts to end of horizon
-            if position_mode == "single":
-                exit_bar_idx = min(i + horizon_bars, len(klines_1h) - 1)
-                next_allowed_ts = klines_1h[exit_bar_idx]["ts"]
+            if entry_on_next_bar:
+                # Problem 3: defer entry to bar i+1's open (matching backtest).
+                # Skip if this is the last bar (backtest also doesn't enter on the last bar).
+                if i + 1 < len(klines_1h):
+                    pending_open_side = side
+            else:
+                # Legacy: enter immediately at signal bar's close price
+                engine.open_position(
+                    side=side,
+                    price=bar["close"],
+                    ts=ts,
+                    bar_index=i,
+                    tp_pct=tp_pct,
+                    sl_pct=sl_pct,
+                    horizon_bars=horizon_bars,
+                    klines_1h=klines_1h,
+                )
 
         if request_delay_s > 0:
             time.sleep(request_delay_s)
@@ -679,6 +706,15 @@ def run_simulation(
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+
+def _parse_bool(value: str) -> bool:
+    """Argparse type for boolean flags that accept true/false/1/0/yes/no."""
+    if value.lower() in ("true", "1", "yes"):
+        return True
+    if value.lower() in ("false", "0", "no"):
+        return False
+    raise argparse.ArgumentTypeError(f"Boolean value expected (true/false), got: {value!r}")
+
 
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
@@ -752,7 +788,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--leverage", type=float, default=5.0, help="Leverage multiplier.")
     ap.add_argument("--fee", type=float, default=0.0004, help="Fee per side (e.g. 0.0004 = 0.04%%).")
-    ap.add_argument("--max-consec-losses", type=int, default=3, help="Circuit breaker: consecutive losses.")
+    ap.add_argument("--max-consec-losses", type=int, default=999, help="Circuit breaker: consecutive losses before pausing. Default 999 effectively disables it (recommended for alignment verification).")
     ap.add_argument("--since", default=None, help="Start time, e.g. 2026-02-01T00:00:00Z.")
     ap.add_argument("--until", default=None, help="End time, e.g. 2026-03-10T00:00:00Z.")
     ap.add_argument(
@@ -802,6 +838,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Skip this many initial bars (aligns with backtest --warmup-bars).  Default: %(default)s.",
+    )
+
+    ap.add_argument(
+        "--entry-on-next-bar",
+        type=_parse_bool,
+        default=True,
+        metavar="BOOL",
+        help=(
+            "If true (default), entry price is the OPEN of the bar after the signal bar "
+            "(matching backtest behaviour).  Pass false to use the signal bar's close price "
+            "(legacy behaviour)."
+        ),
     )
 
     # Pred-cache flags — read cached predictions from backtest JSONL for alignment verification
@@ -863,6 +911,7 @@ def run_for_symbol(symbol: str, args: argparse.Namespace) -> None:
         position_mode=args.position_mode,
         warmup_bars=args.warmup_bars,
         pred_cache_file=args.pred_cache_file,
+        entry_on_next_bar=args.entry_on_next_bar,
     )
 
 
