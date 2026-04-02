@@ -69,6 +69,29 @@ _SCRIPT_DIR = _os.path.dirname(_os.path.abspath(__file__))
 if _SCRIPT_DIR not in _sys.path:
     _sys.path.insert(0, _SCRIPT_DIR)
 
+# Optional: load per-symbol config from configs/symbols.yaml
+try:
+    from symbol_config import get_symbol_config as _get_symbol_config  # type: ignore
+except ImportError:
+    _get_symbol_config = None  # type: ignore
+
+# Hard-coded fallback defaults (used when --symbol is not provided and CLI flag is absent).
+# Exposed at module level so tests can verify the expected default values without running
+# the full backtest pipeline.
+_BACKTEST_DEFAULTS: Dict[str, Any] = {
+    "interval": "1h",
+    "horizon_bars": 24,
+    "thresholds": "0.55:0.85:0.02",
+    "tp_grid": "0.005:0.030:0.0025",
+    "sl_grid": "0.003:0.020:0.001",
+}
+# Step sizes used when a YAML single value is collapsed to a single-point grid range.
+# Threshold uses 0.01 (enough precision for calibrated probabilities).
+# TP/SL use 0.001 (0.1%) matching practical position sizing resolution.
+_YAML_GRID_STEP_THR: float = 0.01
+_YAML_GRID_STEP_TP: float = 0.001
+_YAML_GRID_STEP_SL: float = 0.001
+
 from signal_logic import (  # noqa: E402
     normalize_predict_response,
     select_effective_probs,
@@ -800,23 +823,64 @@ def print_backtest_summary(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data-dir", required=True)
+    ap = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    ap.add_argument("--data-dir", required=True, help="Per-symbol kline data directory (e.g. data/ETHUSDT).")
+    ap.add_argument(
+        "--symbol",
+        default=None,
+        help=(
+            "Symbol name (e.g. ETHUSDT).  When provided, loads per-symbol defaults from "
+            "configs/symbols.yaml for --interval, --horizon-bars, --thresholds, --tp-grid, "
+            "and --sl-grid unless those flags are explicitly supplied on the CLI."
+        ),
+    )
     ap.add_argument("--base-url", default="http://127.0.0.1:9000")
-    ap.add_argument("--interval", default="1h")
+    ap.add_argument(
+        "--interval",
+        default=None,
+        help="Kline interval (e.g. 1h).  Defaults to per-symbol config when --symbol is set, else '1h'.",
+    )
     ap.add_argument("--fee", type=float, default=0.0004)
     ap.add_argument("--slippage", type=float, default=0.0)
     ap.add_argument("--since", default=None)
     ap.add_argument("--until", default=None)
     ap.add_argument("--min-signals-per-week", type=float, default=5.0)
     ap.add_argument("--tie-breaker", choices=["SL", "TP"], default="SL")
-    ap.add_argument("--horizon-bars", type=int, default=24)
+    ap.add_argument(
+        "--horizon-bars",
+        type=int,
+        default=None,
+        help="Max holding period in bars.  Defaults to per-symbol config when --symbol is set, else 24.",
+    )
     ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
     ap.add_argument("--position-mode", choices=["stack", "single"], default="stack")
     ap.add_argument("--objective", choices=["pf", "avg_ret", "avg_ret_mdd_daily", "avg_ret_mdd_hourly"], default="avg_ret_mdd_daily")
-    ap.add_argument("--thresholds", default="0.55:0.85:0.02")
-    ap.add_argument("--tp-grid", default="0.005:0.030:0.0025")
-    ap.add_argument("--sl-grid", default="0.003:0.020:0.001")
+    ap.add_argument(
+        "--thresholds",
+        default=None,
+        help=(
+            "Threshold grid spec start:end:step.  When --symbol is set and this flag is omitted, "
+            "defaults to a single-point range from configs/symbols.yaml (e.g. 0.84:0.84:0.01)."
+        ),
+    )
+    ap.add_argument(
+        "--tp-grid",
+        default=None,
+        help=(
+            "TP grid spec start:end:step.  When --symbol is set and this flag is omitted, "
+            "defaults to a single-point range from configs/symbols.yaml."
+        ),
+    )
+    ap.add_argument(
+        "--sl-grid",
+        default=None,
+        help=(
+            "SL grid spec start:end:step.  When --symbol is set and this flag is omitted, "
+            "defaults to a single-point range from configs/symbols.yaml."
+        ),
+    )
     ap.add_argument("--warmup-bars", type=int, default=200)
     ap.add_argument("--sleep-ms", type=int, default=0)
 
@@ -839,6 +903,88 @@ def main() -> int:
     ap.add_argument("--pred-cache-key", choices=["interval_window", "model_interval_window"], default="model_interval_window")
 
     args = ap.parse_args()
+
+    # ------------------------------------------------------------------
+    # Resolve per-symbol defaults from configs/symbols.yaml
+    # ------------------------------------------------------------------
+    _yaml_cfg: Dict[str, Any] = {}
+    _param_sources: Dict[str, str] = {}
+
+    if args.symbol is not None and _get_symbol_config is not None:
+        try:
+            _yaml_cfg = _get_symbol_config(args.symbol)
+        except Exception as exc:
+            print(
+                f"WARNING: could not load symbol config for {args.symbol}: {exc}",
+                file=sys.stderr,
+            )
+
+    def _resolve_str(attr: str, yaml_key: str, default_val: str) -> str:
+        cli_val = getattr(args, attr)
+        if cli_val is not None:
+            _param_sources[attr] = "CLI"
+            return cli_val
+        if _yaml_cfg and yaml_key in _yaml_cfg:
+            _param_sources[attr] = "YAML"
+            return str(_yaml_cfg[yaml_key])
+        _param_sources[attr] = "default"
+        return default_val
+
+    def _resolve_int(attr: str, yaml_key: str, default_val: int) -> int:
+        cli_val = getattr(args, attr)
+        if cli_val is not None:
+            _param_sources[attr] = "CLI"
+            return int(cli_val)
+        if _yaml_cfg and yaml_key in _yaml_cfg:
+            _param_sources[attr] = "YAML"
+            return int(_yaml_cfg[yaml_key])
+        _param_sources[attr] = "default"
+        return default_val
+
+    # Resolve interval and horizon_bars
+    args.interval = _resolve_str("interval", "interval", _BACKTEST_DEFAULTS["interval"])
+    args.horizon_bars = _resolve_int("horizon_bars", "horizon", _BACKTEST_DEFAULTS["horizon_bars"])
+
+    # Resolve grid params: when coming from YAML, collapse to a single-point range
+    if args.thresholds is not None:
+        _param_sources["thresholds"] = "CLI"
+    elif _yaml_cfg and "threshold" in _yaml_cfg:
+        _thr = float(_yaml_cfg["threshold"])
+        args.thresholds = f"{_thr}:{_thr}:{_YAML_GRID_STEP_THR}"
+        _param_sources["thresholds"] = "YAML"
+    else:
+        args.thresholds = _BACKTEST_DEFAULTS["thresholds"]
+        _param_sources["thresholds"] = "default"
+
+    if args.tp_grid is not None:
+        _param_sources["tp_grid"] = "CLI"
+    elif _yaml_cfg and "tp" in _yaml_cfg:
+        _tp = float(_yaml_cfg["tp"])
+        args.tp_grid = f"{_tp}:{_tp}:{_YAML_GRID_STEP_TP}"
+        _param_sources["tp_grid"] = "YAML"
+    else:
+        args.tp_grid = _BACKTEST_DEFAULTS["tp_grid"]
+        _param_sources["tp_grid"] = "default"
+
+    if args.sl_grid is not None:
+        _param_sources["sl_grid"] = "CLI"
+    elif _yaml_cfg and "sl" in _yaml_cfg:
+        _sl = float(_yaml_cfg["sl"])
+        args.sl_grid = f"{_sl}:{_sl}:{_YAML_GRID_STEP_SL}"
+        _param_sources["sl_grid"] = "YAML"
+    else:
+        args.sl_grid = _BACKTEST_DEFAULTS["sl_grid"]
+        _param_sources["sl_grid"] = "default"
+
+    # Print param source summary so alignment is auditable
+    _sym_label = args.symbol or _symbol_from_data_dir(args.data_dir)
+    print(
+        f"[config] symbol={_sym_label}  "
+        + "  ".join(
+            f"{k}={getattr(args, k)} ({_param_sources.get(k, '?')})"
+            for k in ("interval", "horizon_bars", "thresholds", "tp_grid", "sl_grid")
+        )
+    )
 
     if args.horizon_bars <= 0:
         print("ERROR: --horizon-bars must be > 0", file=sys.stderr)
