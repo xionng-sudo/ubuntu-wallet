@@ -176,6 +176,34 @@ def _confirm_live_or_exit() -> None:
     raise SystemExit(2)
 
 
+def _confirm_prod_or_exit() -> None:
+    """
+    Extra confirmation required when targeting the Binance PROD (real-money) environment.
+    Shown AFTER the general live confirmation, before the countdown.
+    """
+    print("\n" + "!" * 72)
+    print("【警告】你选择的是 Binance PROD 正式环境！")
+    print("这将使用真实资金，成交产生真实盈亏，无法撤销。")
+    print("如果你想在测试环境验证，请用 --env testnet。")
+    print("如果你确认要使用 PROD 正式环境，请再次输入：PROD")
+    print("如果你不确认，请输入：no")
+    print("!" * 72)
+    try:
+        v = input("请输入 (PROD/no): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n[EXIT] 未确认 PROD 环境，已安全退出。")
+        raise SystemExit(2)
+
+    if v == "PROD":
+        return
+    if v.lower() == "no":
+        print("[EXIT] 你选择不使用 PROD 环境，已安全退出。")
+        raise SystemExit(0)
+
+    print("[EXIT] 输入不匹配（未输入 PROD），已安全退出。")
+    raise SystemExit(2)
+
+
 def _countdown(seconds: int = 15) -> None:
     for i in range(seconds, 0, -1):
         print(f"[LIVE] 将在 {i:02d} 秒后开始…（Ctrl+C 可退出）", flush=True)
@@ -285,12 +313,12 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--env",
         choices=["prod", "testnet"],
-        default="prod",
+        default="testnet",
         help=(
             "Binance environment selector. "
-            "'prod' uses fapi.binance.com (real funds). "
-            "'testnet' uses testnet.binancefuture.com (test funds). "
-            "Default: prod."
+            "'prod' uses fapi.binance.com (real funds — use with extreme caution). "
+            "'testnet' uses testnet.binancefuture.com (test funds, safe for validation). "
+            "Default: testnet. Using --mode live --env prod requires a second confirmation."
         ),
     )
 
@@ -387,6 +415,28 @@ def _run_live_self_checks(client: BinanceFuturesClient, symbols: List[str]) -> N
         )
 
     print("[LIVE] All self-checks passed.\n")
+
+
+def _print_pr2a_scope_warning(env: str) -> None:
+    """
+    Prominently remind the operator about PR-2A's scope limitations.
+    Shown once after self-checks, before the trading loop begins.
+    """
+    print("\n" + "*" * 72)
+    print("【PR-2A 范围说明 / Scope Notice】")
+    print(f"  环境 (env): {env.upper()}")
+    print("  本版本 (PR-2A) 已接入真实 Binance Futures REST 下单能力。")
+    print("  但以下回测/模拟执行语义尚未在 live trader 中实现：")
+    print("    - next-bar open entry")
+    print("    - same-bar TP / SL")
+    print("    - tie_breaker")
+    print("    - timeout_exit / horizon 退出")
+    print("    - position_mode=single 完整状态机")
+    print("    - 已开仓后的系统性退出检查（持仓生命周期未闭环）")
+    print("  PR-2A 仅打通真实下单基础设施。")
+    print("  在 PR-2B 完成之前，不建议直接用于 PROD 实盘。")
+    print("  建议先在 TESTNET 验证完整流程后再切换到 PROD。")
+    print("*" * 72 + "\n")
 
 
 def run_for_one_symbol(
@@ -503,6 +553,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             raise SystemExit(1)
 
         _confirm_live_or_exit()
+
+        # Extra confirmation step when targeting real-money PROD environment
+        if args.env == "prod":
+            _confirm_prod_or_exit()
+
         _countdown(15)
 
         exchange_client = BinanceFuturesClient(
@@ -511,6 +566,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             env=args.env,
         )
         _run_live_self_checks(exchange_client, symbols)
+        _print_pr2a_scope_warning(args.env)
     else:
         if not api_key or not api_secret:
             print("[WARN] BINANCE_API_KEY / BINANCE_API_SECRET not set（DRY-RUN 模式下无所谓）")
