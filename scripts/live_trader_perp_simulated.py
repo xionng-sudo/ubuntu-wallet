@@ -565,6 +565,13 @@ def run_simulation(
                 klines_1h=klines_1h,
             )
             pending_open_side = None
+            # Same-bar exit: immediately check TP/SL on the entry bar after opening.
+            # Matches backtest simulate_trade() which scans from j=i+1 (the entry bar).
+            same_bar_trade = engine.check_exit(bar)
+            if same_bar_trade is not None:
+                trade = same_bar_trade
+                if position_mode == "single":
+                    next_allowed_ts = same_bar_trade.exit_ts
 
         # Skip warmup bars (aligns with backtest --warmup-bars)
         if i < warmup_bars:
