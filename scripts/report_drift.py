@@ -46,6 +46,24 @@ import sys
 from datetime import date
 from typing import Any, Dict, List, Optional
 
+# ---------------------------------------------------------------------------
+# Path setup — ensure both repo root and scripts dir are importable.
+# ---------------------------------------------------------------------------
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+for _p in (_REPO_ROOT, _SCRIPT_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
+
+from scripts.symbol_config import (  # noqa: E402
+    list_enabled_symbols,
+    reports_dir as _symbol_reports_dir,
+)
+from scripts.symbol_paths import (  # noqa: E402
+    get_symbol_train_stats_path as _get_symbol_train_stats_path,
+)
+
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -441,14 +459,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _get_symbol_paths_module():
-    _scripts_dir = os.path.dirname(os.path.abspath(__file__))
-    if _scripts_dir not in sys.path:
-        sys.path.insert(0, _scripts_dir)
-    import symbol_paths  # type: ignore[import]
-    return symbol_paths
-
-
 def _resolve_live_features_path_for_symbol(symbol: str) -> str:
     """Resolve per-symbol live feature history with root fallback for primary symbol compatibility."""
     per_symbol = _default_live_features_path_for_symbol(symbol)
@@ -470,12 +480,6 @@ def main() -> None:
         sys.exit(0)
 
     if args.all_symbols:
-        try:
-            sp = _get_symbol_paths_module()
-        except ImportError as exc:
-            print(f"ERROR: could not import symbol_paths: {exc}", file=sys.stderr)
-            sys.exit(1)
-
         models_base = _resolve_models_base_dir(args.models_base_dir)
         print(f"[drift] models base dir: {models_base}")
 
@@ -487,16 +491,16 @@ def main() -> None:
             print(f"ERROR: models base dir does not exist: {models_base}", file=sys.stderr)
             sys.exit(1)
 
-        symbols = sp.list_enabled_symbols()
+        symbols = list_enabled_symbols()
         if not symbols:
             print("WARNING: no enabled symbols found in configs/symbols.yaml; nothing to do.")
             sys.exit(0)
 
         any_failed = False
         for sym in symbols:
-            train_stats = sp.get_symbol_train_stats_path(sym, base_model_dir=models_base)
+            train_stats = _get_symbol_train_stats_path(sym, base_model_dir=models_base)
             live_features_path = _resolve_live_features_path_for_symbol(sym)
-            output_dir = sp.get_symbol_reports_dir(sym)
+            output_dir = _symbol_reports_dir(sym)
 
             if not os.path.exists(train_stats):
                 print(f"WARNING: [{sym}] train-stats file not found, skipping drift: {train_stats}", file=sys.stderr)
@@ -525,16 +529,12 @@ def main() -> None:
     output_dir = args.output_dir
 
     if args.symbol:
-        try:
-            sp = _get_symbol_paths_module()
-            if train_stats is None:
-                train_stats = sp.get_symbol_train_stats_path(args.symbol)
-            if live_features_path is None:
-                live_features_path = _resolve_live_features_path_for_symbol(args.symbol)
-            if output_dir is None:
-                output_dir = sp.get_symbol_reports_dir(args.symbol)
-        except ImportError:
-            pass
+        if train_stats is None:
+            train_stats = _get_symbol_train_stats_path(args.symbol)
+        if live_features_path is None:
+            live_features_path = _resolve_live_features_path_for_symbol(args.symbol)
+        if output_dir is None:
+            output_dir = _symbol_reports_dir(args.symbol)
 
     if output_dir is None:
         output_dir = "data/reports"

@@ -274,15 +274,15 @@ class TestReportDriftBackwardCompat(unittest.TestCase):
         """report_drift.py should exit non-zero when train-stats file is missing."""
         import subprocess
         with tempfile.TemporaryDirectory() as tmpdir:
-            log_path = os.path.join(tmpdir, "predictions_log.jsonl")
-            with open(log_path, "w") as f:
+            live_path = os.path.join(tmpdir, "features_1h_history.jsonl")
+            with open(live_path, "w") as f:
                 f.write('{"features": {"sma_7": 1.0}}\n')
             result = subprocess.run(
                 [
                     sys.executable,
                     os.path.join(SCRIPTS_DIR, "report_drift.py"),
                     "--train-stats", os.path.join(tmpdir, "nonexistent.json"),
-                    "--log-path", log_path,
+                    "--live-features-path", live_path,
                 ],
                 capture_output=True,
                 text=True,
