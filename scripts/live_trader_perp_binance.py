@@ -26,7 +26,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set
 
 import requests
 from dotenv import load_dotenv
@@ -657,7 +657,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     }
 
     # Resolve per-symbol mt_filter_mode once at startup (CLI > YAML > default).
-    per_symbol_mt_mode: dict = {}
+    per_symbol_mt_mode: Dict[str, str] = {}
     for s in symbols:
         mode, src = _resolve_mt_filter_mode_for_symbol(s, args.mt_filter_mode)
         per_symbol_mt_mode[s] = mode
