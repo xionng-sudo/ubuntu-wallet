@@ -42,14 +42,31 @@ MODEL_BASE="${MODEL_BASE:-${REPO_ROOT}/models}"
 DATA_DIR="${DATA_BASE}/${SYMBOL}"
 MODEL_DIR="${MODEL_BASE}/${SYMBOL}"
 
+# Export first so the Python helper can see them
+export REPO_ROOT
+export _TRAIN_SYMBOL="${SYMBOL}"
+
+DRY_RUN=0
+FORWARD_ARGS=()
+for arg in "$@"; do
+    if [[ "${arg}" == "--dry-run" ]]; then
+        DRY_RUN=1
+    else
+        FORWARD_ARGS+=("${arg}")
+    fi
+done
+
 # Load per-symbol config (horizon, tp, sl, threshold, calibration)
 SYMBOL_CFG="$("${PYTHON}" - <<'PYEOF'
 import sys, os
-sys.path.insert(0, os.path.join(os.environ.get("REPO_ROOT", ""), "scripts"))
+
+repo_root = os.environ.get("REPO_ROOT", "")
+if repo_root:
+    sys.path.insert(0, os.path.join(repo_root, "scripts"))
+
 try:
     from symbol_paths import get_symbol_config
-    import os as _os
-    sym = _os.environ.get("_TRAIN_SYMBOL", "BTCUSDT")
+    sym = os.environ.get("_TRAIN_SYMBOL", "BTCUSDT")
     cfg = get_symbol_config(sym)
     print(
         f"HORIZON={cfg['horizon']}",
@@ -63,9 +80,6 @@ except Exception as e:
     print("HORIZON=12 TP=0.0175 SL=0.009 THRESHOLD=0.65 CALIBRATION=isotonic")
 PYEOF
 )" || true
-
-# Export for the here-doc subshell
-export REPO_ROOT _TRAIN_SYMBOL="${SYMBOL}"
 
 # Parse config values
 eval "${SYMBOL_CFG}" 2>/dev/null || true
@@ -85,14 +99,19 @@ mkdir -p "${DATA_DIR}" "${MODEL_DIR}"
 CMD=(
     "${PYTHON}"
     "${REPO_ROOT}/python-analyzer/train_event_stack_v3.py"
-    --data-dir  "${DATA_DIR}"
+    --data-dir "${DATA_DIR}"
     --model-dir "${MODEL_DIR}"
-    --horizon   "${HORIZON}"
-    --tp-pct    "${TP}"
-    --sl-pct    "${SL}"
+    --horizon "${HORIZON}"
+    --tp-pct "${TP}"
+    --sl-pct "${SL}"
     --calibration "${CALIBRATION}"
-    "$@"
+    "${FORWARD_ARGS[@]}"
 )
 
 echo "[train_symbol.sh] running: ${CMD[*]}"
+
+if [[ "${DRY_RUN}" == "1" ]]; then
+    exit 0
+fi
+
 exec "${CMD[@]}"

@@ -85,9 +85,25 @@ def call_ml_service(as_of_ts: str, base_url: str) -> dict:
     return r.json()
 
 
-def _fetch_klines_15m(data_dir: str) -> List[dict]:
-    """Try load 15m klines from data_dir/klines_15m.json; return [] if not available."""
-    path = os.path.join(data_dir, "klines_15m.json")
+def _symbol_data_path(data_dir: str, symbol: str, filename: str) -> str:
+    """
+    Prefer per-symbol data first, then fall back to legacy root-level data.
+
+    Preferred:
+      data/<SYMBOL>/<filename>
+
+    Fallback:
+      data/<filename>
+    """
+    per_symbol_path = os.path.join(data_dir, symbol, filename)
+    if os.path.exists(per_symbol_path):
+        return per_symbol_path
+    return os.path.join(data_dir, filename)
+
+
+def _fetch_klines_15m(data_dir: str, symbol: str) -> List[dict]:
+    """Try load 15m klines from per-symbol path first; return [] if not available."""
+    path = _symbol_data_path(data_dir, symbol, "klines_15m.json")
     try:
         # NOTE: load_klines_1h is a generic json loader in this repo; reused here.
         return load_klines_1h(path)
@@ -344,7 +360,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument(
         "--data-dir",
         default=os.getenv("DATA_DIR", "./data"),
-        help="Base data dir containing klines_4h.json, klines_1d.json, and optional klines_15m.json",
+        help="Base data dir containing per-symbol subdirs like data/<SYMBOL>/klines_4h.json",
     )
     ap.add_argument(
         "--use-layered-gate",
@@ -358,12 +374,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--use-15m-confirm",
         action="store_true",
         help=(
-            "Enable 15m execution confirmation layer (requires data/klines_15m.json). "
+            "Enable 15m execution confirmation layer (prefers data/<SYMBOL>/klines_15m.json). "
             "Default: OFF. WARNING: this creates a live vs backtest evaluation gap."
         ),
     )
 
-    # engine knobs (still DRY-RUN in PR-1)
     ap.add_argument("--strategy-funds-usdt", type=float, default=10_000.0, help="Strategy funds for sizing (USDT).")
     ap.add_argument("--leverage", type=float, default=5.0, help="Leverage (for sizing/logging).")
     ap.add_argument("--position-fraction", type=float, default=0.3, help="Position fraction per entry.")
@@ -439,17 +454,20 @@ def _print_pr2a_scope_warning(env: str) -> None:
     print("*" * 72 + "\n")
 
 
+def _build_mt_ctx_for_symbol(data_dir: str, symbol: str) -> MTTrendContext:
+    klines_4h = load_klines_1h(_symbol_data_path(data_dir, symbol, "klines_4h.json"))
+    klines_1d = load_klines_1h(_symbol_data_path(data_dir, symbol, "klines_1d.json"))
+    return MTTrendContext(klines_4h=klines_4h, klines_1d=klines_1d)
+
+
 def run_for_one_symbol(
     symbol: str,
     args: argparse.Namespace,
     runtime: RuntimeMode,
     exchange_client: Optional[BinanceFuturesClient] = None,
 ) -> None:
-    # Load multi-timeframe klines
     data_dir = args.data_dir
-    klines_4h = load_klines_1h(os.path.join(data_dir, "klines_4h.json"))
-    klines_1d = load_klines_1h(os.path.join(data_dir, "klines_1d.json"))
-    mt_ctx = MTTrendContext(klines_4h=klines_4h, klines_1d=klines_1d)
+    mt_ctx = _build_mt_ctx_for_symbol(data_dir, symbol)
 
     engine = EthPerpStrategyEngineBinance(
         strategy_funds_usdt=float(args.strategy_funds_usdt),
@@ -503,7 +521,7 @@ def run_for_one_symbol(
 
         exec_result = ENTER
         if side_str in ("LONG", "SHORT") and args.use_15m_confirm:
-            klines_15m = _fetch_klines_15m(data_dir)
+            klines_15m = _fetch_klines_15m(data_dir, symbol)
             exec_result = exec_confirm_15m(side_str, klines_15m, enabled=True)
             if exec_result != ENTER:
                 print(f"  [15m confirm] symbol={symbol} side={side_str} exec_result={exec_result} -> skipping")
@@ -579,11 +597,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     # (No threading to keep behavior deterministic & simple.)
     print(f"Starting {'LIVE' if runtime.is_live else 'DRY-RUN'} multi-symbol runner: {symbols}")
 
-    # For multi-symbol, we keep per-symbol engines and contexts
-    data_dir = args.data_dir
-    klines_4h = load_klines_1h(os.path.join(data_dir, "klines_4h.json"))
-    klines_1d = load_klines_1h(os.path.join(data_dir, "klines_1d.json"))
-    mt_ctx = MTTrendContext(klines_4h=klines_4h, klines_1d=klines_1d)
+    per_symbol_ctx = {
+        s: _build_mt_ctx_for_symbol(args.data_dir, s)
+        for s in symbols
+    }
 
     engines = {
         s: EthPerpStrategyEngineBinance(
@@ -626,12 +643,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             cal_conf = j.get("calibrated_confidence")
 
             side_str, weight = apply_multi_timeframe_filter(
-                side_str, bar_close, mt_ctx, use_layered=args.use_layered_gate
+                side_str,
+                bar_close,
+                per_symbol_ctx[symbol],
+                use_layered=args.use_layered_gate,
             )
 
             exec_result = ENTER
             if side_str in ("LONG", "SHORT") and args.use_15m_confirm:
-                klines_15m = _fetch_klines_15m(data_dir)
+                klines_15m = _fetch_klines_15m(args.data_dir, symbol)
                 exec_result = exec_confirm_15m(side_str, klines_15m, enabled=True)
                 if exec_result != ENTER:
                     print(f"  [15m confirm] symbol={symbol} side={side_str} exec_result={exec_result} -> skipping")

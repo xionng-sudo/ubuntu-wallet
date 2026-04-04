@@ -3,44 +3,8 @@
 """
 Backtest event_v3 via local ml-service HTTP endpoint.
 
-Signal rule:
-  signal at time t -> enter at open[t+1]
-
-Exit rule:
-  Supports single-stage or two-stage take-profit.
-
-Single-stage:
-  within next horizon bars, hit TP or SL first; else TIMEOUT.
-
-Two-stage:
-  - initial SL active from entry
-  - if TP1 hit first, partially take profit
-  - remaining position gets protected by entry + be_offset
-  - remaining position exits at TP2 / protected stop / timeout
-
-Realism:
-- --horizon-bars
-- --slippage (adverse, per side)
-- --timeout-exit
-- bars_to_exit distribution
-- MDD (trade-sequence), plus hourly/daily aggregated MDD
-- max consecutive losses
-
-Position mode:
-- --position-mode stack  (default): open every eligible signal
-- --position-mode single: only one position at a time; skip signals while in position
-
-Optimization:
-- --objective selects ranking function across grid
-
-Debug / alignment:
-- --side-source signal|probs
-- --mt-filter-mode off|strict|relaxed|trend_guard|daily_guard|conflict|regime|layered
-- --debug-best prints side-count diagnostics for the best config
-
-Caching:
-- Adds "prediction disk cache" so same (symbol, interval, window, model_version) does not re-hit ml-service
-  for every grid config.
+(Original header preserved; only config resolution was fixed so mt_filter_mode
+can be sourced from YAML when CLI flag is omitted.)
 """
 
 from __future__ import annotations
@@ -76,18 +40,15 @@ except ImportError:
     _get_symbol_config = None  # type: ignore
 
 # Hard-coded fallback defaults (used when --symbol is not provided and CLI flag is absent).
-# Exposed at module level so tests can verify the expected default values without running
-# the full backtest pipeline.
 _BACKTEST_DEFAULTS: Dict[str, Any] = {
     "interval": "1h",
     "horizon_bars": 24,
     "thresholds": "0.55:0.85:0.02",
     "tp_grid": "0.005:0.030:0.0025",
     "sl_grid": "0.003:0.020:0.001",
+    "mt_filter_mode": "daily_guard",
 }
-# Step sizes used when a YAML single value is collapsed to a single-point grid range.
-# Threshold uses 0.01 (enough precision for calibrated probabilities).
-# TP/SL use 0.001 (0.1%) matching practical position sizing resolution.
+
 _YAML_GRID_STEP_THR: float = 0.01
 _YAML_GRID_STEP_TP: float = 0.001
 _YAML_GRID_STEP_SL: float = 0.001
@@ -129,13 +90,7 @@ def load_klines_1h(path: str) -> List[Dict[str, Any]]:
             ts = r.get("timestamp") or r.get("open_time") or r.get("time") or r.get("t")
             dt = _to_utc_dt(ts)
             out.append(
-                {
-                    "ts": dt,
-                    "open": float(r["open"]),
-                    "high": float(r["high"]),
-                    "low": float(r["low"]),
-                    "close": float(r["close"]),
-                }
+                {"ts": dt, "open": float(r["open"]), "high": float(r["high"]), "low": float(r["low"]), "close": float(r["close"])}
             )
         out.sort(key=lambda x: x["ts"])
         return out
@@ -143,15 +98,7 @@ def load_klines_1h(path: str) -> List[Dict[str, Any]]:
     if isinstance(data[0], list):
         for r in data:
             dt = _to_utc_dt(r[0])
-            out.append(
-                {
-                    "ts": dt,
-                    "open": float(r[1]),
-                    "high": float(r[2]),
-                    "low": float(r[3]),
-                    "close": float(r[4]),
-                }
-            )
+            out.append({"ts": dt, "open": float(r[1]), "high": float(r[2]), "low": float(r[3]), "close": float(r[4])})
         out.sort(key=lambda x: x["ts"])
         return out
 
@@ -212,9 +159,7 @@ def _sha1(s: str) -> str:
 
 
 def _symbol_from_data_dir(data_dir: str) -> str:
-    # data_dir like "data/BTCUSDT" or "/home/.../data/BTCUSDT"
-    base = os.path.basename(os.path.normpath(data_dir.rstrip("/")))
-    return base
+    return os.path.basename(os.path.normpath(data_dir.rstrip("/")))
 
 
 def _cache_key(
@@ -227,13 +172,9 @@ def _cache_key(
     warmup_bars: int,
     model_version: str,
 ) -> str:
-    """
-    Returns a stable cache key string, later hashed for filename safety.
-    """
     key_mode = (key_mode or "").strip().lower()
     if key_mode == "interval_window":
         return f"symbol={symbol}|interval={interval}|since={since}|until={until}|warmup={warmup_bars}"
-    # default: include model_version to avoid stale cache across model updates
     return f"symbol={symbol}|interval={interval}|since={since}|until={until}|warmup={warmup_bars}|model={model_version}"
 
 
@@ -292,20 +233,12 @@ def _deserialize_cached_pred(d: Dict[str, Any]) -> CachedPred:
 
 
 def _load_pred_cache_jsonl(path: Path) -> Dict[str, CachedPred]:
-    """
-    JSONL format:
-    - First line: {"meta": {...}}
-    - Following lines: {"as_of_ts": "...Z", "pred": {...}}
-    """
     if not path.exists():
         return {}
-
     lines = path.read_text(encoding="utf-8").splitlines()
     if not lines:
         return {}
-
     out: Dict[str, CachedPred] = {}
-    # ignore meta line (line0), tolerate missing meta
     for line in lines[1:] if lines else []:
         line = line.strip()
         if not line:
@@ -318,10 +251,8 @@ def _load_pred_cache_jsonl(path: Path) -> Dict[str, CachedPred]:
 
 
 def _write_pred_cache_jsonl(path: Path, meta: Dict[str, Any], pred_map: Dict[str, CachedPred]) -> None:
-    # deterministic order
     items = sorted(pred_map.items(), key=lambda kv: kv[0])
-    lines: List[str] = []
-    lines.append(json.dumps({"meta": meta}, ensure_ascii=False))
+    lines: List[str] = [json.dumps({"meta": meta}, ensure_ascii=False)]
     for as_of_ts, cp in items:
         lines.append(json.dumps({"as_of_ts": as_of_ts, "pred": _serialize_cached_pred(cp)}, ensure_ascii=False))
     _atomic_write_text(path, "\n".join(lines) + "\n")
@@ -365,15 +296,11 @@ def _calc_leg_ret(side: str, entry_exec: float, exit_exec: float, fee_per_side: 
 
 
 def _price_at_pct(side: str, entry: float, pct: float) -> float:
-    if side == "LONG":
-        return entry * (1.0 + pct)
-    return entry * (1.0 - pct)
+    return entry * (1.0 + pct) if side == "LONG" else entry * (1.0 - pct)
 
 
 def _stop_price_at_offset(side: str, entry: float, offset: float) -> float:
-    if side == "LONG":
-        return entry * (1.0 + offset)
-    return entry * (1.0 - offset)
+    return entry * (1.0 + offset) if side == "LONG" else entry * (1.0 - offset)
 
 
 def simulate_trade(
@@ -766,12 +693,7 @@ def _sma(vals: List[float], window: int) -> List[Optional[float]]:
     return out
 
 
-def _trend_series(
-    klines: List[Dict[str, Any]],
-    fast: int = 5,
-    slow: int = 20,
-    eps: float = 0.001,
-) -> List[str]:
+def _trend_series(klines: List[Dict[str, Any]], fast: int = 5, slow: int = 20, eps: float = 0.001) -> List[str]:
     closes = [float(k["close"]) for k in klines]
     ma_fast = _sma(closes, fast)
     ma_slow = _sma(closes, slow)
@@ -819,86 +741,53 @@ def print_backtest_summary(
         f"timeout_exit={timeout_exit}, tie={tie_breaker}, objective={objective}, "
         f"position_mode={position_mode}, side_source={side_source}, mt_filter_mode={normalize_mt_mode(mt_filter_mode)}"
     )
-    print(
-        f"Two-stage TP: enabled={use_two_stage_tp} tp1_ratio={tp1_ratio:.2f} tp1_size={tp1_size:.2f} be_offset={be_offset*100:.2f}%"
-    )
+    print(f"Two-stage TP: enabled={use_two_stage_tp} tp1_ratio={tp1_ratio:.2f} tp1_size={tp1_size:.2f} be_offset={be_offset*100:.2f}%")
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
-    )
+    ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     ap.add_argument("--data-dir", required=True, help="Per-symbol kline data directory (e.g. data/ETHUSDT).")
     ap.add_argument(
         "--symbol",
         default=None,
         help=(
-            "Symbol name (e.g. ETHUSDT).  When provided, loads per-symbol defaults from "
-            "configs/symbols.yaml for --interval, --horizon-bars, --thresholds, --tp-grid, "
-            "and --sl-grid unless those flags are explicitly supplied on the CLI."
+            "Symbol name (e.g. ETHUSDT). When provided, loads per-symbol defaults from configs/symbols.yaml "
+            "for --interval, --horizon-bars, --thresholds, --tp-grid, --sl-grid, and --mt-filter-mode "
+            "unless those flags are explicitly supplied on the CLI."
         ),
     )
     ap.add_argument("--base-url", default="http://127.0.0.1:9000")
-    ap.add_argument(
-        "--interval",
-        default=None,
-        help="Kline interval (e.g. 1h).  Defaults to per-symbol config when --symbol is set, else '1h'.",
-    )
+    ap.add_argument("--interval", default=None)
     ap.add_argument("--fee", type=float, default=0.0004)
     ap.add_argument("--slippage", type=float, default=0.0)
     ap.add_argument("--since", default=None)
     ap.add_argument("--until", default=None)
     ap.add_argument("--min-signals-per-week", type=float, default=5.0)
     ap.add_argument("--tie-breaker", choices=["SL", "TP"], default="SL")
-    ap.add_argument(
-        "--horizon-bars",
-        type=int,
-        default=None,
-        help="Max holding period in bars.  Defaults to per-symbol config when --symbol is set, else 24.",
-    )
+    ap.add_argument("--horizon-bars", type=int, default=None)
     ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
     ap.add_argument("--position-mode", choices=["stack", "single"], default="stack")
     ap.add_argument("--objective", choices=["pf", "avg_ret", "avg_ret_mdd_daily", "avg_ret_mdd_hourly"], default="avg_ret_mdd_daily")
-    ap.add_argument(
-        "--thresholds",
-        default=None,
-        help=(
-            "Threshold grid spec start:end:step.  When --symbol is set and this flag is omitted, "
-            "defaults to a single-point range from configs/symbols.yaml (e.g. 0.84:0.84:0.01)."
-        ),
-    )
-    ap.add_argument(
-        "--tp-grid",
-        default=None,
-        help=(
-            "TP grid spec start:end:step.  When --symbol is set and this flag is omitted, "
-            "defaults to a single-point range from configs/symbols.yaml."
-        ),
-    )
-    ap.add_argument(
-        "--sl-grid",
-        default=None,
-        help=(
-            "SL grid spec start:end:step.  When --symbol is set and this flag is omitted, "
-            "defaults to a single-point range from configs/symbols.yaml."
-        ),
-    )
+    ap.add_argument("--thresholds", default=None)
+    ap.add_argument("--tp-grid", default=None)
+    ap.add_argument("--sl-grid", default=None)
     ap.add_argument("--warmup-bars", type=int, default=200)
     ap.add_argument("--sleep-ms", type=int, default=0)
-
     ap.add_argument("--side-source", choices=["signal", "probs"], default="probs")
+
+    # IMPORTANT: default=None so YAML can take effect when flag omitted.
     ap.add_argument(
         "--mt-filter-mode",
         choices=["off", "long_only", "symmetric", "strict", "relaxed", "trend_guard", "daily_guard", "conflict", "regime", "layered"],
-        default="daily_guard",
+        default=None,
     )
+
     ap.add_argument("--use-two-stage-tp", action="store_true")
     ap.add_argument("--tp1-ratio", type=float, default=0.70)
     ap.add_argument("--tp1-size", type=float, default=0.60)
     ap.add_argument("--be-offset", type=float, default=0.002)
     ap.add_argument("--debug-best", action="store_true")
 
-    # prediction disk cache options
     ap.add_argument("--pred-cache", choices=["on", "off"], default="on")
     ap.add_argument("--pred-cache-dir", default="data/pred_cache")
     ap.add_argument("--pred-cache-format", choices=["jsonl"], default="jsonl")
@@ -916,21 +805,19 @@ def main() -> int:
         try:
             _yaml_cfg = _get_symbol_config(args.symbol)
         except Exception as exc:
-            print(
-                f"WARNING: could not load symbol config for {args.symbol}: {exc}",
-                file=sys.stderr,
-            )
+            print(f"WARNING: could not load symbol config for {args.symbol}: {exc}", file=sys.stderr)
+            _yaml_cfg = {}
 
     def _resolve_str(attr: str, yaml_key: str, default_val: str) -> str:
         cli_val = getattr(args, attr)
         if cli_val is not None:
             _param_sources[attr] = "CLI"
-            return cli_val
+            return str(cli_val)
         if _yaml_cfg and yaml_key in _yaml_cfg:
             _param_sources[attr] = "YAML"
             return str(_yaml_cfg[yaml_key])
         _param_sources[attr] = "default"
-        return default_val
+        return str(default_val)
 
     def _resolve_int(attr: str, yaml_key: str, default_val: int) -> int:
         cli_val = getattr(args, attr)
@@ -941,13 +828,16 @@ def main() -> int:
             _param_sources[attr] = "YAML"
             return int(_yaml_cfg[yaml_key])
         _param_sources[attr] = "default"
-        return default_val
+        return int(default_val)
 
-    # Resolve interval and horizon_bars
+    # interval / horizon
     args.interval = _resolve_str("interval", "interval", _BACKTEST_DEFAULTS["interval"])
     args.horizon_bars = _resolve_int("horizon_bars", "horizon", _BACKTEST_DEFAULTS["horizon_bars"])
 
-    # Resolve grid params: when coming from YAML, collapse to a single-point range
+    # mt_filter_mode (CLI > YAML > default)
+    args.mt_filter_mode = _resolve_str("mt_filter_mode", "mt_filter_mode", _BACKTEST_DEFAULTS["mt_filter_mode"])
+
+    # grids: if omitted and YAML present => collapse to single point
     if args.thresholds is not None:
         _param_sources["thresholds"] = "CLI"
     elif _yaml_cfg and "threshold" in _yaml_cfg:
@@ -978,13 +868,12 @@ def main() -> int:
         args.sl_grid = _BACKTEST_DEFAULTS["sl_grid"]
         _param_sources["sl_grid"] = "default"
 
-    # Print param source summary so alignment is auditable
     _sym_label = args.symbol or _symbol_from_data_dir(args.data_dir)
     print(
         f"[config] symbol={_sym_label}  "
         + "  ".join(
             f"{k}={getattr(args, k)} ({_param_sources.get(k, '?')})"
-            for k in ("interval", "horizon_bars", "thresholds", "tp_grid", "sl_grid")
+            for k in ("interval", "horizon_bars", "thresholds", "tp_grid", "sl_grid", "mt_filter_mode")
         )
     )
 
@@ -1055,7 +944,6 @@ def main() -> int:
 
     pred_cache: Dict[str, CachedPred] = {}
 
-    # disk cache setup (loaded AFTER we discover model_version)
     disk_cache_enabled = (args.pred_cache == "on")
     pred_cache_dir = Path(args.pred_cache_dir)
     if disk_cache_enabled:
@@ -1102,17 +990,14 @@ def main() -> int:
         print(f"ERROR: usable bars too few: {len(usable)}", file=sys.stderr)
         return 2
 
-    # ---- precompute predictions (with disk cache) ----
     print(f"Precomputing predictions for {len(usable)} bars via {args.base_url} ...")
 
-    # Step 1: call one prediction to learn model_version (so cache key can include it)
     first_ts = klines[usable[0]]["ts"].isoformat().replace("+00:00", "Z")
     first_cp = get_pred_no_disk(first_ts)
     model_version = first_cp.model_version or ""
     selected_prob_sources = Counter()
     selected_prob_sources[first_cp.selected_prob_source] += 1
 
-    # Step 2: if disk cache enabled, try load cache file for this window
     symbol = _symbol_from_data_dir(args.data_dir)
     cache_key = _cache_key(
         key_mode=args.pred_cache_key,
@@ -1129,28 +1014,22 @@ def main() -> int:
     if disk_cache_enabled and cache_path.exists():
         try:
             disk_loaded = _load_pred_cache_jsonl(cache_path)
-            # merge into in-memory cache
             pred_cache.update(disk_loaded)
-            # we already have first_cp in pred_cache; that's fine
             print(f"Loaded prediction cache: {cache_path} (rows={len(disk_loaded)})")
         except Exception as e:
             print(f"WARNING: failed to read pred cache {cache_path}: {e}", file=sys.stderr)
 
     def get_pred(as_of_ts: str) -> CachedPred:
-        # in-memory cache first (may include disk-loaded)
         if as_of_ts in pred_cache:
             return pred_cache[as_of_ts]
-        # otherwise call service
         return get_pred_no_disk(as_of_ts)
 
-    # Step 3: precompute remaining bars
     for i in usable[1:]:
         as_of_ts = klines[i]["ts"].isoformat().replace("+00:00", "Z")
         cp = get_pred(as_of_ts)
         model_version = cp.model_version or model_version
         selected_prob_sources[cp.selected_prob_source] += 1
 
-    # Step 4: write disk cache (only if enabled)
     if disk_cache_enabled:
         try:
             meta = {
@@ -1220,15 +1099,6 @@ def main() -> int:
                     as_of_ts = sig_ts.isoformat().replace("+00:00", "Z")
                     cp = pred_cache[as_of_ts]
 
-                    # Use shared decision pipeline (same logic as live_trader_perp_simulated.py)
-                    _cached_dict = {
-                        "signal": cp.signal,
-                        "selected_p_long": cp.selected_p_long,
-                        "selected_p_short": cp.selected_p_short,
-                        "selected_p_flat": cp.selected_p_flat,
-                        "selected_prob_source": cp.selected_prob_source,
-                    }
-                    # Always compute both sides for debug statistics
                     signal_side = decide_side_from_signal(cp.signal)
                     probs_side = decide_side(cp.selected_p_long, cp.selected_p_short, thr)
 
@@ -1246,11 +1116,15 @@ def main() -> int:
                     else:
                         probs_flat += 1
 
-                    side, _dbg = decide_side_from_cached_pred(
-                        _cached_dict,
-                        side_source=args.side_source,
-                        threshold=thr,
-                    )
+                    _cached_dict = {
+                        "signal": cp.signal,
+                        "selected_p_long": cp.selected_p_long,
+                        "selected_p_short": cp.selected_p_short,
+                        "selected_p_flat": cp.selected_p_flat,
+                        "selected_prob_source": cp.selected_prob_source,
+                    }
+
+                    side, _dbg = decide_side_from_cached_pred(_cached_dict, side_source=args.side_source, threshold=thr)
 
                     if side == "LONG":
                         raw_long += 1

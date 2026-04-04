@@ -9,6 +9,7 @@ import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -18,17 +19,35 @@ REPORT_ROOT.mkdir(parents=True, exist_ok=True)
 
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT"]
 
-# phase1 grid
-PHASE1_THRESHOLDS = [0.50, 0.54, 0.57, 0.60]
-PHASE1_MT_MODES = ["daily_guard", "off"]
-PHASE1_TP = [0.0150, 0.0170, 0.0200]
-PHASE1_SL = [0.0070, 0.0090, 0.0110]
-PHASE1_HORIZON = [6, 8]
+# ---------------------------
+# Phase grids
+# ---------------------------
 
-# phase2 refinement grid (tp/sl/h) but threshold+mt_mode come from phase1_best.json
-PHASE2_TPS = [0.0150, 0.0170, 0.0200, 0.0225]
-PHASE2_SLS = [0.0070, 0.0090, 0.0100, 0.0110]
+# Phase1: coarse-ish but frequency-friendly.
+# Goal: avoid always picking thr=0.80 "few trades all win" solutions.
+PHASE1_THRESHOLDS = [0.55, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70, 0.72, 0.75]
+PHASE1_MT_MODES = ["daily_guard", "off"]
+
+# Expand TP/SL a bit so "all TP no SL" doesn't dominate too easily.
+PHASE1_TP = [0.0170, 0.0190, 0.0210]
+PHASE1_SL = [0.0090, 0.0100, 0.0110, 0.0120]
+PHASE1_HORIZON = [6, 8, 12]
+
+# Phase2: refinement grid (tp/sl/h), threshold+mt_mode come from phase1_best.json
+PHASE2_TPS = [0.0170, 0.0190, 0.0210, 0.0230]
+PHASE2_SLS = [0.0090, 0.0100, 0.0110, 0.0120]
 PHASE2_HORIZONS = [6, 8, 12]
+
+# ---------------------------
+# Hard constraints
+# ---------------------------
+MIN_WIN_RATE = 0.80
+MIN_N_TRADE = 1
+
+# This is the key to hit your "2–5 trades/day across 7 symbols" target.
+# With 31 days and 7 symbols, a rough target is ~60–150 trades/month total.
+# Enforcing some per-symbol baseline avoids picking ultra-high thresholds everywhere.
+MIN_SIGNALS_PER_WEEK = 4.0
 
 USE_TWO_STAGE_TP = False
 TP1_RATIO = 0.70
@@ -91,7 +110,6 @@ def _parse_best_from_stdout(
         return row
 
     # parse BEST CONFIG line
-    # example: threshold=0.50 tp=1.50% sl=0.70% fee/side=...
     m_best = re.search(r"threshold=([0-9.]+)\s+tp=([0-9.]+)%\s+sl=([0-9.]+)%.*?horizon=(\d+)", stdout)
     if not m_best:
         row.status = "error"
@@ -137,7 +155,6 @@ def _parse_best_from_stdout(
 
 
 def _format_range(vals: List[float]) -> str:
-    # expect monotonic list with fixed step
     if not vals:
         raise ValueError("empty grid")
     if len(vals) == 1:
@@ -163,18 +180,32 @@ def _format_threshold_range(vals: List[float]) -> str:
     return f"{a:.2f}:{b:.2f}:{step:.2f}"
 
 
-def _aggregate(rows: List[ParsedBest]) -> Dict[str, Dict]:
+def _days_in_window(since: str, until: str) -> float:
+    def _parse(ts: str) -> datetime:
+        t = ts.replace("Z", "+00:00")
+        return datetime.fromisoformat(t).astimezone(timezone.utc)
+
+    a = _parse(since)
+    b = _parse(until)
+    sec = max(1.0, (b - a).total_seconds())
+    return sec / 86400.0
+
+
+def _aggregate(rows: List[ParsedBest], since: str, until: str) -> Dict[str, Dict]:
     grouped: Dict[str, List[ParsedBest]] = {}
     for r in rows:
         if r.status != "ok":
             continue
         grouped.setdefault(r.mt_filter_mode, []).append(r)
 
+    days = _days_in_window(since, until)
     summary = {}
     for mode, xs in grouped.items():
+        total_n_trade = sum(x.n_trade for x in xs)
         summary[mode] = {
             "symbols": len(xs),
-            "total_n_trade": sum(x.n_trade for x in xs),
+            "total_n_trade": total_n_trade,
+            "total_trades_per_day": round(total_n_trade / days, 6),
             "avg_win_rate": round(sum(x.win_rate for x in xs) / len(xs), 6) if xs else 0.0,
             "avg_avg_ret_pct": round(sum(x.avg_ret_pct for x in xs) / len(xs), 6) if xs else 0.0,
             "avg_mdd_daily_pct": round(sum(x.mdd_daily_pct for x in xs) / len(xs), 6) if xs else 0.0,
@@ -183,20 +214,36 @@ def _aggregate(rows: List[ParsedBest]) -> Dict[str, Dict]:
 
 
 def _write_md_best(rows: List[ParsedBest], symbols: List[str], path: Path) -> None:
-    # One line per symbol (best only)
     with open(path, "w", encoding="utf-8") as f:
         f.write("# Multi-Symbol Backtest (Best per Symbol)\n\n")
-        f.write("| symbol | mt_mode | thr | tp | sl | horizon | n_trade | win_rate | avg_ret_pct | mdd_trade_seq_pct | max_consec_losses |\n")
-        f.write("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
+        f.write(
+            f"- Constraints: min_win_rate={MIN_WIN_RATE:.2f}, min_n_trade={MIN_N_TRADE}, min_signals_per_week={MIN_SIGNALS_PER_WEEK}\n\n"
+        )
+        f.write("| symbol | mt_mode | thr | tp | sl | horizon | n_trade | signals/wk | win_rate | avg_ret_pct | pf | mdd_daily_pct | mdd_trade_seq_pct | max_consec_losses |\n")
+        f.write("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n")
         by_sym = {r.symbol: r for r in rows if r.status == "ok"}
         for s in symbols:
             r = by_sym.get(s)
             if not r:
                 continue
+            pf = "" if r.profit_factor is None else f"{r.profit_factor:.3f}"
             f.write(
                 f"| {r.symbol} | {r.mt_filter_mode} | {r.threshold:.2f} | {r.tp:.4f} | {r.sl:.4f} | {r.horizon} "
-                f"| {r.n_trade} | {r.win_rate:.3f} | {r.avg_ret_pct:.3f} | {r.mdd_trade_seq_pct:.2f} | {r.max_consec_losses} |\n"
+                f"| {r.n_trade} | {r.signals_per_week:.2f} | {r.win_rate:.3f} | {r.avg_ret_pct:.3f} | {pf} "
+                f"| {r.mdd_daily_pct:.2f} | {r.mdd_trade_seq_pct:.2f} | {r.max_consec_losses} |\n"
             )
+
+
+def _score(r: ParsedBest) -> Tuple[float, float, int]:
+    return (r.avg_ret_pct - 0.5 * r.mdd_daily_pct, r.win_rate, r.n_trade)
+
+
+def _passes_constraints(r: ParsedBest) -> bool:
+    return (
+        (r.n_trade >= MIN_N_TRADE)
+        and (r.win_rate >= MIN_WIN_RATE)
+        and (r.signals_per_week >= MIN_SIGNALS_PER_WEEK)
+    )
 
 
 def _run_symbol_best(
@@ -309,9 +356,6 @@ def run_phase1_by_symbol(args) -> int:
 
     symbols: List[str] = args.symbols
 
-    # For phase1 we need choose best between mt modes; we run 2 jobs per symbol (daily_guard/off), each with full grid.
-    # Horizons: because horizon isn't a grid input in backtest script (it's a single arg),
-    # we run separate jobs per horizon too; still small: symbols * mt_modes * horizons = 7*2*2=28 jobs.
     tasks = []
     for symbol in symbols:
         for mt_mode in PHASE1_MT_MODES:
@@ -384,16 +428,21 @@ def run_phase1_by_symbol(args) -> int:
                 )
                 rows.append(r)
 
-    # pick best per symbol across (mt_mode, horizon)
     best_by_symbol: Dict[str, ParsedBest] = {}
     for s in symbols:
-        ok = [r for r in rows if r.symbol == s and r.status == "ok"]
-        if not ok:
+        all_ok = [r for r in rows if r.symbol == s and r.status == "ok"]
+        if not all_ok:
             continue
-        # use objective score from backtest script? not printed; use a simple proxy:
-        # maximize avg_ret_pct - 0.5*mdd_daily_pct, then win_rate, then n_trade
-        ok.sort(key=lambda r: (r.avg_ret_pct - 0.5 * r.mdd_daily_pct, r.win_rate, r.n_trade), reverse=True)
-        best_by_symbol[s] = ok[0]
+
+        strict = [r for r in all_ok if _passes_constraints(r)]
+        if strict:
+            strict.sort(key=_score, reverse=True)
+            best_by_symbol[s] = strict[0]
+        else:
+            all_ok.sort(key=_score, reverse=True)
+            best = all_ok[0]
+            best.reject_reasons = (best.reject_reasons + " " if best.reject_reasons else "") + "no_feasible_point_for_constraints"
+            best_by_symbol[s] = best
 
     best_path = REPORT_ROOT / "backtest_phase1_best.json"
     with open(best_path, "w", encoding="utf-8") as f:
@@ -401,7 +450,7 @@ def run_phase1_by_symbol(args) -> int:
 
     agg_path = REPORT_ROOT / "backtest_phase1_aggregate.json"
     with open(agg_path, "w", encoding="utf-8") as f:
-        json.dump(_aggregate(list(best_by_symbol.values())), f, indent=2)
+        json.dump(_aggregate(list(best_by_symbol.values()), args.since, args.until), f, indent=2)
 
     md_path = REPORT_ROOT / "backtest_phase1_top.md"
     _write_md_best(list(best_by_symbol.values()), symbols, md_path)
@@ -423,11 +472,7 @@ def run_phase2_by_symbol(args) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     symbols: List[str] = args.symbols
-    tasks = []
-    for s in symbols:
-        if s not in phase1_best:
-            continue
-        tasks.append(s)
+    tasks = [s for s in symbols if s in phase1_best]
 
     total = len(tasks)
     print(f"[phase2] by_symbol jobs={total}, workers={args.workers}", flush=True)
@@ -438,8 +483,9 @@ def run_phase2_by_symbol(args) -> int:
         thr = float(phase1_best[symbol]["threshold"])
         mt_mode = str(phase1_best[symbol]["mt_filter_mode"])
 
-        # phase2 still has horizon as a grid; run separate job per horizon and take best
-        best_local: Optional[ParsedBest] = None
+        best_strict: Optional[ParsedBest] = None
+        best_any: Optional[ParsedBest] = None
+
         for h in PHASE2_HORIZONS:
             r = _run_symbol_best(
                 symbol=symbol,
@@ -463,15 +509,21 @@ def run_phase2_by_symbol(args) -> int:
             )
             if r.status != "ok":
                 continue
-            if best_local is None:
-                best_local = r
-            else:
-                cur = (r.avg_ret_pct - 0.5 * r.mdd_daily_pct, r.win_rate, r.n_trade)
-                prv = (best_local.avg_ret_pct - 0.5 * best_local.mdd_daily_pct, best_local.win_rate, best_local.n_trade)
-                if cur > prv:
-                    best_local = r
 
-        return best_local or ParsedBest(
+            if best_any is None or _score(r) > _score(best_any):
+                best_any = r
+
+            if _passes_constraints(r):
+                if best_strict is None or _score(r) > _score(best_strict):
+                    best_strict = r
+
+        if best_strict is not None:
+            return best_strict
+        if best_any is not None:
+            best_any.reject_reasons = (best_any.reject_reasons + " " if best_any.reject_reasons else "") + "no_feasible_point_for_constraints"
+            return best_any
+
+        return ParsedBest(
             status="error",
             symbol=symbol,
             mt_filter_mode=mt_mode,
@@ -525,7 +577,7 @@ def run_phase2_by_symbol(args) -> int:
 
     agg_path = REPORT_ROOT / "backtest_phase2_aggregate.json"
     with open(agg_path, "w", encoding="utf-8") as f:
-        json.dump(_aggregate(list(best_by_symbol.values())), f, indent=2)
+        json.dump(_aggregate(list(best_by_symbol.values()), args.since, args.until), f, indent=2)
 
     md_path = REPORT_ROOT / "backtest_phase2_top.md"
     _write_md_best(list(best_by_symbol.values()), symbols, md_path)

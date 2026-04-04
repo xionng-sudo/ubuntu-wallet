@@ -1,31 +1,14 @@
 # Multi-symbol configuration for ubuntu-wallet
 #
-# Each symbol has isolated data and model directories while sharing the same
-# codebase and pipeline.  Isolation is achieved purely through per-symbol
-# directory scoping:
-#
-#   data/<SYMBOL>/klines_1h.json
-#   data/<SYMBOL>/klines_4h.json
-#   data/<SYMBOL>/klines_1d.json
-#   data/<SYMBOL>/predictions_log.jsonl
-#   data/<SYMBOL>/reports/
-#
-#   models/<SYMBOL>/current/          <- active model artifacts
-#   models/<SYMBOL>/archive/          <- versioned snapshots
-#   models/<SYMBOL>/registry.json     <- model registry
-#
-# Phased rollout:
-#   Phase 1 (initial active): BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT
-#   Phase 2 (staged):         XRPUSDT, DOGEUSDT, ADAUSDT
-#
 # Per-symbol fields:
-#   enabled      - set false to exclude symbol from batch runs / systemd services
-#   interval     - primary kline interval used for training and inference
-#   threshold    - minimum per-class probability to enter a trade (p_enter)
-#   tp           - take-profit fraction (e.g. 0.0175 = 1.75%)
-#   sl           - stop-loss fraction   (e.g. 0.009  = 0.90%)
-#   horizon      - forward look-ahead bars for label generation
-#   calibration  - probability calibration method: isotonic | sigmoid | none
+#   enabled        - set false to exclude symbol from batch runs / services
+#   interval       - primary kline interval used for training and inference
+#   mt_filter_mode - multi-timeframe trend filter mode: off|daily_guard|...
+#   threshold      - minimum per-class probability to enter a trade (p_enter)
+#   tp             - take-profit fraction (e.g. 0.0230 = 2.30%)
+#   sl             - stop-loss fraction   (e.g. 0.0090 = 0.90%)
+#   horizon        - forward look-ahead bars for label generation
+#   calibration    - probability calibration method: isotonic | sigmoid | none
 
 symbols:
 
@@ -34,37 +17,41 @@ symbols:
   BTCUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.84
-    tp: 0.0175
-    sl: 0.009
+    mt_filter_mode: "off"
+    threshold: 0.67
+    tp: 0.0230
+    sl: 0.0090
     horizon: 12
     calibration: "isotonic"
 
   ETHUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.58
-    tp: 0.0175
-    sl: 0.009
-    horizon: 6
+    mt_filter_mode: "off"
+    threshold: 0.67
+    tp: 0.0230
+    sl: 0.0110
+    horizon: 12
     calibration: "isotonic"
 
   SOLUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.84
-    tp: 0.020
-    sl: 0.010
-    horizon: 12
+    mt_filter_mode: "off"
+    threshold: 0.67
+    tp: 0.0230
+    sl: 0.0120
+    horizon: 6
     calibration: "isotonic"
 
   BNBUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.84
-    tp: 0.0175
-    sl: 0.009
-    horizon: 12
+    mt_filter_mode: "daily_guard"
+    threshold: 0.73
+    tp: 0.0230
+    sl: 0.0090
+    horizon: 8
     calibration: "isotonic"
 
   # ---------- Phase 2 ----------
@@ -72,26 +59,29 @@ symbols:
   XRPUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.84
-    tp: 0.020
-    sl: 0.010
+    mt_filter_mode: "off"
+    threshold: 0.67
+    tp: 0.0230
+    sl: 0.0090
     horizon: 12
     calibration: "isotonic"
 
   DOGEUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.84
-    tp: 0.020
-    sl: 0.010
-    horizon: 12
+    mt_filter_mode: "off"
+    threshold: 0.67
+    tp: 0.0230
+    sl: 0.0090
+    horizon: 8
     calibration: "isotonic"
 
   ADAUSDT:
     enabled: true
     interval: "1h"
-    threshold: 0.84
-    tp: 0.020
-    sl: 0.010
-    horizon: 12
+    mt_filter_mode: "daily_guard"
+    threshold: 0.73
+    tp: 0.0230
+    sl: 0.0110
+    horizon: 6
     calibration: "isotonic"

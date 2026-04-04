@@ -35,11 +35,6 @@ TESTNET_BASE_URL = "https://testnet.binancefuture.com"
 DEFAULT_RECV_WINDOW = 5000  # ms
 
 
-# ---------------------------------------------------------------------------
-# Exceptions
-# ---------------------------------------------------------------------------
-
-
 class BinanceAPIError(RuntimeError):
     """Raised when Binance REST API returns a negative code payload."""
 
@@ -48,11 +43,6 @@ class BinanceAPIError(RuntimeError):
         self.msg = msg
         self.status_code = status_code
         super().__init__(f"BinanceAPIError code={code} msg={msg!r} http={status_code}")
-
-
-# ---------------------------------------------------------------------------
-# Symbol precision / filter metadata
-# ---------------------------------------------------------------------------
 
 
 class SymbolInfo:
@@ -117,11 +107,6 @@ class SymbolInfo:
             )
 
 
-# ---------------------------------------------------------------------------
-# REST client
-# ---------------------------------------------------------------------------
-
-
 class BinanceFuturesClient:
     """
     Minimal Binance USDT-M Futures REST client.
@@ -148,10 +133,6 @@ class BinanceFuturesClient:
         self.base_url = TESTNET_BASE_URL if env == "testnet" else PROD_BASE_URL
         self._session = session or requests.Session()
         self._exchange_info_cache: Optional[Dict[str, SymbolInfo]] = None
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
 
     def _sign(self, params: Dict[str, Any]) -> str:
         query = urllib.parse.urlencode(params)
@@ -216,10 +197,6 @@ class BinanceFuturesClient:
             raise BinanceAPIError(-1, str(data)[:200], r.status_code)
         return data
 
-    # ------------------------------------------------------------------
-    # Public endpoints
-    # ------------------------------------------------------------------
-
     def get_server_time(self) -> int:
         """GET /fapi/v1/time — returns serverTime in ms."""
         data = self._get_public("/fapi/v1/time")
@@ -233,10 +210,6 @@ class BinanceFuturesClient:
         """GET /fapi/v1/premiumIndex — returns markPrice as float."""
         data = self._get_public("/fapi/v1/premiumIndex", {"symbol": symbol})
         return float(data["markPrice"])
-
-    # ------------------------------------------------------------------
-    # Symbol info / precision cache
-    # ------------------------------------------------------------------
 
     def load_exchange_info(self) -> Dict[str, SymbolInfo]:
         """
@@ -255,10 +228,23 @@ class BinanceFuturesClient:
     def _parse_exchange_info(self) -> Dict[str, SymbolInfo]:
         raw = self.get_exchange_info()
         result: Dict[str, SymbolInfo] = {}
+
         for sym_raw in raw.get("symbols", []):
-            si = SymbolInfo(sym_raw)
-            result[si.symbol] = si
-        logger.info("[BinanceFuturesClient] Loaded %d symbols from exchangeInfo", len(result))
+            try:
+                si = SymbolInfo(sym_raw)
+                result[si.symbol] = si
+            except Exception as exc:
+                logger.warning(
+                    "[BinanceFuturesClient] Skipping symbol %s due to invalid exchangeInfo: %s",
+                    sym_raw.get("symbol"),
+                    exc,
+                )
+                continue
+
+        logger.info(
+            "[BinanceFuturesClient] Loaded %d valid symbols from exchangeInfo",
+            len(result),
+        )
         return result
 
     def get_symbol_info(self, symbol: str) -> SymbolInfo:
@@ -279,10 +265,6 @@ class BinanceFuturesClient:
         """Round price down to tickSize."""
         si = self.get_symbol_info(symbol)
         return si.round_price(price)
-
-    # ------------------------------------------------------------------
-    # Signed (private) endpoints
-    # ------------------------------------------------------------------
 
     def get_account(self) -> Dict[str, Any]:
         """GET /fapi/v2/account"""
@@ -341,10 +323,6 @@ class BinanceFuturesClient:
             params["symbol"] = symbol
         return self._signed_get("/fapi/v1/openOrders", params)
 
-    # ------------------------------------------------------------------
-    # High-level helpers
-    # ------------------------------------------------------------------
-
     def place_market_order(
         self,
         symbol: str,
@@ -355,16 +333,6 @@ class BinanceFuturesClient:
     ) -> Dict[str, Any]:
         """
         Place a MARKET order with quantity derived from notional USDT.
-
-        Args:
-            symbol:        e.g. "ETHUSDT"
-            side:          "BUY" or "SELL"
-            qty_usdt:      notional in USDT
-            current_price: approximate current price for qty calculation
-            reduce_only:   if True, adds reduceOnly=true (for closing positions)
-
-        Returns:
-            Binance order response dict
         """
         if current_price <= 0:
             raise ValueError(f"current_price must be positive, got {current_price}")
@@ -398,17 +366,7 @@ class BinanceFuturesClient:
     ) -> Dict[str, Any]:
         """
         Place a reduce-only MARKET order to close an existing position.
-
-        Args:
-            symbol:            e.g. "ETHUSDT"
-            position_side_str: "LONG" or "SHORT" (the side currently held)
-            qty_usdt:          notional of the position (USDT)
-            current_price:     approximate current market price
-
-        Returns:
-            Binance order response dict
         """
-        # To close a LONG we send SELL; to close a SHORT we send BUY.
         close_side = "SELL" if position_side_str == "LONG" else "BUY"
         return self.place_market_order(
             symbol=symbol,
