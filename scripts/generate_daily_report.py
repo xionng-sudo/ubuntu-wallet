@@ -468,6 +468,79 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
 
     effective_symbol = symbol if symbol is not None else args.symbol
 
+    # ---------------------------------------------------------------------------
+    # Resolve critical trading parameters
+    # In symbol mode: CLI overrides YAML; missing in both → error (no built-in fallback)
+    # In legacy mode: CLI required for threshold/tp/sl; built-in defaults for horizon/mt_filter_mode
+    # ---------------------------------------------------------------------------
+    config_sources: Optional[Dict[str, str]] = None
+
+    if effective_symbol:
+        # Symbol mode – strict YAML/CLI resolution
+        try:
+            sp = _get_symbol_paths_module()
+        except ImportError as exc:
+            print(f"ERROR: could not import symbol_paths: {exc}", flush=True)
+            return 1
+
+        raw_yaml: Dict[str, Any] = sp._load_symbols_config().get(effective_symbol, {})
+
+        errors: List[str] = []
+        config_sources = {}
+
+        def _resolve_param(cli_val, yaml_key: str, display_name: str):
+            yaml_val = raw_yaml.get(yaml_key)
+            if cli_val is not None:
+                config_sources[display_name] = "cli"
+                return cli_val
+            if yaml_val is not None:
+                config_sources[display_name] = "yaml"
+                return yaml_val
+            errors.append(
+                f"{display_name}: missing from both CLI (--{display_name.replace('_', '-')}) "
+                f"and YAML config for symbol={effective_symbol}"
+            )
+            return None
+
+        eff_threshold = _resolve_param(args.threshold, "threshold", "threshold")
+        eff_tp = _resolve_param(args.tp, "tp", "tp")
+        eff_sl = _resolve_param(args.sl, "sl", "sl")
+        eff_horizon = _resolve_param(args.horizon_bars, "horizon", "horizon_bars")
+        eff_mt_filter_mode = _resolve_param(args.mt_filter_mode, "mt_filter_mode", "mt_filter_mode")
+
+        if errors:
+            for err in errors:
+                print(f"ERROR [{effective_symbol}] {err}", flush=True)
+            return 1
+
+        print(
+            f"[config] {effective_symbol}: "
+            f"threshold={eff_threshold} ({config_sources['threshold']}), "
+            f"tp={eff_tp} ({config_sources['tp']}), "
+            f"sl={eff_sl} ({config_sources['sl']}), "
+            f"horizon_bars={eff_horizon} ({config_sources['horizon_bars']}), "
+            f"mt_filter_mode={eff_mt_filter_mode} ({config_sources['mt_filter_mode']})",
+            flush=True,
+        )
+    else:
+        # Legacy explicit mode – threshold/tp/sl must be supplied via CLI
+        missing = [
+            name for name, val in [("--threshold", args.threshold), ("--tp", args.tp), ("--sl", args.sl)]
+            if val is None
+        ]
+        if missing:
+            print(
+                f"ERROR: {', '.join(missing)} must be provided in explicit (no-symbol) mode",
+                flush=True,
+            )
+            return 1
+
+        eff_threshold = args.threshold
+        eff_tp = args.tp
+        eff_sl = args.sl
+        eff_horizon = args.horizon_bars if args.horizon_bars is not None else 6
+        eff_mt_filter_mode = args.mt_filter_mode if args.mt_filter_mode is not None else "layered"
+
     if effective_symbol:
         log_path, data_dir, report_dir = _resolve_symbol_paths(
             symbol=effective_symbol,
@@ -541,18 +614,21 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
         trend_4h_list=trend_4h_list,
         ts_1d=ts_1d,
         trend_1d_list=trend_1d_list,
-        threshold=args.threshold,
-        tp_pct=args.tp,
-        sl_pct=args.sl,
+        threshold=eff_threshold,
+        tp_pct=eff_tp,
+        sl_pct=eff_sl,
         fee=args.fee,
         slippage=args.slippage,
-        horizon=args.horizon_bars,
+        horizon=eff_horizon,
         tie_breaker=args.tie_breaker,
         timeout_exit=args.timeout_exit,
         mt_filter=mt_filter,
-        mt_filter_mode=args.mt_filter_mode,
+        mt_filter_mode=eff_mt_filter_mode,
         model_version_override=args.model_version,
     )
+
+    if config_sources:
+        report["params"]["config_source"] = config_sources
 
     os.makedirs(report_dir, exist_ok=True)
 
@@ -618,12 +694,32 @@ def main() -> int:
     ap.add_argument("--active-model", default="event_v3")
     ap.add_argument("--model-version", default=None, help="Override model_version in report")
 
-    ap.add_argument("--tp", type=float, required=True, help="Take-profit fraction, e.g. 0.0175")
-    ap.add_argument("--sl", type=float, required=True, help="Stop-loss fraction, e.g. 0.007")
-    ap.add_argument("--threshold", type=float, required=True, help="Probability threshold, e.g. 0.55")
+    ap.add_argument(
+        "--tp",
+        type=float,
+        default=None,
+        help="Take-profit fraction, e.g. 0.0175 (required in explicit mode; overrides YAML in symbol mode)",
+    )
+    ap.add_argument(
+        "--sl",
+        type=float,
+        default=None,
+        help="Stop-loss fraction, e.g. 0.007 (required in explicit mode; overrides YAML in symbol mode)",
+    )
+    ap.add_argument(
+        "--threshold",
+        type=float,
+        default=None,
+        help="Probability threshold, e.g. 0.55 (required in explicit mode; overrides YAML in symbol mode)",
+    )
     ap.add_argument("--fee", type=float, default=0.0004)
     ap.add_argument("--slippage", type=float, default=0.0)
-    ap.add_argument("--horizon-bars", type=int, default=6)
+    ap.add_argument(
+        "--horizon-bars",
+        type=int,
+        default=None,
+        help="Horizon bars (overrides YAML in symbol mode; defaults to 6 in explicit mode)",
+    )
     ap.add_argument("--tie-breaker", choices=["SL", "TP"], default="SL")
     ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
 
@@ -631,8 +727,11 @@ def main() -> int:
     ap.add_argument(
         "--mt-filter-mode",
         choices=["off", "long_only", "symmetric", "strict", "relaxed", "regime", "conflict", "layered"],
-        default="layered",
-        help="Unified MT filter mode.",
+        default=None,
+        help=(
+            "Unified MT filter mode (overrides YAML in symbol mode; "
+            "defaults to 'layered' in explicit mode)"
+        ),
     )
 
     ap.add_argument(
