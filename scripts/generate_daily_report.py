@@ -488,7 +488,7 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
         errors: List[str] = []
         config_sources = {}
 
-        def _resolve_param(cli_val, yaml_key: str, display_name: str):
+        def _resolve_param(cli_val: Any, yaml_key: str, display_name: str) -> Any:
             yaml_val = raw_yaml.get(yaml_key)
             if cli_val is not None:
                 config_sources[display_name] = "cli"
