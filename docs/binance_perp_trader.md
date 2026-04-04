@@ -277,13 +277,39 @@ python scripts/live_trader_perp_binance.py --mode live --env prod --symbol ETHUS
 
 ## 13. 策略过滤与可选层
 
-### 13.1 分层 gate（layered gate）
+### 13.1 统一多周期过滤（mt_filter_mode）— v1.1 新增
+
+从 v1.1 起，`--mt-filter-mode` 参数支持与回测/模拟完全一致的 `apply_mt_filter_with_context` 语义。  
+优先级：**CLI > `configs/symbols.yaml` 中该币的 `mt_filter_mode` 字段 > 内置默认值（`daily_guard`）**。
+
+```bash
+# 省略 --mt-filter-mode → 自动从 configs/symbols.yaml 读取 BTCUSDT 的 mt_filter_mode
+python scripts/live_trader_perp_binance.py --symbol BTCUSDT
+
+# 显式指定（优先级最高，覆盖 YAML）
+python scripts/live_trader_perp_binance.py --symbol BTCUSDT --mt-filter-mode off
+
+# --all-symbols：每个币自动从 YAML 读取其 mt_filter_mode，启动时打印来源
+python scripts/live_trader_perp_binance.py --all-symbols
+# 输出示例：
+#   [config] BTCUSDT mt_filter_mode=off (YAML)
+#   [config] BNBUSDT mt_filter_mode=daily_guard (YAML)
+#   [config] ADAUSDT mt_filter_mode=daily_guard (YAML)
+```
+
+可选值：`off` | `long_only` | `symmetric` | `strict` | `relaxed` | `trend_guard` | `daily_guard` | `conflict` | `regime` | `layered`
+
+**与回测/模拟的口径对齐**：当 `--mt-filter-mode` 设置（或从 YAML 读取）时，过滤全部走 `apply_mt_filter_with_context`，与 `backtest_event_v3_http.py` 和 `live_trader_perp_simulated.py` 完全等价。
+
+### 13.2 分层 gate（legacy，向后兼容）
 
 ```bash
 python scripts/live_trader_perp_binance.py --symbol ETHUSDT --use-layered-gate
 ```
 
-### 13.2 15m 执行确认层
+> ⚠️ 当 `--mt-filter-mode` 已设置（CLI 或 YAML）时，`--use-layered-gate` 不再影响过滤逻辑。建议优先使用 `--mt-filter-mode layered` 代替。
+
+### 13.3 15m 执行确认层
 
 ```bash
 python scripts/live_trader_perp_binance.py --symbol ETHUSDT --use-15m-confirm

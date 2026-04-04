@@ -78,12 +78,14 @@ import requests
 # ---------------------------------------------------------------------------
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, ".."))
-if SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, SCRIPT_DIR)
+# Ensure both repo root (for 'scripts.*' package imports) and script dir are on path.
+for _p in (REPO_ROOT, SCRIPT_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from mt_trend_utils import MTTrendContext  # type: ignore
 
-from symbol_config import (  # type: ignore
+from scripts.symbol_config import (  # type: ignore
     get_symbol_config,
     list_enabled_symbols,
     data_dir as _data_dir,
@@ -811,8 +813,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--mt-filter-mode",
         choices=["off", "long_only", "symmetric", "strict", "relaxed", "trend_guard",
                  "daily_guard", "conflict", "regime", "layered"],
-        default=_PIPELINE_DEFAULTS["mt_filter_mode"],
-        help="Multi-timeframe filter mode.  Default: %(default)s.",
+        default=None,  # None so YAML per-symbol value takes effect when CLI flag is omitted.
+        help=(
+            "Multi-timeframe filter mode.  "
+            "Priority: CLI > configs/symbols.yaml per-symbol > built-in default "
+            f"({_PIPELINE_DEFAULTS['mt_filter_mode']!r})."
+        ),
     )
     ap.add_argument(
         "--side-source",
@@ -890,6 +896,18 @@ def run_for_symbol(symbol: str, args: argparse.Namespace) -> None:
     threshold = args.threshold if args.threshold is not None else float(cfg.get("threshold", 0.65))
     interval = args.interval if args.interval is not None else str(cfg.get("interval", "1h"))
 
+    # mt_filter_mode: CLI > YAML > built-in default
+    if args.mt_filter_mode is not None:
+        mt_filter_mode = args.mt_filter_mode
+        mt_mode_src = "CLI"
+    elif cfg.get("mt_filter_mode"):
+        mt_filter_mode = str(cfg["mt_filter_mode"])
+        mt_mode_src = "YAML"
+    else:
+        mt_filter_mode = _PIPELINE_DEFAULTS["mt_filter_mode"]
+        mt_mode_src = "default"
+    print(f"[sim:{symbol}] mt_filter_mode={mt_filter_mode} ({mt_mode_src})", flush=True)
+
     sym_data_dir = _data_dir(symbol, base_data_dir=args.data_base_dir)
     output_equity = args.output_equity  # None → derived per-symbol inside run_simulation
 
@@ -911,7 +929,7 @@ def run_for_symbol(symbol: str, args: argparse.Namespace) -> None:
         request_delay_s=args.delay,
         interval=interval,
         output_equity_path=output_equity,
-        mt_filter_mode=args.mt_filter_mode,
+        mt_filter_mode=mt_filter_mode,
         side_source=args.side_source,
         timeout_exit=args.timeout_exit,
         tie_breaker=args.tie_breaker,

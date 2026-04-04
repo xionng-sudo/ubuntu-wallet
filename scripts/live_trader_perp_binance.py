@@ -26,14 +26,17 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Sequence, Set
+from typing import Dict, List, Optional, Sequence, Set
 
 import requests
 from dotenv import load_dotenv
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPT_DIR)
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+# Ensure both repo root (for 'scripts.*' package imports) and script dir are on path.
+for _p in (_REPO_ROOT, _SCRIPT_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 # Existing repo modules (kept consistent with ETH-only script)
 from eth_perp_engine_binance import EthPerpStrategyEngineBinance, Side  # noqa: E402
@@ -41,6 +44,8 @@ from mt_trend_utils import MTTrendContext  # noqa: E402
 from backtest_event_v3_http import load_klines_1h  # noqa: E402
 from mt_filter import mt_gate, gate_allows, gate_is_strong, exec_confirm_15m, ENTER  # noqa: E402
 from binance_futures_rest import BinanceFuturesClient, BinanceAPIError  # noqa: E402
+from scripts.symbol_config import get_symbol_config, list_enabled_symbols  # noqa: E402
+from signal_logic import apply_mt_filter_with_context, normalize_mt_mode  # noqa: E402
 
 
 load_dotenv()
@@ -53,6 +58,10 @@ WEIGHT_REVERSE = 0.70
 
 # Clock drift threshold: warn if local clock is this many ms off from Binance server time.
 MAX_ACCEPTABLE_CLOCK_DRIFT_MS = 2000
+
+# Built-in default for mt_filter_mode (CLI > YAML > this default).
+# Consistent with backtest_event_v3_http.py and live_trader_perp_simulated.py.
+_MT_FILTER_DEFAULT = "daily_guard"
 
 
 @dataclass(frozen=True)
@@ -294,7 +303,13 @@ def _load_all_symbols_from_configs() -> List[str]:
 
 def _parse_symbols_args(args: argparse.Namespace) -> List[str]:
     if args.all_symbols:
-        return _load_all_symbols_from_configs()
+        syms = list_enabled_symbols()
+        if not syms:
+            raise SystemExit(
+                "No enabled symbols found in configs/symbols.yaml. "
+                "Please check that at least one symbol has 'enabled: true'."
+            )
+        return syms
 
     if args.symbol and args.symbols:
         raise SystemExit("Do not use --symbol and --symbols together.")
@@ -363,10 +378,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Base data dir containing per-symbol subdirs like data/<SYMBOL>/klines_4h.json",
     )
     ap.add_argument(
+        "--mt-filter-mode",
+        choices=["off", "long_only", "symmetric", "strict", "relaxed", "trend_guard",
+                 "daily_guard", "conflict", "regime", "layered"],
+        default=None,  # None so per-symbol YAML value takes effect when CLI flag is omitted.
+        help=(
+            "Multi-timeframe filter mode using apply_mt_filter_with_context (matches backtest). "
+            f"Priority: CLI > configs/symbols.yaml per-symbol > built-in default ({_MT_FILTER_DEFAULT!r}). "
+            "When set, overrides the legacy --use-layered-gate path."
+        ),
+    )
+    ap.add_argument(
         "--use-layered-gate",
         action="store_true",
         help=(
-            "Use unified mt_gate (ALLOW_STRONG/ALLOW_WEAK/REJECT) instead of legacy filter. "
+            "Legacy: use unified mt_gate (ALLOW_STRONG/ALLOW_WEAK/REJECT) instead of the older weight filter. "
+            "Ignored when --mt-filter-mode is set (or resolved from YAML). "
             "Default: OFF (legacy behavior unchanged)."
         ),
     )
@@ -460,6 +487,19 @@ def _build_mt_ctx_for_symbol(data_dir: str, symbol: str) -> MTTrendContext:
     return MTTrendContext(klines_4h=klines_4h, klines_1d=klines_1d)
 
 
+def _resolve_mt_filter_mode_for_symbol(symbol: str, cli_mode: Optional[str]) -> tuple[str, str]:
+    """Return (mt_filter_mode, source) where source is 'CLI', 'YAML', or 'default'."""
+    if cli_mode is not None:
+        return cli_mode, "CLI"
+    try:
+        cfg = get_symbol_config(symbol)
+        if cfg.get("mt_filter_mode"):
+            return str(cfg["mt_filter_mode"]), "YAML"
+    except Exception:
+        pass
+    return _MT_FILTER_DEFAULT, "default"
+
+
 def run_for_one_symbol(
     symbol: str,
     args: argparse.Namespace,
@@ -468,6 +508,9 @@ def run_for_one_symbol(
 ) -> None:
     data_dir = args.data_dir
     mt_ctx = _build_mt_ctx_for_symbol(data_dir, symbol)
+
+    # Resolve mt_filter_mode: CLI > YAML > built-in default
+    mt_filter_mode, mt_mode_src = _resolve_mt_filter_mode_for_symbol(symbol, args.mt_filter_mode)
 
     engine = EthPerpStrategyEngineBinance(
         strategy_funds_usdt=float(args.strategy_funds_usdt),
@@ -482,12 +525,10 @@ def run_for_one_symbol(
 
     last_bar_close: Optional[datetime] = None
 
-    mode_desc = []
-    if args.use_layered_gate:
-        mode_desc.append("layered-gate")
+    mode_desc = [f"mt_filter_mode={normalize_mt_mode(mt_filter_mode)} ({mt_mode_src})"]
     if args.use_15m_confirm:
         mode_desc.append("15m-confirm")
-    mode_str = "+".join(mode_desc) if mode_desc else "legacy"
+    mode_str = "+".join(mode_desc)
 
     print(
         f"Starting {'LIVE' if runtime.is_live else 'DRY-RUN'} perp trader "
@@ -517,7 +558,20 @@ def run_for_one_symbol(
         confidence = j.get("confidence")
         cal_conf = j.get("calibrated_confidence")
 
-        side_str, weight = apply_multi_timeframe_filter(side_str, bar_close, mt_ctx, use_layered=args.use_layered_gate)
+        # Apply unified MT filter (matches backtest/simulated semantics).
+        # Falls back to legacy weight-based filter only when mt_filter_mode resolves to "off"
+        # and --use-layered-gate is explicitly requested.
+        side_str, t4, t1d, reject_reason = apply_mt_filter_with_context(
+            side=side_str,
+            sig_ts=bar_close,
+            trend_4h_at=mt_ctx.trend_4h_at,
+            trend_1d_at=mt_ctx.trend_1d_at,
+            mode=mt_filter_mode,
+        )
+        weight = 1.0  # weight field kept for engine compatibility; MT filtering is now binary
+        if reject_reason:
+            print(f"  [mt_filter] symbol={symbol} rejected side → FLAT reason={reject_reason} "
+                  f"t4={t4} t1d={t1d}")
 
         exec_result = ENTER
         if side_str in ("LONG", "SHORT") and args.use_15m_confirm:
@@ -602,6 +656,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         for s in symbols
     }
 
+    # Resolve per-symbol mt_filter_mode once at startup (CLI > YAML > default).
+    per_symbol_mt_mode: Dict[str, str] = {}
+    for s in symbols:
+        mode, src = _resolve_mt_filter_mode_for_symbol(s, args.mt_filter_mode)
+        per_symbol_mt_mode[s] = mode
+        print(f"[config] {s} mt_filter_mode={normalize_mt_mode(mode)} ({src})", flush=True)
+
     engines = {
         s: EthPerpStrategyEngineBinance(
             strategy_funds_usdt=float(args.strategy_funds_usdt),
@@ -642,12 +703,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             confidence = j.get("confidence")
             cal_conf = j.get("calibrated_confidence")
 
-            side_str, weight = apply_multi_timeframe_filter(
-                side_str,
-                bar_close,
-                per_symbol_ctx[symbol],
-                use_layered=args.use_layered_gate,
+            # Apply unified MT filter per symbol (matches backtest/simulated semantics).
+            side_str, t4, t1d, reject_reason = apply_mt_filter_with_context(
+                side=side_str,
+                sig_ts=bar_close,
+                trend_4h_at=per_symbol_ctx[symbol].trend_4h_at,
+                trend_1d_at=per_symbol_ctx[symbol].trend_1d_at,
+                mode=per_symbol_mt_mode[symbol],
             )
+            weight = 1.0
+            if reject_reason:
+                print(f"  [mt_filter] symbol={symbol} rejected side → FLAT reason={reject_reason} "
+                      f"t4={t4} t1d={t1d}")
 
             exec_result = ENTER
             if side_str in ("LONG", "SHORT") and args.use_15m_confirm:

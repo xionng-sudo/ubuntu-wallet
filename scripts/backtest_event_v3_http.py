@@ -30,12 +30,17 @@ import os as _os
 import sys as _sys
 
 _SCRIPT_DIR = _os.path.dirname(_os.path.abspath(__file__))
-if _SCRIPT_DIR not in _sys.path:
-    _sys.path.insert(0, _SCRIPT_DIR)
+_REPO_ROOT = _os.path.abspath(_os.path.join(_SCRIPT_DIR, ".."))
+# Ensure both repo root (for 'scripts.*' package imports) and script dir are on path.
+for _p in (_REPO_ROOT, _SCRIPT_DIR):
+    if _p not in _sys.path:
+        _sys.path.insert(0, _p)
 
 # Optional: load per-symbol config from configs/symbols.yaml
+# Use package import (scripts.symbol_config) to avoid name-collision with any
+# top-level 'symbol_config' module that may exist on sys.path.
 try:
-    from symbol_config import get_symbol_config as _get_symbol_config  # type: ignore
+    from scripts.symbol_config import get_symbol_config as _get_symbol_config  # type: ignore
 except ImportError:
     _get_symbol_config = None  # type: ignore
 
@@ -804,9 +809,13 @@ def main() -> int:
     if args.symbol is not None and _get_symbol_config is not None:
         try:
             _yaml_cfg = _get_symbol_config(args.symbol)
+            _sc_file = getattr(sys.modules.get(_get_symbol_config.__module__, None), "__file__", "<unknown>")
+            print(f"[config:debug] loaded symbol config for {args.symbol} from {_sc_file}", flush=True)
         except Exception as exc:
             print(f"WARNING: could not load symbol config for {args.symbol}: {exc}", file=sys.stderr)
             _yaml_cfg = {}
+    elif _get_symbol_config is None:
+        print("[config:debug] scripts.symbol_config unavailable; using CLI/default values only", flush=True)
 
     def _resolve_str(attr: str, yaml_key: str, default_val: str) -> str:
         cli_val = getattr(args, attr)
