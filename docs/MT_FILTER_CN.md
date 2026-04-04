@@ -252,6 +252,17 @@ if gate_allows(gate_result):
 | `report_threshold_grid.py` | `symmetric` | 无变化 |
 | `generate_daily_report.py` | `conflict` | 无变化 |
 | `live_trader_eth_perp_binance.py` | legacy | 无变化（`--use-layered-gate` 需显式开启） |
+| `live_trader_perp_binance.py` | legacy + mt_filter_mode hard gate | legacy 过滤器照常计算 (side, weight)；`mt_filter_mode`（默认 `daily_guard`，CLI > YAML > 内置默认）作为额外硬 gate 在后执行，被拒绝时将 side 强制为 FLAT、weight 置 0 |
+
+**`live_trader_perp_binance.py` 的过滤执行顺序（保守兼容方式）**：
+
+1. `apply_multi_timeframe_filter`（legacy 过滤器）照常执行，计算出 `(side_str, weight)`，保留 WEIGHT_NEUTRAL / WEIGHT_REVERSE 的权重语义。
+2. `apply_mt_filter_with_context`（mt_filter_mode 硬 gate）在 legacy 过滤器之后执行。
+   - 若 mt_filter_mode 拒绝：`side_str='FLAT'`，`weight=0.0`。
+   - 若 mt_filter_mode 放行：保留 legacy 过滤器计算的 weight，**不覆盖**。
+3. `--use-layered-gate` 仍可选，用于替换 legacy 过滤器内部逻辑，两者独立不冲突。
+
+**mt_filter_mode 优先级**：CLI `--mt-filter-mode` > `configs/symbols.yaml` 中的 `mt_filter_mode` > 内置默认值 `daily_guard`。
 
 **新 `layered` 模式与 `symmetric` 模式的区别**：
 - `layered` 比 `symmetric` 稍宽松：允许「4h 中性 + 1d 同向」的弱放行
@@ -270,11 +281,12 @@ if gate_allows(gate_result):
 | 阈值网格 `report_threshold_grid.py` | `--mt-filter-mode symmetric`（默认，不变） | 与回测 Scheme B 口径对齐 |
 | 日报 `generate_daily_report.py` | `--mt-filter-mode conflict`（默认，不变） | 生产稳定配置 |
 | 实盘 Dry-Run `live_trader_eth_perp_binance.py` | 可尝试 `--use-layered-gate` | 先在 Dry-Run 中灰度验证后再决定是否推广 |
+| 实盘 `live_trader_perp_binance.py` | legacy 过滤器默认开启；`--mt-filter-mode` 默认 `daily_guard`（可由 YAML 或 CLI 覆盖） | legacy 过滤器计算 weight，mt_filter_mode 作为硬 gate 追加拒绝 |
 | 实盘真实开仓 | 暂不推荐 `--use-layered-gate` 或 `--use-15m-confirm` | 需完成 Dry-Run 统计验证 |
 
 **一句话原则**：
 
-> 默认行为 = 原有逻辑，只有显式传入 `--mt-filter-mode layered` 或 `--use-layered-gate / --use-15m-confirm` 才启用新逻辑。
+> 默认行为 = 原有 legacy 逻辑保持不变；`mt_filter_mode` 作为额外硬 gate 追加在 legacy 之后，只能拒绝（不改变放行时的 weight）；仅显式传入 `--mt-filter-mode layered` 或 `--use-layered-gate / --use-15m-confirm` 才启用更激进的新逻辑。
 
 ---
 

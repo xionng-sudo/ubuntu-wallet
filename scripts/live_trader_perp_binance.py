@@ -24,6 +24,7 @@ import argparse
 import os
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Sequence, Set
@@ -41,6 +42,8 @@ from mt_trend_utils import MTTrendContext  # noqa: E402
 from backtest_event_v3_http import load_klines_1h  # noqa: E402
 from mt_filter import mt_gate, gate_allows, gate_is_strong, exec_confirm_15m, ENTER  # noqa: E402
 from binance_futures_rest import BinanceFuturesClient, BinanceAPIError  # noqa: E402
+from signal_logic import apply_mt_filter_with_context  # noqa: E402
+from symbol_paths import get_symbol_config  # noqa: E402
 
 
 load_dotenv()
@@ -371,6 +374,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     ap.add_argument(
+        "--mt-filter-mode",
+        default=None,
+        help=(
+            "Multi-timeframe filter mode applied as an additional hard gate after the legacy "
+            "filter computes (side, weight). Choices: off|daily_guard|strict|relaxed|regime|layered. "
+            "Precedence: CLI > per-symbol YAML (configs/symbols.yaml) > built-in default (daily_guard). "
+            "If the hard gate rejects, side is forced to FLAT and weight to 0.0."
+        ),
+    )
+    ap.add_argument(
         "--use-15m-confirm",
         action="store_true",
         help=(
@@ -460,6 +473,14 @@ def _build_mt_ctx_for_symbol(data_dir: str, symbol: str) -> MTTrendContext:
     return MTTrendContext(klines_4h=klines_4h, klines_1d=klines_1d)
 
 
+def _resolve_mt_filter_mode(symbol: str, cli_override: Optional[str]) -> str:
+    """Resolve mt_filter_mode with precedence: CLI > YAML > built-in default (daily_guard)."""
+    if cli_override is not None:
+        return cli_override
+    sym_cfg = get_symbol_config(symbol)
+    return str(sym_cfg.get("mt_filter_mode", "daily_guard"))
+
+
 def run_for_one_symbol(
     symbol: str,
     args: argparse.Namespace,
@@ -468,6 +489,7 @@ def run_for_one_symbol(
 ) -> None:
     data_dir = args.data_dir
     mt_ctx = _build_mt_ctx_for_symbol(data_dir, symbol)
+    mt_filter_mode = _resolve_mt_filter_mode(symbol, args.mt_filter_mode)
 
     engine = EthPerpStrategyEngineBinance(
         strategy_funds_usdt=float(args.strategy_funds_usdt),
@@ -493,6 +515,7 @@ def run_for_one_symbol(
         f"Starting {'LIVE' if runtime.is_live else 'DRY-RUN'} perp trader "
         f"(event_v3, 1h, symbol={symbol}, max_positions={args.max_positions}, filter={mode_str})..."
     )
+    print(f"  [config] symbol={symbol} mt_filter_mode={mt_filter_mode}")
 
     while True:
         bar_close = _current_hour_bar_close()
@@ -518,6 +541,26 @@ def run_for_one_symbol(
         cal_conf = j.get("calibrated_confidence")
 
         side_str, weight = apply_multi_timeframe_filter(side_str, bar_close, mt_ctx, use_layered=args.use_layered_gate)
+
+        # Additional hard gate: mt_filter_mode applied AFTER legacy filter.
+        # Legacy filter already computed (side_str, weight); mt_filter_mode can only reject.
+        if side_str in ("LONG", "SHORT"):
+            mt_reject_reasons: Counter = Counter()
+            final_side, _t4, _t1d, reject_reason = apply_mt_filter_with_context(
+                side=side_str,
+                sig_ts=bar_close,
+                trend_4h_at=mt_ctx.trend_4h_at,
+                trend_1d_at=mt_ctx.trend_1d_at,
+                mode=mt_filter_mode,
+                mt_reject_reasons=mt_reject_reasons,
+            )
+            if final_side != side_str:
+                print(
+                    f"  [mt_filter] symbol={symbol} mode={mt_filter_mode} "
+                    f"rejected side={side_str} reason={reject_reason} -> FLAT"
+                )
+                side_str = "FLAT"
+                weight = 0.0
 
         exec_result = ENTER
         if side_str in ("LONG", "SHORT") and args.use_15m_confirm:
@@ -602,6 +645,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         for s in symbols
     }
 
+    per_symbol_mt_filter_mode = {
+        s: _resolve_mt_filter_mode(s, args.mt_filter_mode)
+        for s in symbols
+    }
+
     engines = {
         s: EthPerpStrategyEngineBinance(
             strategy_funds_usdt=float(args.strategy_funds_usdt),
@@ -615,6 +663,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         )
         for s in symbols
     }
+
+    for s in symbols:
+        print(f"  [config] symbol={s} mt_filter_mode={per_symbol_mt_filter_mode[s]}")
 
     last_bar_close: Optional[datetime] = None
 
@@ -648,6 +699,27 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 per_symbol_ctx[symbol],
                 use_layered=args.use_layered_gate,
             )
+
+            # Additional hard gate: mt_filter_mode applied AFTER legacy filter.
+            # Legacy filter already computed (side_str, weight); mt_filter_mode can only reject.
+            if side_str in ("LONG", "SHORT"):
+                mt_mode = per_symbol_mt_filter_mode[symbol]
+                mt_reject_reasons: Counter = Counter()
+                final_side, _t4, _t1d, reject_reason = apply_mt_filter_with_context(
+                    side=side_str,
+                    sig_ts=bar_close,
+                    trend_4h_at=per_symbol_ctx[symbol].trend_4h_at,
+                    trend_1d_at=per_symbol_ctx[symbol].trend_1d_at,
+                    mode=mt_mode,
+                    mt_reject_reasons=mt_reject_reasons,
+                )
+                if final_side != side_str:
+                    print(
+                        f"  [mt_filter] symbol={symbol} mode={mt_mode} "
+                        f"rejected side={side_str} reason={reject_reason} -> FLAT"
+                    )
+                    side_str = "FLAT"
+                    weight = 0.0
 
             exec_result = ENTER
             if side_str in ("LONG", "SHORT") and args.use_15m_confirm:

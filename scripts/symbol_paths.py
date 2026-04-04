@@ -46,6 +46,7 @@ _CONFIG_PATH = os.path.join(REPO_ROOT, "configs", "symbols.yaml")
 _DEFAULTS: Dict[str, Any] = {
     "enabled": True,
     "interval": "1h",
+    "mt_filter_mode": "daily_guard",
     "threshold": 0.65,
     "tp": 0.0175,
     "sl": 0.009,
