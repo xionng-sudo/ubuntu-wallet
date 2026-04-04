@@ -407,7 +407,7 @@ class TestSimulatedTraderUsesSharedConfig(unittest.TestCase):
         )
 
     def test_imports_get_symbol_config_from_symbol_config(self) -> None:
-        """live_trader_perp_simulated.py must import get_symbol_config from symbol_config."""
+        """live_trader_perp_simulated.py must import get_symbol_config from scripts.symbol_config."""
         import ast
 
         with open(self._SCRIPT, "r", encoding="utf-8") as f:
@@ -418,17 +418,20 @@ class TestSimulatedTraderUsesSharedConfig(unittest.TestCase):
         except SyntaxError as exc:
             self.fail(f"live_trader_perp_simulated.py has a syntax error: {exc}")
 
-        # Walk the AST looking for: from symbol_config import (..., get_symbol_config, ...)
+        # Accept both:
+        #   from symbol_config import get_symbol_config          (legacy)
+        #   from scripts.symbol_config import get_symbol_config  (package import, avoids name collision)
         found = any(
             isinstance(node, ast.ImportFrom)
-            and node.module == "symbol_config"
+            and node.module in ("symbol_config", "scripts.symbol_config")
             and any(alias.name == "get_symbol_config" for alias in node.names)
             for node in ast.walk(tree)
         )
         self.assertTrue(
             found,
-            "live_trader_perp_simulated.py must have 'from symbol_config import get_symbol_config' "
-            "(or include it in a multi-name import from symbol_config).",
+            "live_trader_perp_simulated.py must have "
+            "'from scripts.symbol_config import get_symbol_config' "
+            "(or the legacy 'from symbol_config import get_symbol_config').",
         )
 
 
@@ -474,7 +477,12 @@ class TestSimulatedTraderLogicCLI(unittest.TestCase):
         self.assertIn("--pred-cache-file", self._get_help())
 
     def test_default_mt_filter_mode_is_daily_guard(self) -> None:
-        """Default --mt-filter-mode must be daily_guard (consistent with backtest default)."""
+        """Default --mt-filter-mode must be None (resolved from YAML/built-in at runtime).
+
+        The effective default (when neither CLI nor YAML sets it) is 'daily_guard'
+        (from decision_pipeline.DEFAULTS), but argparse.default must be None so
+        that YAML per-symbol values can take effect when the flag is omitted.
+        """
         spec = importlib.util.spec_from_file_location("live_trader_simulated_test", self._SCRIPT)
         mod = importlib.util.module_from_spec(spec)  # type: ignore[arg-type]
         mod.__name__ = "live_trader_simulated_test"  # type: ignore[assignment]
@@ -484,9 +492,10 @@ class TestSimulatedTraderLogicCLI(unittest.TestCase):
             self.skipTest("Module-level import failed (missing deps)")
         ap = mod.build_parser()
         defaults = ap.parse_args([])
-        self.assertEqual(
-            defaults.mt_filter_mode, "daily_guard",
-            "Default --mt-filter-mode must be 'daily_guard'",
+        self.assertIsNone(
+            defaults.mt_filter_mode,
+            "--mt-filter-mode default must be None so YAML per-symbol value can take effect; "
+            "the effective fallback (daily_guard) is applied inside run_for_symbol().",
         )
         self.assertEqual(
             defaults.side_source, "probs",

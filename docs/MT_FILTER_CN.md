@@ -1,6 +1,6 @@
 # MT_FILTER 统一多周期过滤与执行确认层
 
-**版本**：v1.0（2026-03）
+**版本**：v1.1（2026-04）
 
 ---
 
@@ -21,6 +21,7 @@
 2. 引入 15m 执行确认层（不改 1h 主模型）。
 3. 关键脚本均可通过 `--mt-filter-mode layered` 切换到新统一逻辑。
 4. 默认行为保持兼容，渐进引入。
+5. **v1.1 新增**：支持从 `configs/symbols.yaml` 按币种读取 `mt_filter_mode`，优先级为 CLI > YAML > 内置默认值。
 
 ---
 
@@ -106,40 +107,48 @@ result = exec_confirm_15m(side, klines_15m, enabled=True)
 
 ### 3.1 backtest_event_v3_http.py
 
-新增 `--mt-filter-mode` 选项（PR #29 后默认为 `daily_guard`）：
+`--mt-filter-mode` 优先级：**CLI > `configs/symbols.yaml` 中该币的 `mt_filter_mode` > 内置默认值（`daily_guard`）**
 
 ```bash
-# 使用 daily_guard（默认）：仅限制 1d 方向，4h 不约束
+# 省略 --mt-filter-mode → 自动读取 configs/symbols.yaml 中 BTCUSDT 的 mt_filter_mode
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
+  --data-dir data/BTCUSDT --symbol BTCUSDT \
+  --base-url http://127.0.0.1:9000 \
+  --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z \
+  --position-mode single
+
+# 显式覆盖（CLI 优先级最高）
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir data/BTCUSDT --symbol BTCUSDT \
   --base-url http://127.0.0.1:9000 \
   --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z \
   --position-mode single --mt-filter-mode daily_guard
-
-# 使用 layered gate（允许 4h NEUTRAL + 1d 同向）
-~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
-  --data-dir data/BTCUSDT --symbol BTCUSDT \
-  --base-url http://127.0.0.1:9000 \
-  --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z \
-  --position-mode single --mt-filter-mode layered
 ```
+
+输出会打印：
+- `[config:debug] loaded symbol config for BTCUSDT from …/scripts/symbol_paths.py`
+- `[config] symbol=BTCUSDT … mt_filter_mode=off (YAML)` — 括号里说明来源
 
 可选值：`off` | `long_only` | `symmetric` | `strict` | `relaxed` | `trend_guard` | `daily_guard` | `conflict` | `regime` | `layered`
 
-**默认：`daily_guard`**（PR #29 起，与 `live_trader_perp_simulated.py` 默认一致）
+**内置默认：`daily_guard`**（当 CLI 未传且 YAML 中无此字段时生效）
 
-### 3.1a live_trader_perp_simulated.py（PR #29 新增）
+### 3.1a live_trader_perp_simulated.py（PR #29 新增，v1.1 更新）
 
-`live_trader_perp_simulated.py` 现已通过共享模块 `decision_pipeline.py` 与回测使用完全相同的决策逻辑，并暴露与回测一致的 CLI 参数：
+`--mt-filter-mode` 优先级：**CLI > `configs/symbols.yaml` 中该币的 `mt_filter_mode` > 内置默认值（`daily_guard`）**
 
 ```bash
-# 使用 daily_guard（默认，与回测一致）
+# 省略 --mt-filter-mode → 自动读取 YAML 中 BTCUSDT 的 mt_filter_mode
+~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
+  --symbol BTCUSDT --side-source probs
+
+# 显式指定（CLI 覆盖 YAML）
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
   --symbol BTCUSDT --mt-filter-mode daily_guard --side-source probs
 
-# 切换到 layered 过滤（与回测 --mt-filter-mode layered 完全等价）
+# --all-symbols：每个币自动从 YAML 读取其 mt_filter_mode
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
-  --symbol BTCUSDT --mt-filter-mode layered
+  --all-symbols --since 2026-03-01T00:00:00Z --until 2026-03-10T00:00:00Z
 
 # 对齐验证：使用回测生成的 pred_cache 读取预测，确保输入完全一致
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/live_trader_perp_simulated.py \
@@ -149,12 +158,41 @@ result = exec_confirm_15m(side, klines_15m, enabled=True)
   --pred-cache-file data/pred_cache/pred_cache__<hash>.jsonl
 ```
 
+每次运行会打印：`[sim:BTCUSDT] mt_filter_mode=off (YAML)` — 括号里说明来源。
+
 可选值（与回测完全对齐）：  
-`--mt-filter-mode`：同 backtest，默认 `daily_guard`  
+`--mt-filter-mode`：同 backtest，默认从 YAML 读取  
 `--side-source {signal,probs}`：默认 `probs`  
 `--timeout-exit {close,open_next}`：默认 `close`  
 `--tie-breaker {SL,TP}`：默认 `SL`  
 `--position-mode {single,stack}`：默认 `single`
+
+### 3.1b live_trader_perp_binance.py（v1.1 新增）
+
+`--mt-filter-mode` 优先级：**CLI > `configs/symbols.yaml` 中该币的 `mt_filter_mode` > 内置默认值（`daily_guard`）**
+
+过滤现在使用 `apply_mt_filter_with_context`（与回测/模拟语义完全一致），不再依赖旧的 (side, weight) 软过滤。
+
+```bash
+# 省略 --mt-filter-mode → 自动读取 YAML 中该币的 mt_filter_mode（DRY-RUN）
+python scripts/live_trader_perp_binance.py --symbol BTCUSDT
+
+# 显式指定 mt_filter_mode（CLI 优先级最高）
+python scripts/live_trader_perp_binance.py --symbol BTCUSDT --mt-filter-mode off
+
+# --all-symbols：每个币自动从 YAML 读取其 mt_filter_mode，启动时打印
+python scripts/live_trader_perp_binance.py --all-symbols
+# 输出类似：
+#   [config] BTCUSDT mt_filter_mode=off (YAML)
+#   [config] BNBUSDT mt_filter_mode=daily_guard (YAML)
+
+# 多币指定，共享同一 mt_filter_mode（CLI 优先级最高）
+python scripts/live_trader_perp_binance.py --symbols BTCUSDT,ETHUSDT --mt-filter-mode daily_guard
+```
+
+可选值：同 backtest，`off` | `long_only` | `symmetric` | `strict` | `relaxed` | `trend_guard` | `daily_guard` | `conflict` | `regime` | `layered`
+
+> **向后兼容**：`--use-layered-gate` 和 `--use-15m-confirm` 参数保留。但当 `--mt-filter-mode` 被设置（CLI 或 YAML）时，过滤完全由 `apply_mt_filter_with_context` 接管，`--use-layered-gate` 不再影响过滤逻辑。
 
 ### 3.2 evaluate_from_logs.py
 
@@ -245,17 +283,23 @@ if gate_allows(gate_result):
 
 ## 5. 兼容性说明
 
-| 脚本 | 默认模式 | 是否有行为变化 |
-|------|---------|--------------|
-| `backtest_event_v3_http.py` | `long_only` | 无变化 |
-| `evaluate_from_logs.py` | `symmetric` | 无变化 |
-| `report_threshold_grid.py` | `symmetric` | 无变化 |
-| `generate_daily_report.py` | `conflict` | 无变化 |
-| `live_trader_eth_perp_binance.py` | legacy | 无变化（`--use-layered-gate` 需显式开启） |
+| 脚本 | 默认 mt_filter_mode | 来源 | 是否有行为变化 |
+|------|---------------------|------|--------------|
+| `backtest_event_v3_http.py` | YAML 中该币 > `daily_guard` | CLI > YAML > default | ✅ v1.1 新增 YAML 读取 |
+| `live_trader_perp_simulated.py` | YAML 中该币 > `daily_guard` | CLI > YAML > default | ✅ v1.1 新增 YAML 读取 |
+| `live_trader_perp_binance.py` | YAML 中该币 > `daily_guard` | CLI > YAML > default | ✅ v1.1 新增，替换旧 (side,weight) 过滤 |
+| `evaluate_from_logs.py` | `symmetric` | CLI | 无变化 |
+| `report_threshold_grid.py` | `symmetric` | CLI | 无变化 |
+| `generate_daily_report.py` | `conflict` | CLI | 无变化 |
+| `live_trader_eth_perp_binance.py` | legacy | CLI flag | 无变化（`--use-layered-gate` 需显式开启） |
 
 **新 `layered` 模式与 `symmetric` 模式的区别**：
 - `layered` 比 `symmetric` 稍宽松：允许「4h 中性 + 1d 同向」的弱放行
 - `symmetric` 要求 4h 必须同向，不允许 4h 中性
+
+### 5.1 v1.1 变更：import 路径修正
+
+v1.1 将三个脚本的 symbol_config 导入从顶层 `from symbol_config import ...` 改为包导入 `from scripts.symbol_config import ...`，以避免 `symbol_config` 顶层模块名冲突（旧方式在 sys.path 中只有 `scripts/` 时无法找到 `scripts.symbol_paths`，导致 `_get_symbol_config` 回退为 `None`，YAML 配置完全失效）。
 
 ---
 
@@ -265,26 +309,28 @@ if gate_allows(gate_result):
 
 | 链路 | 推荐配置 | 说明 |
 |------|---------|------|
-| 回测 `backtest_event_v3_http.py` | `--mt-filter-mode long_only`（默认，不变） | 保持原有口径，便于历史对比 |
+| 回测 `backtest_event_v3_http.py` | 省略 `--mt-filter-mode`，由 YAML 自动读取 | 每币独立配置，保持精确的历史对比口径 |
+| 模拟交易 `live_trader_perp_simulated.py` | 省略 `--mt-filter-mode`，由 YAML 自动读取 | 与回测完全对齐 |
+| 实盘 DRY-RUN `live_trader_perp_binance.py` | 省略 `--mt-filter-mode`，由 YAML 自动读取 | 与回测/模拟口径一致 |
 | 日志评估 `evaluate_from_logs.py` | `--mt-filter-mode symmetric`（默认，不变） | 与回测 Scheme B 口径对齐 |
 | 阈值网格 `report_threshold_grid.py` | `--mt-filter-mode symmetric`（默认，不变） | 与回测 Scheme B 口径对齐 |
 | 日报 `generate_daily_report.py` | `--mt-filter-mode conflict`（默认，不变） | 生产稳定配置 |
-| 实盘 Dry-Run `live_trader_eth_perp_binance.py` | 可尝试 `--use-layered-gate` | 先在 Dry-Run 中灰度验证后再决定是否推广 |
-| 实盘真实开仓 | 暂不推荐 `--use-layered-gate` 或 `--use-15m-confirm` | 需完成 Dry-Run 统计验证 |
+| 实盘真实开仓 | 暂不推荐直接 PROD | 需完成 Dry-Run 统计验证 |
 
 **一句话原则**：
 
-> 默认行为 = 原有逻辑，只有显式传入 `--mt-filter-mode layered` 或 `--use-layered-gate / --use-15m-confirm` 才启用新逻辑。
+> 生产脚本的 mt_filter_mode 由 `configs/symbols.yaml` 集中管理；只有在调试或临时对比时才在 CLI 显式覆盖。
 
 ---
 
 ### 7.2 ⚠️ 15m 执行确认层的接入范围（重要）
 
-**当前版本（v1.0）15m 执行确认层（`exec_confirm_15m`）仅接入了 `live_trader_eth_perp_binance.py`**。
+**当前版本（v1.1）15m 执行确认层（`exec_confirm_15m`）仅接入了 `live_trader_eth_perp_binance.py` 和 `live_trader_perp_binance.py`**。
 
 | 脚本 | 是否支持 15m confirm |
 |------|-------------------|
 | `live_trader_eth_perp_binance.py` | ✅ 可选，`--use-15m-confirm` |
+| `live_trader_perp_binance.py` | ✅ 可选，`--use-15m-confirm` |
 | `backtest_event_v3_http.py` | ❌ 尚未接入 |
 | `evaluate_from_logs.py` | ❌ 尚未接入 |
 | `report_threshold_grid.py` | ❌ 尚未接入 |
@@ -293,7 +339,7 @@ if gate_allows(gate_result):
 **后果**：若在实盘中开启 `--use-15m-confirm`，回测与实盘将存在**口径差异**——回测不会过滤 15m 逆向入场，实盘会。这会导致信号覆盖率和效果归因的解读存在偏差。
 
 **建议**：
-1. v1.0 阶段：仅在 Dry-Run 实盘中灰度开启 `--use-15m-confirm`，观察信号覆盖变化。
+1. v1.1 阶段：仅在 Dry-Run 实盘中灰度开启 `--use-15m-confirm`，观察信号覆盖变化。
 2. 后续版本：在 `backtest_event_v3_http.py` 和 `evaluate_from_logs.py` 中补充 15m confirm 回测支持（通过加载 `data/klines_15m.json`），以关闭回测/实盘口径差异。
 
 ---
