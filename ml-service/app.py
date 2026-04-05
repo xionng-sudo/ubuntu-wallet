@@ -526,24 +526,24 @@ def predict(req: PredictRequest):
             f"threshold_source={threshold_source}",
         ]
 
-    return PredictResponse(
-            signal=signal,
-            confidence=round(confidence, 4),
-            calibrated_confidence=round(cal_conf, 4) if cal_conf is not None else None,
-            calibration_method=cal_method,
-            model_version=loaded.model_version,
-            p_long=round(p_long, 6),
-            p_short=round(p_short, 6),
-            p_flat=round(p_flat, 6),
-            cal_p_long=round(cp_long, 6) if cp_long is not None else None,
-            cal_p_short=round(cp_short, 6) if cp_short is not None else None,
-            cal_p_flat=round(cp_flat, 6) if cp_flat is not None else None,
-            effective_long=round(eff_long, 6),
-            effective_short=round(eff_short, 6),
-            threshold_enter=round(p_enter, 6),
-            threshold_delta=round(delta, 6),
-            reasons=reasons,
-    )
+        return PredictResponse(
+                signal=signal,
+                confidence=round(confidence, 4),
+                calibrated_confidence=round(cal_conf, 4) if cal_conf is not None else None,
+                calibration_method=cal_method,
+                model_version=loaded.model_version,
+                p_long=round(p_long, 6),
+                p_short=round(p_short, 6),
+                p_flat=round(p_flat, 6),
+                cal_p_long=round(cp_long, 6) if cp_long is not None else None,
+                cal_p_short=round(cp_short, 6) if cp_short is not None else None,
+                cal_p_flat=round(cp_flat, 6) if cp_flat is not None else None,
+                effective_long=round(eff_long, 6),
+                effective_short=round(eff_short, 6),
+                threshold_enter=round(p_enter, 6),
+                threshold_delta=round(delta, 6),
+                reasons=reasons,
+        )
 
     # --- legacy binary output ---
     if mode != "proba_binary":
