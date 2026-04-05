@@ -25,8 +25,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPT_DIR)
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, ".."))
+# Ensure both repo root (for 'scripts.*' package imports) and script dir are on path.
+for _p in (_REPO_ROOT, _SCRIPT_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from backtest_event_v3_http import (  # noqa: E402
     load_klines_1h,
@@ -41,13 +44,74 @@ from signal_logic import (  # noqa: E402
     apply_mt_filter_common,
     normalize_mt_mode,
 )
+from scripts.symbol_config import (  # noqa: E402
+    get_symbol_config,
+    list_enabled_symbols,
+)
+
+# Built-in parameter defaults (used when symbol YAML config does not provide a value).
+_BUILTIN_DEFAULTS = {
+    "threshold": 0.65,
+    "tp": 0.0175,
+    "sl": 0.009,
+    "horizon_bars": 6,
+    "mt_filter_mode": "layered",
+}
 
 
-def _get_symbol_paths_module():
-    if _SCRIPT_DIR not in sys.path:
-        sys.path.insert(0, _SCRIPT_DIR)
-    import symbol_paths  # type: ignore[import]
-    return symbol_paths
+def _resolve_param(cli_val: Any, yaml_cfg: Dict[str, Any], yaml_key: str, builtin_key: Optional[str] = None) -> Any:
+    """Resolve a parameter with precedence: CLI > YAML > built-in default.
+
+    Used in **legacy explicit mode** (no --symbol).
+
+    Args:
+        cli_val: Value from CLI flags (``None`` means not supplied).
+        yaml_cfg: Per-symbol config dict loaded from configs/symbols.yaml.
+        yaml_key: Key to look up in *yaml_cfg*.
+        builtin_key: Key in ``_BUILTIN_DEFAULTS``; defaults to *yaml_key*.
+
+    Returns:
+        The first non-``None`` value in the precedence chain.
+    """
+    if cli_val is not None:
+        return cli_val
+    yaml_val = yaml_cfg.get(yaml_key)
+    if yaml_val is not None:
+        return yaml_val
+    return _BUILTIN_DEFAULTS[builtin_key or yaml_key]
+
+
+def _resolve_param_strict(
+    cli_val: Any,
+    yaml_cfg: Dict[str, Any],
+    yaml_key: str,
+    param_name: str,
+) -> Tuple[Any, str]:
+    """Resolve a parameter strictly from CLI or YAML only — no built-in fallback.
+
+    Used in **symbol mode** (``--symbol`` / ``--all-symbols``).
+
+    Args:
+        cli_val: Value from CLI flags (``None`` means not supplied).
+        yaml_cfg: Per-symbol config dict loaded from configs/symbols.yaml.
+        yaml_key: Key to look up in *yaml_cfg*.
+        param_name: Human-readable parameter name used in error messages.
+
+    Returns:
+        ``(value, source)`` where *source* is ``"cli"`` or ``"yaml"``.
+
+    Raises:
+        ValueError: If neither CLI nor YAML provides a value.
+    """
+    if cli_val is not None:
+        return cli_val, "cli"
+    yaml_val = yaml_cfg.get(yaml_key)
+    if yaml_val is not None:
+        return yaml_val, "yaml"
+    raise ValueError(
+        f"Parameter '{param_name}' is required but not found in CLI flags or "
+        f"configs/symbols.yaml for this symbol."
+    )
 
 
 def _to_utc_dt(s: str) -> datetime:
@@ -468,7 +532,37 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
 
     effective_symbol = symbol if symbol is not None else args.symbol
 
+    # --- Resolve per-symbol parameters: CLI > YAML only (no built-in fallback in symbol mode) ---
     if effective_symbol:
+        try:
+            sym_cfg = get_symbol_config(effective_symbol)
+        except Exception as exc:
+            print(f"ERROR: could not load YAML config for {effective_symbol}: {exc}", flush=True)
+            return 1
+
+        param_errors: List[str] = []
+        param_sources: Dict[str, str] = {}
+
+        def _strict(cli_val, yaml_key, param_name):
+            try:
+                val, src = _resolve_param_strict(cli_val, sym_cfg, yaml_key, param_name)
+                param_sources[param_name] = src
+                return val
+            except ValueError as e:
+                param_errors.append(str(e))
+                return None
+
+        threshold = _strict(args.threshold, "threshold", "threshold")
+        tp_pct = _strict(args.tp, "tp", "tp")
+        sl_pct = _strict(args.sl, "sl", "sl")
+        horizon = _strict(args.horizon_bars, "horizon", "horizon_bars")
+        mt_filter_mode = _strict(args.mt_filter_mode, "mt_filter_mode", "mt_filter_mode")
+
+        if param_errors:
+            for err in param_errors:
+                print(f"ERROR: [{effective_symbol}] {err}", flush=True)
+            return 1
+
         log_path, data_dir, report_dir = _resolve_symbol_paths(
             symbol=effective_symbol,
             log_path=args.log_path if args.log_path != "data/predictions_log.jsonl" else None,
@@ -476,6 +570,25 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
             report_dir=args.report_dir if args.report_dir != "data/reports" else None,
         )
     else:
+        # Legacy explicit mode — threshold/tp/sl must be supplied via CLI.
+        # horizon/mt_filter_mode fall back to built-in defaults.
+        param_sources = {}
+        missing = [
+            name
+            for name, val in [("--threshold", args.threshold), ("--tp", args.tp), ("--sl", args.sl)]
+            if val is None
+        ]
+        if missing:
+            print(
+                f"ERROR: {', '.join(missing)} required when --symbol / --all-symbols not used.",
+                flush=True,
+            )
+            return 1
+        threshold = args.threshold
+        tp_pct = args.tp
+        sl_pct = args.sl
+        horizon = args.horizon_bars if args.horizon_bars is not None else _BUILTIN_DEFAULTS["horizon_bars"]
+        mt_filter_mode = args.mt_filter_mode if args.mt_filter_mode is not None else _BUILTIN_DEFAULTS["mt_filter_mode"]
         log_path = args.log_path
         data_dir = args.data_dir
         report_dir = args.report_dir
@@ -485,6 +598,19 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
         f"({day_start.isoformat()} → {day_end.isoformat()})",
         flush=True,
     )
+    if param_sources:
+        print(
+            f"  param sources: {param_sources}  "
+            f"threshold={threshold} tp={tp_pct} sl={sl_pct} "
+            f"horizon={horizon} mt_filter_mode={mt_filter_mode}",
+            flush=True,
+        )
+    else:
+        print(
+            f"  (legacy mode) threshold={threshold} tp={tp_pct} sl={sl_pct} "
+            f"horizon={horizon} mt_filter_mode={mt_filter_mode}",
+            flush=True,
+        )
 
     klines_1h_path = os.path.join(data_dir, "klines_1h.json")
     if not os.path.exists(klines_1h_path):
@@ -541,20 +667,26 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
         trend_4h_list=trend_4h_list,
         ts_1d=ts_1d,
         trend_1d_list=trend_1d_list,
-        threshold=args.threshold,
-        tp_pct=args.tp,
-        sl_pct=args.sl,
+        threshold=threshold,
+        tp_pct=tp_pct,
+        sl_pct=sl_pct,
         fee=args.fee,
         slippage=args.slippage,
-        horizon=args.horizon_bars,
+        horizon=horizon,
         tie_breaker=args.tie_breaker,
         timeout_exit=args.timeout_exit,
         mt_filter=mt_filter,
-        mt_filter_mode=args.mt_filter_mode,
+        mt_filter_mode=mt_filter_mode,
         model_version_override=args.model_version,
     )
 
     os.makedirs(report_dir, exist_ok=True)
+
+    # Augment report with per-field config source info and effective mt_filter_mode.
+    report["params"]["config_source"] = param_sources if param_sources else "cli"
+    report["params"]["effective_mt_filter_mode"] = (
+        normalize_mt_mode(mt_filter_mode) if mt_filter else "off"
+    )
 
     json_path = os.path.join(report_dir, f"daily_eval_{date_str}.json")
     with open(json_path, "w", encoding="utf-8") as f:
@@ -570,6 +702,8 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
     print("\n" + "=" * 60, flush=True)
     print(f"DAILY REPORT SUMMARY: {date_str} symbol={effective_symbol or 'ALL_IN_LOG'}", flush=True)
     print(f"  model_version : {report['model_version']}", flush=True)
+    print(f"  param_sources : {report['params'].get('config_source')}", flush=True)
+    print(f"  mt_filter_mode: {report['params'].get('effective_mt_filter_mode', mt_filter_mode)}", flush=True)
     ss = report["signal_stats"]
     print(f"  predictions   : {ss['total_predictions']}", flush=True)
     print(f"  trades        : {ss['n_trades']}", flush=True)
@@ -618,12 +752,12 @@ def main() -> int:
     ap.add_argument("--active-model", default="event_v3")
     ap.add_argument("--model-version", default=None, help="Override model_version in report")
 
-    ap.add_argument("--tp", type=float, required=True, help="Take-profit fraction, e.g. 0.0175")
-    ap.add_argument("--sl", type=float, required=True, help="Stop-loss fraction, e.g. 0.007")
-    ap.add_argument("--threshold", type=float, required=True, help="Probability threshold, e.g. 0.55")
+    ap.add_argument("--tp", type=float, default=None, help="Take-profit fraction, e.g. 0.0175 (optional when --symbol/--all-symbols used)")
+    ap.add_argument("--sl", type=float, default=None, help="Stop-loss fraction, e.g. 0.007 (optional when --symbol/--all-symbols used)")
+    ap.add_argument("--threshold", type=float, default=None, help="Probability threshold, e.g. 0.55 (optional when --symbol/--all-symbols used)")
     ap.add_argument("--fee", type=float, default=0.0004)
     ap.add_argument("--slippage", type=float, default=0.0)
-    ap.add_argument("--horizon-bars", type=int, default=6)
+    ap.add_argument("--horizon-bars", type=int, default=None, help="Forward look-ahead bars (optional when --symbol/--all-symbols used)")
     ap.add_argument("--tie-breaker", choices=["SL", "TP"], default="SL")
     ap.add_argument("--timeout-exit", choices=["close", "open_next"], default="close")
 
@@ -631,8 +765,11 @@ def main() -> int:
     ap.add_argument(
         "--mt-filter-mode",
         choices=["off", "long_only", "symmetric", "strict", "relaxed", "regime", "conflict", "layered"],
-        default="layered",
-        help="Unified MT filter mode.",
+        default=None,
+        help=(
+            "Unified MT filter mode. When --symbol/--all-symbols is used, "
+            "defaults to the YAML mt_filter_mode, falling back to 'layered'."
+        ),
     )
 
     ap.add_argument(
@@ -644,13 +781,7 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.all_symbols:
-        try:
-            sp = _get_symbol_paths_module()
-        except ImportError as exc:
-            print(f"ERROR: could not import symbol_paths: {exc}", flush=True)
-            return 1
-
-        symbols = sp.list_enabled_symbols()
+        symbols = list_enabled_symbols()
         if not symbols:
             print("WARNING: no enabled symbols found; nothing to do.", flush=True)
             return 0
