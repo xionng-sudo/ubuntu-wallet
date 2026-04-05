@@ -61,12 +61,28 @@ SYMBOL_CFG="$("${PYTHON}" - <<'PYEOF'
 import sys, os
 
 repo_root = os.environ.get("REPO_ROOT", "")
-if repo_root:
-    sys.path.insert(0, os.path.join(repo_root, "scripts"))
+if not repo_root:
+    print("ERROR: REPO_ROOT environment variable is not set", file=sys.stderr)
+    sys.exit(1)
+sys.path.insert(0, repo_root)
 
 try:
-    from symbol_paths import get_symbol_config
-    sym = os.environ.get("_TRAIN_SYMBOL", "BTCUSDT")
+    from scripts.symbol_config import get_symbol_config
+except ImportError as e:
+    print(f"ERROR: could not import scripts.symbol_config: {e}", file=sys.stderr)
+    sys.exit(1)
+
+yaml_path = os.path.join(repo_root, "configs", "symbols.yaml")
+if not os.path.isfile(yaml_path):
+    print(f"ERROR: configs/symbols.yaml not found at {yaml_path}", file=sys.stderr)
+    sys.exit(1)
+
+sym = os.environ.get("_TRAIN_SYMBOL", "")
+if not sym:
+    print("ERROR: _TRAIN_SYMBOL environment variable is not set", file=sys.stderr)
+    sys.exit(1)
+
+try:
     cfg = get_symbol_config(sym)
     print(
         f"HORIZON={cfg['horizon']}",
@@ -75,18 +91,21 @@ try:
         f"THRESHOLD={cfg['threshold']}",
         f"CALIBRATION={cfg['calibration']}",
     )
+except KeyError as e:
+    print(f"ERROR: missing required key {e} in symbol config for '{sym}'", file=sys.stderr)
+    sys.exit(1)
 except Exception as e:
-    print(f"# WARNING: could not load symbol config: {e}", file=sys.stderr)
-    print("HORIZON=12 TP=0.0175 SL=0.009 THRESHOLD=0.65 CALIBRATION=isotonic")
+    print(f"ERROR: could not load symbol config for '{sym}': {e}", file=sys.stderr)
+    sys.exit(1)
 PYEOF
-)" || true
+)" || { echo "[train_symbol.sh] Failed to load symbol config for ${SYMBOL}." >&2; exit 1; }
 
-# Parse config values
-eval "${SYMBOL_CFG}" 2>/dev/null || true
-HORIZON="${HORIZON:-12}"
-TP="${TP:-0.0175}"
-SL="${SL:-0.009}"
-CALIBRATION="${CALIBRATION:-isotonic}"
+# Parse config values (no fallback defaults — exit if any value is missing)
+eval "${SYMBOL_CFG}"
+if [[ -z "${HORIZON:-}" || -z "${TP:-}" || -z "${SL:-}" || -z "${CALIBRATION:-}" ]]; then
+    echo "[train_symbol.sh] ERROR: incomplete symbol config for ${SYMBOL} (HORIZON=${HORIZON:-} TP=${TP:-} SL=${SL:-} CALIBRATION=${CALIBRATION:-})" >&2
+    exit 1
+fi
 
 echo "[train_symbol.sh] symbol=${SYMBOL}"
 echo "[train_symbol.sh] data_dir=${DATA_DIR}"
@@ -96,6 +115,15 @@ echo "[train_symbol.sh] horizon=${HORIZON}  tp=${TP}  sl=${SL}  calibration=${CA
 # Ensure directories exist
 mkdir -p "${DATA_DIR}" "${MODEL_DIR}"
 
+# Detect if user passed --calibration in forwarded args (CLI wins over YAML)
+HAS_CAL_OVERRIDE=0
+for arg in "${FORWARD_ARGS[@]}"; do
+    if [[ "${arg}" == "--calibration" ]]; then
+        HAS_CAL_OVERRIDE=1
+        break
+    fi
+done
+
 CMD=(
     "${PYTHON}"
     "${REPO_ROOT}/python-analyzer/train_event_stack_v3.py"
@@ -104,9 +132,13 @@ CMD=(
     --horizon "${HORIZON}"
     --tp-pct "${TP}"
     --sl-pct "${SL}"
-    --calibration "${CALIBRATION}"
-    "${FORWARD_ARGS[@]}"
 )
+if [[ "${HAS_CAL_OVERRIDE}" -eq 0 ]]; then
+    CMD+=(--calibration "${CALIBRATION}")
+fi
+if [[ ${#FORWARD_ARGS[@]} -gt 0 ]]; then
+    CMD+=("${FORWARD_ARGS[@]}")
+fi
 
 echo "[train_symbol.sh] running: ${CMD[*]}"
 

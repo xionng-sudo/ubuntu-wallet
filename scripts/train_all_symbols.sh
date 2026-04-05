@@ -23,6 +23,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PYTHON="${PYTHON:-python3}"
 DRY_RUN=0
+export REPO_ROOT
 export SCRIPTS_DIR="${SCRIPT_DIR}"
 
 # Check for --dry-run in args (consume it before forwarding the rest)
@@ -35,13 +36,18 @@ for arg in "$@"; do
     fi
 done
 
-# Resolve enabled symbols via symbol_paths
+# Resolve enabled symbols via scripts.symbol_config
 SYMBOLS="$(
     "${PYTHON}" - <<'PYEOF'
 import sys, os
-sys.path.insert(0, os.environ.get("SCRIPTS_DIR", ""))
+repo_root = os.environ.get("REPO_ROOT", "")
+script_dir = os.environ.get("SCRIPTS_DIR", "")
+if repo_root:
+    sys.path.insert(0, repo_root)
+if script_dir:
+    sys.path.insert(0, script_dir)
 try:
-    from symbol_paths import list_enabled_symbols
+    from scripts.symbol_config import list_enabled_symbols
     print("\n".join(list_enabled_symbols()))
 except Exception as e:
     print(f"ERROR: {e}", file=sys.stderr)
