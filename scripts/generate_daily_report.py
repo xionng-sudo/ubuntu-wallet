@@ -62,6 +62,8 @@ _BUILTIN_DEFAULTS = {
 def _resolve_param(cli_val: Any, yaml_cfg: Dict[str, Any], yaml_key: str, builtin_key: Optional[str] = None) -> Any:
     """Resolve a parameter with precedence: CLI > YAML > built-in default.
 
+    Used in **legacy explicit mode** (no --symbol).
+
     Args:
         cli_val: Value from CLI flags (``None`` means not supplied).
         yaml_cfg: Per-symbol config dict loaded from configs/symbols.yaml.
@@ -79,6 +81,40 @@ def _resolve_param(cli_val: Any, yaml_cfg: Dict[str, Any], yaml_key: str, builti
     return _BUILTIN_DEFAULTS[builtin_key or yaml_key]
 
 
+def _resolve_param_strict(
+    cli_val: Any,
+    yaml_cfg: Dict[str, Any],
+    yaml_key: str,
+    param_name: str,
+) -> Tuple[Any, str]:
+    """Resolve a parameter strictly from CLI or YAML only — no built-in fallback.
+
+    Used in **symbol mode** (``--symbol`` / ``--all-symbols``).
+
+    Args:
+        cli_val: Value from CLI flags (``None`` means not supplied).
+        yaml_cfg: Per-symbol config dict loaded from configs/symbols.yaml.
+        yaml_key: Key to look up in *yaml_cfg*.
+        param_name: Human-readable parameter name used in error messages.
+
+    Returns:
+        ``(value, source)`` where *source* is ``"cli"`` or ``"yaml"``.
+
+    Raises:
+        ValueError: If neither CLI nor YAML provides a value.
+    """
+    if cli_val is not None:
+        return cli_val, "cli"
+    yaml_val = yaml_cfg.get(yaml_key)
+    if yaml_val is not None:
+        return yaml_val, "yaml"
+    raise ValueError(
+        f"Parameter '{param_name}' is required but not found in CLI flags or "
+        f"configs/symbols.yaml for this symbol."
+    )
+
+
+def _to_utc_dt(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00"))
 
 
@@ -496,20 +532,36 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
 
     effective_symbol = symbol if symbol is not None else args.symbol
 
-    # --- Resolve per-symbol parameters with precedence: CLI > YAML > built-in default ---
+    # --- Resolve per-symbol parameters: CLI > YAML only (no built-in fallback in symbol mode) ---
     if effective_symbol:
         try:
             sym_cfg = get_symbol_config(effective_symbol)
-            config_source = "yaml"
-        except Exception:
-            sym_cfg = {}
-            config_source = "builtin"
+        except Exception as exc:
+            print(f"ERROR: could not load YAML config for {effective_symbol}: {exc}", flush=True)
+            return 1
 
-        threshold = _resolve_param(args.threshold, sym_cfg, "threshold")
-        tp_pct = _resolve_param(args.tp, sym_cfg, "tp")
-        sl_pct = _resolve_param(args.sl, sym_cfg, "sl")
-        horizon = _resolve_param(args.horizon_bars, sym_cfg, "horizon", "horizon_bars")
-        mt_filter_mode = _resolve_param(args.mt_filter_mode, sym_cfg, "mt_filter_mode")
+        param_errors: List[str] = []
+        param_sources: Dict[str, str] = {}
+
+        def _strict(cli_val, yaml_key, param_name):
+            try:
+                val, src = _resolve_param_strict(cli_val, sym_cfg, yaml_key, param_name)
+                param_sources[param_name] = src
+                return val
+            except ValueError as e:
+                param_errors.append(str(e))
+                return None
+
+        threshold = _strict(args.threshold, "threshold", "threshold")
+        tp_pct = _strict(args.tp, "tp", "tp")
+        sl_pct = _strict(args.sl, "sl", "sl")
+        horizon = _strict(args.horizon_bars, "horizon", "horizon_bars")
+        mt_filter_mode = _strict(args.mt_filter_mode, "mt_filter_mode", "mt_filter_mode")
+
+        if param_errors:
+            for err in param_errors:
+                print(f"ERROR: [{effective_symbol}] {err}", flush=True)
+            return 1
 
         log_path, data_dir, report_dir = _resolve_symbol_paths(
             symbol=effective_symbol,
@@ -519,7 +571,8 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
         )
     else:
         # Legacy explicit mode — threshold/tp/sl must be supplied via CLI.
-        config_source = "cli"
+        # horizon/mt_filter_mode fall back to built-in defaults.
+        param_sources = {}
         missing = [
             name
             for name, val in [("--threshold", args.threshold), ("--tp", args.tp), ("--sl", args.sl)]
@@ -545,11 +598,19 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
         f"({day_start.isoformat()} → {day_end.isoformat()})",
         flush=True,
     )
-    print(
-        f"  config_source={config_source} threshold={threshold} tp={tp_pct} sl={sl_pct} "
-        f"horizon={horizon} mt_filter_mode={mt_filter_mode}",
-        flush=True,
-    )
+    if param_sources:
+        print(
+            f"  param sources: {param_sources}  "
+            f"threshold={threshold} tp={tp_pct} sl={sl_pct} "
+            f"horizon={horizon} mt_filter_mode={mt_filter_mode}",
+            flush=True,
+        )
+    else:
+        print(
+            f"  (legacy mode) threshold={threshold} tp={tp_pct} sl={sl_pct} "
+            f"horizon={horizon} mt_filter_mode={mt_filter_mode}",
+            flush=True,
+        )
 
     klines_1h_path = os.path.join(data_dir, "klines_1h.json")
     if not os.path.exists(klines_1h_path):
@@ -621,8 +682,8 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
 
     os.makedirs(report_dir, exist_ok=True)
 
-    # Augment report with config source info.
-    report["params"]["config_source"] = config_source
+    # Augment report with per-field config source info and effective mt_filter_mode.
+    report["params"]["config_source"] = param_sources if param_sources else "cli"
     report["params"]["effective_mt_filter_mode"] = (
         normalize_mt_mode(mt_filter_mode) if mt_filter else "off"
     )
@@ -641,7 +702,7 @@ def _run_one_symbol(args: argparse.Namespace, symbol: Optional[str]) -> int:
     print("\n" + "=" * 60, flush=True)
     print(f"DAILY REPORT SUMMARY: {date_str} symbol={effective_symbol or 'ALL_IN_LOG'}", flush=True)
     print(f"  model_version : {report['model_version']}", flush=True)
-    print(f"  config_source : {config_source}", flush=True)
+    print(f"  param_sources : {report['params'].get('config_source')}", flush=True)
     print(f"  mt_filter_mode: {report['params'].get('effective_mt_filter_mode', mt_filter_mode)}", flush=True)
     ss = report["signal_stats"]
     print(f"  predictions   : {ss['total_predictions']}", flush=True)
