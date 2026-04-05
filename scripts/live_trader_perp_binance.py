@@ -91,7 +91,7 @@ def call_ml_service(as_of_ts: str, base_url: str, symbol: Optional[str] = None) 
     payload = {"interval": "1h", "as_of_ts": as_of_ts}
     if symbol is not None:
         payload["symbol"] = symbol
-    r = requests.post(base_url, json=payload, timeout=10)
+    r = requests.post(base_url, json=payload, timeout=30)
     r.raise_for_status()
     return r.json()
 
