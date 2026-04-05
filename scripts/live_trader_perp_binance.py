@@ -87,8 +87,10 @@ def _current_hour_bar_close() -> datetime:
     return now.replace(minute=0, second=0, microsecond=0)
 
 
-def call_ml_service(as_of_ts: str, base_url: str) -> dict:
+def call_ml_service(as_of_ts: str, base_url: str, symbol: Optional[str] = None) -> dict:
     payload = {"interval": "1h", "as_of_ts": as_of_ts}
+    if symbol is not None:
+        payload["symbol"] = symbol
     r = requests.post(base_url, json=payload, timeout=10)
     r.raise_for_status()
     return r.json()
@@ -245,7 +247,7 @@ def _load_all_symbols_from_configs() -> List[str]:
       - lines like: - symbol: ETHUSDT
       - lines like: symbol: ETHUSDT
     """
-    cfg_path = os.path.join(os.path.dirname(_SCRIPT_DIR), "configs", "symbols.yaml")
+    cfg_path = os.path.join(_REPO_ROOT, "configs", "symbols.yaml")
     if not os.path.exists(cfg_path):
         raise FileNotFoundError(
             f"configs/symbols.yaml not found at expected path: {cfg_path}. "
@@ -551,7 +553,7 @@ def run_for_one_symbol(
         as_of_ts = bar_close.isoformat().replace("+00:00", "Z")
         print(f"[{_now_utc().isoformat()}] {symbol} processing bar_close={as_of_ts}")
 
-        j = call_ml_service(as_of_ts, base_url=args.ml_service_url)
+        j = call_ml_service(as_of_ts, base_url=args.ml_service_url, symbol=symbol)
 
         side_str = str(j.get("signal", "FLAT"))
         model_version = j.get("model_version")
@@ -696,7 +698,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         print(f"[{_now_utc().isoformat()}] multi-symbol processing bar_close={as_of_ts}")
 
         for symbol in symbols:
-            j = call_ml_service(as_of_ts, base_url=args.ml_service_url)
+            j = call_ml_service(as_of_ts, base_url=args.ml_service_url, symbol=symbol)
 
             side_str = str(j.get("signal", "FLAT"))
             model_version = j.get("model_version")
