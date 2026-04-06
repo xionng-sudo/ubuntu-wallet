@@ -416,7 +416,9 @@ func computeAndPersistFeaturesAndSignals(dataDir string) {
 // symbol and persists the results.
 //
 //   - isPrimary=true:  klines read from legacy keys ("1h", "4h", "1d"), results
-//     written to dataDir (root), in-memory store updated.
+//     written to dataDir (root) for backward compat AND also mirrored to
+//     dataDir/<SYMBOL> so ml-service can find them at the standard per-symbol
+//     path.  In-memory store is updated once.
 //   - isPrimary=false: klines read from per-symbol keys ("SYM/1h", etc.), results
 //     written to dataDir/<SYMBOL>.
 //
@@ -497,6 +499,33 @@ func computeSymbolFeaturesAndSignals(dataDir, sym string, isPrimary bool, klines
 	}
 
 	if isPrimary {
+		// Mirror feature and signal files to the per-symbol directory
+		// (dataDir/<sym>/) so that ml-service can find them at the standard
+		// per-symbol path (data/ETHUSDT/features/, data/ETHUSDT/signals/).
+		// The root-path writes above are kept for backward compatibility.
+		symSubDir := filepath.Join(dataDir, sym)
+		if _, err := features.WriteLatest(symSubDir, snap); err != nil {
+			log.Warnf("[%s] features.WriteLatest(per-symbol) failed: %v", sym, err)
+		}
+		if _, err := features.AppendHistory(symSubDir, snap); err != nil {
+			log.Warnf("[%s] features.AppendHistory(per-symbol) failed: %v", sym, err)
+		}
+		if _, err := signal.WriteLatestRules(symSubDir, &rulesRes); err != nil {
+			log.Warnf("[%s] signal.WriteLatestRules(per-symbol) failed: %v", sym, err)
+		}
+		if _, err := signal.AppendHistory(symSubDir, &rulesRes); err != nil {
+			log.Warnf("[%s] signal.AppendHistory(rules, per-symbol) failed: %v", sym, err)
+		}
+		if _, err := signal.WriteLatestML(symSubDir, &mlRes); err != nil {
+			log.Warnf("[%s] signal.WriteLatestML(per-symbol) failed: %v", sym, err)
+		}
+		if _, err := signal.WriteLatest(symSubDir, &mlRes); err != nil {
+			log.Warnf("[%s] signal.WriteLatest(ml->compat, per-symbol) failed: %v", sym, err)
+		}
+		if _, err := signal.AppendHistory(symSubDir, &mlRes); err != nil {
+			log.Warnf("[%s] signal.AppendHistory(ml, per-symbol) failed: %v", sym, err)
+		}
+
 		// Collector health/debug log — only written for primary symbol to keep
 		// backward compatibility with consumers that expect a single-symbol log.
 		if hp := strings.TrimSpace(os.Getenv("COLLECTOR_PREDICT_HEALTH_LOG_PATH")); hp != "" {
