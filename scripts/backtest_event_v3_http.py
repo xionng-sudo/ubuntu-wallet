@@ -37,8 +37,6 @@ for _p in (_REPO_ROOT, _SCRIPT_DIR):
         _sys.path.insert(0, _p)
 
 # Optional: load per-symbol config from configs/symbols.yaml
-# Use package import (scripts.symbol_config) to avoid name-collision with any
-# top-level 'symbol_config' module that may exist on sys.path.
 try:
     from scripts.symbol_config import get_symbol_config as _get_symbol_config  # type: ignore
 except ImportError:
@@ -138,8 +136,17 @@ class CachedPred:
     model_version: str
 
 
-def predict_payload(interval: str, as_of_ts: str) -> Dict[str, Any]:
-    return {"interval": interval, "as_of_ts": as_of_ts}
+# ------------------------------------------------------------------ #
+# FIX: symbol is now passed to /predict so ml-service uses the        #
+# correct per-symbol model and kline data directory.                  #
+# Previously predict_payload omitted symbol, causing all symbols to   #
+# fall back to the default model and produce identical predictions.   #
+# ------------------------------------------------------------------ #
+def predict_payload(interval: str, as_of_ts: str, symbol: Optional[str] = None) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"interval": interval, "as_of_ts": as_of_ts}
+    if symbol:
+        payload["symbol"] = symbol
+    return payload
 
 
 def call_predict(base_url: str, payload: Dict[str, Any], timeout_s: int = 60) -> Dict[str, Any]:
@@ -780,7 +787,6 @@ def main() -> int:
     ap.add_argument("--sleep-ms", type=int, default=0)
     ap.add_argument("--side-source", choices=["signal", "probs"], default="probs")
 
-    # IMPORTANT: default=None so YAML can take effect when flag omitted.
     ap.add_argument(
         "--mt-filter-mode",
         choices=["off", "long_only", "symmetric", "strict", "relaxed", "trend_guard", "daily_guard", "conflict", "regime", "layered"],
@@ -877,7 +883,12 @@ def main() -> int:
         args.sl_grid = _BACKTEST_DEFAULTS["sl_grid"]
         _param_sources["sl_grid"] = "default"
 
+    # ------------------------------------------------------------------ #
+    # FIX: _sym_label must be defined BEFORE get_pred_no_disk so the      #
+    # closure can capture it and pass symbol= to predict_payload.         #
+    # ------------------------------------------------------------------ #
     _sym_label = args.symbol or _symbol_from_data_dir(args.data_dir)
+
     print(
         f"[config] symbol={_sym_label}  "
         + "  ".join(
@@ -962,7 +973,8 @@ def main() -> int:
         if as_of_ts in pred_cache:
             return pred_cache[as_of_ts]
 
-        raw = call_predict(args.base_url, predict_payload(args.interval, as_of_ts))
+        # FIX: pass symbol so ml-service uses the correct per-symbol model
+        raw = call_predict(args.base_url, predict_payload(args.interval, as_of_ts, symbol=_sym_label))
         snap = normalize_predict_response(raw)
         sel_p_long, sel_p_short, sel_p_flat, sel_source = select_effective_probs(snap)
 
@@ -1007,7 +1019,7 @@ def main() -> int:
     selected_prob_sources = Counter()
     selected_prob_sources[first_cp.selected_prob_source] += 1
 
-    symbol = _symbol_from_data_dir(args.data_dir)
+    symbol = _sym_label  # already resolved above
     cache_key = _cache_key(
         key_mode=args.pred_cache_key,
         symbol=symbol,

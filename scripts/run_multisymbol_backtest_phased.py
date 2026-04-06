@@ -25,16 +25,16 @@ DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEU
 
 # Phase1: coarse-ish but frequency-friendly.
 # Goal: avoid always picking thr=0.80 "few trades all win" solutions.
-PHASE1_THRESHOLDS = [0.55, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70, 0.72, 0.75]
+PHASE1_THRESHOLDS = [0.40, 0.43, 0.45, 0.48, 0.50, 0.52, 0.55, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70, 0.72, 0.75]
 PHASE1_MT_MODES = ["daily_guard", "off"]
 
 # Expand TP/SL a bit so "all TP no SL" doesn't dominate too easily.
-PHASE1_TP = [0.0170, 0.0190, 0.0210]
+PHASE1_TP = [0.0130,0.0150,0.0170, 0.0190, 0.0210]
 PHASE1_SL = [0.0090, 0.0100, 0.0110, 0.0120]
 PHASE1_HORIZON = [6, 8, 12]
 
 # Phase2: refinement grid (tp/sl/h), threshold+mt_mode come from phase1_best.json
-PHASE2_TPS = [0.0170, 0.0190, 0.0210, 0.0230]
+PHASE2_TPS = [0.0130,0.0150,0.0170, 0.0190, 0.0210, 0.0230]
 PHASE2_SLS = [0.0090, 0.0100, 0.0110, 0.0120]
 PHASE2_HORIZONS = [6, 8, 12]
 
@@ -47,7 +47,7 @@ MIN_N_TRADE = 1
 # This is the key to hit your "2–5 trades/day across 7 symbols" target.
 # With 31 days and 7 symbols, a rough target is ~60–150 trades/month total.
 # Enforcing some per-symbol baseline avoids picking ultra-high thresholds everywhere.
-MIN_SIGNALS_PER_WEEK = 4.0
+MIN_SIGNALS_PER_WEEK = 2.0
 
 USE_TWO_STAGE_TP = False
 TP1_RATIO = 0.70
