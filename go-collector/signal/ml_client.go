@@ -73,6 +73,11 @@ func PredictWithML(ctx context.Context, snap *features.FeatureSnapshot, timeout 
 
 	url := mlServiceURL()
 
+	// Fail fast if the parent context is already canceled before we start.
+	if err := ctx.Err(); err != nil {
+		return res, fmt.Errorf("ml request aborted before start: %w", err)
+	}
+
 	// Use a deadline-scoped context so each call respects the timeout while
 	// still honouring the caller's cancellation.
 	callCtx, cancel := context.WithTimeout(ctx, timeout)

@@ -114,12 +114,16 @@ def _get_loaded_model(symbol: Optional[str]) -> Optional[LoadedModel]:
         return _loaded
 
     with _loaded_models_lock:
-        # Retry a previously-failed load if the retry window has elapsed.
-        if model_dir not in _loaded_models or (
-            _loaded_models[model_dir] is None
-            and model_dir in _failed_model_dirs
-            and (time.monotonic() - _failed_model_dirs[model_dir]) >= _MODEL_LOAD_RETRY_SECONDS
-        ):
+        # Determine whether we need to attempt a (re-)load.
+        already_loaded = _loaded_models.get(model_dir)
+        needs_load = model_dir not in _loaded_models  # first-time attempt
+        if not needs_load and already_loaded is None:
+            # Previous load failed — retry after the cooling-off period.
+            failed_at = _failed_model_dirs.get(model_dir)
+            if failed_at is not None and (time.monotonic() - failed_at) >= _MODEL_LOAD_RETRY_SECONDS:
+                needs_load = True
+
+        if needs_load:
             try:
                 _loaded_models[model_dir] = load_model(model_dir)
                 _failed_model_dirs.pop(model_dir, None)
