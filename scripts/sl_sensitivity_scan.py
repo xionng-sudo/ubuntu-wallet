@@ -40,13 +40,26 @@ from backtest_event_v3_http import (
 
 
 def parse_range(spec: str) -> List[float]:
+    """Parse a 'start:end:step' range string into a list of float values.
+
+    Uses integer-step arithmetic to avoid floating-point accumulation errors
+    (e.g. 0.001:0.02:0.001 reliably includes 0.02 without drift).
+    """
+    import decimal as _decimal
     a, b, step = [float(x) for x in spec.split(":")]
+    if step <= 0:
+        raise ValueError(f"step must be positive, got {step}")
+    # Determine the number of decimal places using Decimal to handle both
+    # regular floats (0.001) and scientific notation (1e-10) correctly.
+    exponent = _decimal.Decimal(str(step)).as_tuple().exponent
+    decimals = max(0, -exponent) if isinstance(exponent, int) else 0
+    # Use integer counting to avoid float drift.
+    n = int(round((b - a) / step)) + 1
     out = []
-    x = a
-    # account for floating rounding
-    while x <= b + 1e-12:
-        out.append(round(x, 12))
-        x += step
+    for i in range(n):
+        v = round(a + i * step, decimals)
+        if v <= b + step * 1e-9:
+            out.append(v)
     return out
 
 

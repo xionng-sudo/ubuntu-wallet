@@ -4,6 +4,7 @@ import glob as _glob
 import json
 import logging
 import os
+import time
 from threading import Lock
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timezone
@@ -56,6 +57,11 @@ _loaded: Optional[LoadedModel] = None
 _loaded_models: Dict[str, Optional[LoadedModel]] = {}
 _loaded_models_lock = Lock()
 
+# Track model directories that failed to load along with the time of failure,
+# so we can retry after _MODEL_LOAD_RETRY_SECONDS instead of caching None forever.
+_failed_model_dirs: Dict[str, float] = {}
+_MODEL_LOAD_RETRY_SECONDS = 300  # retry failed per-symbol model loads every 5 min
+
 logger = logging.getLogger("ml-service")
 logger.setLevel(logging.INFO)
 
@@ -95,6 +101,9 @@ def _get_loaded_model(symbol: Optional[str]) -> Optional[LoadedModel]:
     * If the per-symbol model directory (``models/<SYMBOL>/current``) exists
       and is different from the default ``MODEL_DIR``, the model is loaded
       lazily and cached.
+    * On load failure the directory is recorded with a timestamp; the load is
+      retried after ``_MODEL_LOAD_RETRY_SECONDS`` so a newly deployed model
+      is automatically picked up without requiring a service restart.
     * Otherwise the startup-loaded default model (``_loaded``) is returned,
       preserving backward compatibility for ETHUSDT and legacy deployments.
     """
@@ -105,9 +114,19 @@ def _get_loaded_model(symbol: Optional[str]) -> Optional[LoadedModel]:
         return _loaded
 
     with _loaded_models_lock:
-        if model_dir not in _loaded_models:
+        # Determine whether we need to attempt a (re-)load.
+        already_loaded = _loaded_models.get(model_dir)
+        needs_load = model_dir not in _loaded_models  # first-time attempt
+        if not needs_load and already_loaded is None:
+            # Previous load failed — retry after the cooling-off period.
+            failed_at = _failed_model_dirs.get(model_dir)
+            if failed_at is not None and (time.monotonic() - failed_at) >= _MODEL_LOAD_RETRY_SECONDS:
+                needs_load = True
+
+        if needs_load:
             try:
                 _loaded_models[model_dir] = load_model(model_dir)
+                _failed_model_dirs.pop(model_dir, None)
                 logger.info("Loaded per-symbol model from %s", model_dir)
             except Exception:
                 logger.warning(
@@ -116,6 +135,7 @@ def _get_loaded_model(symbol: Optional[str]) -> Optional[LoadedModel]:
                     exc_info=True,
                 )
                 _loaded_models[model_dir] = None
+                _failed_model_dirs[model_dir] = time.monotonic()
 
     loaded = _loaded_models.get(model_dir)
     if loaded is not None:
@@ -390,12 +410,14 @@ def predict(req: PredictRequest):
                 as_of_ts=effective_as_of,
             )
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"feature_build_failed: {e}")
+        logger.error("feature_build_failed for symbol=%s interval=%s: %s", symbol, interval, e, exc_info=True)
+        raise HTTPException(status_code=503, detail="feature_build_failed")
 
     try:
         p, mode = predict_proba(loaded, built.X_row)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"predict_failed: {e}")
+        logger.error("predict_failed for symbol=%s interval=%s: %s", symbol, interval, e, exc_info=True)
+        raise HTTPException(status_code=500, detail="predict_failed")
 
     # Determine feature timestamp used for logging.
     # Preference order:
@@ -412,7 +434,7 @@ def predict(req: PredictRequest):
     if feat_ts is None and as_of_ts:
         feat_ts = _parse_iso_to_utc(as_of_ts)
     if feat_ts is None:
-        feat_ts = datetime.utcnow().astimezone(timezone.utc)
+        feat_ts = datetime.now(timezone.utc)
 
     # Apply calibration if available
     cal_p, cal_method = _apply_calibration(loaded, p)

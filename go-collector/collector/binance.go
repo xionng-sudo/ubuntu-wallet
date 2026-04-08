@@ -325,16 +325,28 @@ func parseBinanceKlines(body []byte, symbol, interval string) ([]models.OHLCV, e
 	}
 
 	out := make([]models.OHLCV, 0, len(raw))
-	for _, k := range raw {
+	for idx, k := range raw {
 		if len(k) < 6 {
 			continue
 		}
-		open, _ := strconv.ParseFloat(k[1].(string), 64)
-		high, _ := strconv.ParseFloat(k[2].(string), 64)
-		low, _ := strconv.ParseFloat(k[3].(string), 64)
-		closeP, _ := strconv.ParseFloat(k[4].(string), 64)
-		vol, _ := strconv.ParseFloat(k[5].(string), 64)
-		ts := int64(k[0].(float64))
+		// k[0] is timestamp (float64 from JSON number), k[1..5] are price/volume strings.
+		// Use safe type assertions to avoid panic on unexpected API response format.
+		tsRaw, ok0 := k[0].(float64)
+		s1, ok1 := k[1].(string)
+		s2, ok2 := k[2].(string)
+		s3, ok3 := k[3].(string)
+		s4, ok4 := k[4].(string)
+		s5, ok5 := k[5].(string)
+		if !ok0 || !ok1 || !ok2 || !ok3 || !ok4 || !ok5 {
+			log.Warnf("parseBinanceKlines: unexpected field types at index %d for %s/%s — skipping bar", idx, symbol, interval)
+			continue
+		}
+		open, _ := strconv.ParseFloat(s1, 64)
+		high, _ := strconv.ParseFloat(s2, 64)
+		low, _ := strconv.ParseFloat(s3, 64)
+		closeP, _ := strconv.ParseFloat(s4, 64)
+		vol, _ := strconv.ParseFloat(s5, 64)
+		ts := int64(tsRaw)
 
 		out = append(out, models.OHLCV{
 			Symbol:    symbol,

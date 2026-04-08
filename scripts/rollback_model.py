@@ -150,7 +150,19 @@ def main() -> int:
         print("ERROR: target entry has no archive_dir. Cannot restore files.", flush=True)
         return 2
 
-    archive_abs = os.path.join(model_dir, archive_rel)
+    archive_abs = os.path.realpath(os.path.join(model_dir, archive_rel))
+
+    # Guard against path traversal: the resolved archive directory must be
+    # strictly inside model_dir to prevent restoring from an unexpected location
+    # if registry.json were corrupted or tampered with.
+    model_dir_real = os.path.realpath(model_dir)
+    if not (archive_abs == model_dir_real or archive_abs.startswith(model_dir_real + os.sep)):
+        print(
+            f"ERROR: archive_dir '{archive_rel}' resolves outside model_dir '{model_dir}'. "
+            "Aborting to prevent path traversal.",
+            flush=True,
+        )
+        return 2
 
     print(f"\n{prefix}Restoring models/current/ from: {archive_abs}")
 

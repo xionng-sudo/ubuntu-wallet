@@ -108,7 +108,7 @@ class TechnicalAnalyzer:
         plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
 
-        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)
         df["adx"] = dx.rolling(window=period).mean()
         df["plus_di"] = plus_di
         df["minus_di"] = minus_di
@@ -214,7 +214,7 @@ class TechnicalAnalyzer:
         low_min = df["low"].rolling(window=k_period).min()
         high_max = df["high"].rolling(window=k_period).max()
 
-        df["stoch_k"] = 100 * (df["close"] - low_min) / (high_max - low_min)
+        df["stoch_k"] = 100 * (df["close"] - low_min) / (high_max - low_min).replace(0, np.nan)
         df["stoch_d"] = df["stoch_k"].rolling(window=d_period).mean()
 
         return df
@@ -226,7 +226,7 @@ class TechnicalAnalyzer:
         high_max = df["high"].rolling(window=period).max()
         low_min = df["low"].rolling(window=period).min()
 
-        df["williams_r"] = -100 * (high_max - df["close"]) / (high_max - low_min)
+        df["williams_r"] = -100 * (high_max - df["close"]) / (high_max - low_min).replace(0, np.nan)
 
         return df
 
@@ -238,7 +238,7 @@ class TechnicalAnalyzer:
         ma = tp.rolling(window=period).mean()
         mad = tp.rolling(window=period).apply(lambda x: np.mean(np.abs(x - np.mean(x))))
 
-        df["cci"] = (tp - ma) / (0.015 * mad)
+        df["cci"] = (tp - ma) / (0.015 * mad.replace(0, np.nan))
 
         return df
 
@@ -280,8 +280,8 @@ class TechnicalAnalyzer:
         df["bb_upper"] = sma + std_dev * std
         df["bb_middle"] = sma
         df["bb_lower"] = sma - std_dev * std
-        df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / df["bb_middle"]
-        df["bb_pct"] = (df["close"] - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"])
+        df["bb_width"] = (df["bb_upper"] - df["bb_lower"]) / sma.replace(0, np.nan)
+        df["bb_pct"] = (df["close"] - df["bb_lower"]) / (df["bb_upper"] - df["bb_lower"]).replace(0, np.nan)
 
         return df
 

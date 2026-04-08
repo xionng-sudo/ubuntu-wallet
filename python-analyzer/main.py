@@ -277,19 +277,26 @@ class ETHPredictionSystem:
 
     def run_auto_update(self, interval: int = 300):
         """后台自动更新循环"""
+        self._stop_event = threading.Event()
 
         def update_loop():
-            while True:
+            while not self._stop_event.is_set():
                 try:
                     print(f"\n[SYSTEM] 自动更新 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
                     self.run_full_cycle()
                 except Exception as e:
                     print(f"[SYSTEM] 更新出错: {e}")
-                time.sleep(interval)
+                # Use Event.wait() so we can interrupt the sleep immediately on stop.
+                self._stop_event.wait(timeout=interval)
 
         thread = threading.Thread(target=update_loop, daemon=True)
         thread.start()
         print(f"[SYSTEM] 自动更新已启动 (每 {interval} 秒)")
+
+    def stop_auto_update(self):
+        """停止后台自动更新循环"""
+        if hasattr(self, "_stop_event"):
+            self._stop_event.set()
 
     def save_charts(self):
         """生成并保存所有图表"""

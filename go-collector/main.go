@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -19,7 +21,7 @@ import (
 	"github.com/ubuntu-wallet/go-collector/features"
 	"github.com/ubuntu-wallet/go-collector/market"
 	"github.com/ubuntu-wallet/go-collector/models"
-	"github.com/ubuntu-wallet/go-collector/signal"
+	gosignal "github.com/ubuntu-wallet/go-collector/signal"
 )
 
 const (
@@ -59,8 +61,8 @@ type DataStore struct {
 
 	// New: computed artifacts (in-memory latest)
 	LatestFeatures1H  *features.FeatureSnapshot `json:"-"`
-	LatestSignalRules *signal.SignalResult      `json:"-"`
-	LatestSignalML    *signal.SignalResult      `json:"-"`
+	LatestSignalRules *gosignal.SignalResult      `json:"-"`
+	LatestSignalML    *gosignal.SignalResult      `json:"-"`
 }
 
 var store = &DataStore{
@@ -250,25 +252,50 @@ func main() {
 	log.Info("Starting initial fast data collection...")
 	collectFastAll(dataDir, binance, true)
 
+	// Graceful shutdown: listen for SIGTERM / SIGINT so systemd (or the user)
+	// can cleanly stop the process while collection goroutines wind down.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	go func() {
+		s := <-sigCh
+		log.Infof("Received signal %s — shutting down", s)
+		cancel()
+	}()
+
 	go func() {
 		ticker := time.NewTicker(fastEvery)
 		defer ticker.Stop()
-		for range ticker.C {
-			log.Info("Running periodic FAST data collection...")
-			collectFastAll(dataDir, binance, false)
+		for {
+			select {
+			case <-ctx.Done():
+				log.Info("FAST collection goroutine stopped")
+				return
+			case <-ticker.C:
+				log.Info("Running periodic FAST data collection...")
+				collectFastAll(dataDir, binance, false)
+			}
 		}
 	}()
 
 	go func() {
 		ticker := time.NewTicker(slowEvery)
 		defer ticker.Stop()
-		for range ticker.C {
-			log.Info("Running periodic SLOW data collection...")
-			collectSlowAll(dataDir, binance, okx, coinbase)
+		for {
+			select {
+			case <-ctx.Done():
+				log.Info("SLOW collection goroutine stopped")
+				return
+			case <-ticker.C:
+				log.Info("Running periodic SLOW data collection...")
+				collectSlowAll(dataDir, binance, okx, coinbase)
+			}
 		}
 	}()
 
-	startAPIServer()
+	startAPIServer(ctx)
 }
 
 // FAST: only what ML really needs (stable + low rate-limit risk)
@@ -475,27 +502,27 @@ func computeSymbolFeaturesAndSignals(dataDir, sym string, isPrimary bool, klines
 		sym, snap.SchemaColumns, snap.ComputedCols, snap.MissingCols)
 
 	// === RULES ===
-	rulesRes := signal.RulesEngine(snap)
+	rulesRes := gosignal.RulesEngine(snap)
 
-	if _, err := signal.WriteLatestRules(symDataDir, &rulesRes); err != nil {
+	if _, err := gosignal.WriteLatestRules(symDataDir, &rulesRes); err != nil {
 		log.Warnf("[%s] signal.WriteLatestRules failed: %v", sym, err)
 	}
-	if _, err := signal.AppendHistory(symDataDir, &rulesRes); err != nil {
-		log.Warnf("[%s] signal.AppendHistory(rules) failed: %v", sym, err)
+	if _, err := gosignal.AppendHistory(symDataDir, &rulesRes); err != nil {
+		log.Warnf("[%s] gosignal.AppendHistory(rules) failed: %v", sym, err)
 	}
 
 	// === ML (or fallback) — triggers POST /predict on ml-service ===
-	mlRes := signal.MLOrFallback(context.Background(), snap)
+	mlRes := gosignal.MLOrFallback(context.Background(), snap)
 
-	if _, err := signal.WriteLatestML(symDataDir, &mlRes); err != nil {
+	if _, err := gosignal.WriteLatestML(symDataDir, &mlRes); err != nil {
 		log.Warnf("[%s] signal.WriteLatestML failed: %v", sym, err)
 	}
 	// Backward-compatible "latest" signal file (ML result or rules fallback).
-	if _, err := signal.WriteLatest(symDataDir, &mlRes); err != nil {
-		log.Warnf("[%s] signal.WriteLatest(ml->compat latest) failed: %v", sym, err)
+	if _, err := gosignal.WriteLatest(symDataDir, &mlRes); err != nil {
+		log.Warnf("[%s] gosignal.WriteLatest(ml->compat latest) failed: %v", sym, err)
 	}
-	if _, err := signal.AppendHistory(symDataDir, &mlRes); err != nil {
-		log.Warnf("[%s] signal.AppendHistory(ml) failed: %v", sym, err)
+	if _, err := gosignal.AppendHistory(symDataDir, &mlRes); err != nil {
+		log.Warnf("[%s] gosignal.AppendHistory(ml) failed: %v", sym, err)
 	}
 
 	if isPrimary {
@@ -510,27 +537,27 @@ func computeSymbolFeaturesAndSignals(dataDir, sym string, isPrimary bool, klines
 		if _, err := features.AppendHistory(symSubDir, snap); err != nil {
 			log.Warnf("[%s] features.AppendHistory(per-symbol) failed: %v", sym, err)
 		}
-		if _, err := signal.WriteLatestRules(symSubDir, &rulesRes); err != nil {
-			log.Warnf("[%s] signal.WriteLatestRules(per-symbol) failed: %v", sym, err)
+		if _, err := gosignal.WriteLatestRules(symSubDir, &rulesRes); err != nil {
+			log.Warnf("[%s] gosignal.WriteLatestRules(per-symbol) failed: %v", sym, err)
 		}
-		if _, err := signal.AppendHistory(symSubDir, &rulesRes); err != nil {
-			log.Warnf("[%s] signal.AppendHistory(rules, per-symbol) failed: %v", sym, err)
+		if _, err := gosignal.AppendHistory(symSubDir, &rulesRes); err != nil {
+			log.Warnf("[%s] gosignal.AppendHistory(rules, per-symbol) failed: %v", sym, err)
 		}
-		if _, err := signal.WriteLatestML(symSubDir, &mlRes); err != nil {
-			log.Warnf("[%s] signal.WriteLatestML(per-symbol) failed: %v", sym, err)
+		if _, err := gosignal.WriteLatestML(symSubDir, &mlRes); err != nil {
+			log.Warnf("[%s] gosignal.WriteLatestML(per-symbol) failed: %v", sym, err)
 		}
-		if _, err := signal.WriteLatest(symSubDir, &mlRes); err != nil {
-			log.Warnf("[%s] signal.WriteLatest(ml->compat, per-symbol) failed: %v", sym, err)
+		if _, err := gosignal.WriteLatest(symSubDir, &mlRes); err != nil {
+			log.Warnf("[%s] gosignal.WriteLatest(ml->compat, per-symbol) failed: %v", sym, err)
 		}
-		if _, err := signal.AppendHistory(symSubDir, &mlRes); err != nil {
-			log.Warnf("[%s] signal.AppendHistory(ml, per-symbol) failed: %v", sym, err)
+		if _, err := gosignal.AppendHistory(symSubDir, &mlRes); err != nil {
+			log.Warnf("[%s] gosignal.AppendHistory(ml, per-symbol) failed: %v", sym, err)
 		}
 
 		// Collector health/debug log — only written for primary symbol to keep
 		// backward compatibility with consumers that expect a single-symbol log.
 		if hp := strings.TrimSpace(os.Getenv("COLLECTOR_PREDICT_HEALTH_LOG_PATH")); hp != "" {
-			if _, err := signal.AppendJSONL(hp, &mlRes); err != nil {
-				log.Warnf("[%s] signal.AppendJSONL(health) failed: %v", sym, err)
+			if _, err := gosignal.AppendJSONL(hp, &mlRes); err != nil {
+				log.Warnf("[%s] gosignal.AppendJSONL(health) failed: %v", sym, err)
 			}
 		}
 
@@ -589,6 +616,11 @@ func collectOKXData(okx *collector.OKXCollector) {
 
 	worker := func() {
 		defer wg.Done()
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("[OKX] worker panic recovered: %v", r)
+			}
+		}()
 		for j := range jobs {
 			trades, err := okx.GetTraderTrades(j.traderID, tradeLimit)
 			if err != nil {
@@ -909,7 +941,7 @@ func saveJSON(filename string, data interface{}) {
 	}
 }
 
-func startAPIServer() {
+func startAPIServer(ctx context.Context) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/traders", handleTraders)
 	mux.HandleFunc("/api/trades", handleTrades)
@@ -932,10 +964,26 @@ func startAPIServer() {
 		port = "8080"
 	}
 
+	srv := &http.Server{
+		Addr:    ":" + port,
+		Handler: handler,
+	}
+
 	log.Infof("API server starting on port %s", port)
 	log.Infof("Endpoints: /api/traders, /api/trades, /api/price-levels, /api/market, /api/klines, /api/status, /api/healthz, /api/features/*, /api/signal")
 
-	if err := http.ListenAndServe(":"+port, handler); err != nil {
+	// Shut the server down gracefully when the context is cancelled.
+	go func() {
+		<-ctx.Done()
+		log.Info("API server shutting down...")
+		shutCtx, shutCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutCancel()
+		if err := srv.Shutdown(shutCtx); err != nil {
+			log.Errorf("API server shutdown error: %v", err)
+		}
+	}()
+
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("API server failed: %v", err)
 	}
 }
@@ -1325,7 +1373,7 @@ func handleSignal(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, rules)
 			return
 		}
-		res := signal.RulesEngine(snap)
+		res := gosignal.RulesEngine(snap)
 		writeJSON(w, res)
 		return
 	case "ml":
@@ -1333,7 +1381,7 @@ func handleSignal(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, ml)
 			return
 		}
-		res := signal.MLOrFallback(context.Background(), snap)
+		res := gosignal.MLOrFallback(context.Background(), snap)
 		writeJSON(w, res)
 		return
 	default:
