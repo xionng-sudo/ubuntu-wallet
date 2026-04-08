@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/sirupsen/logrus"
 	"github.com/ubuntu-wallet/go-collector/features"
 )
 
@@ -36,6 +37,11 @@ func mlServiceURL() string {
 	}
 	return v
 }
+
+// sharedMLClient is reused across calls to avoid per-request connection
+// allocation overhead. The Timeout field is intentionally left at zero
+// here — callers pass a context with deadline instead.
+var sharedMLClient = &http.Client{}
 
 func PredictWithML(ctx context.Context, snap *features.FeatureSnapshot, timeout time.Duration) (SignalResult, error) {
 	res := SignalResult{
@@ -66,21 +72,29 @@ func PredictWithML(ctx context.Context, snap *features.FeatureSnapshot, timeout 
 	}
 
 	url := mlServiceURL()
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
+
+	// Use a deadline-scoped context so each call respects the timeout while
+	// still honouring the caller's cancellation.
+	callCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	httpReq, err := http.NewRequestWithContext(callCtx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
 		return res, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: timeout}
-	httpResp, err := client.Do(httpReq)
+	httpResp, err := sharedMLClient.Do(httpReq)
 	if err != nil {
 		return res, fmt.Errorf("ml request failed: url=%s err=%w", url, err)
 	}
 	defer httpResp.Body.Close()
 
 	// Read body regardless of status (helps debug 4xx/5xx HTML/JSON)
-	bodyBytes, _ := io.ReadAll(httpResp.Body)
+	bodyBytes, readErr := io.ReadAll(httpResp.Body)
+	if readErr != nil {
+		log.Warnf("ml_client: failed to read response body from %s: %v", url, readErr)
+	}
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		snippet := string(bodyBytes)

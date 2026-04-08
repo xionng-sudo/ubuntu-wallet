@@ -6,8 +6,12 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/ubuntu-wallet/ml-service
-ExecStart=/home/ubuntu/ubuntu-wallet/ml-service/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 9000
+# Default repo root; override APP_ROOT or other variables in
+# /etc/ubuntu-wallet/ml-service.env if needed.
+Environment=APP_ROOT=/home/ubuntu/ubuntu-wallet
+EnvironmentFile=-/etc/ubuntu-wallet/ml-service.env
+WorkingDirectory=${APP_ROOT}/ml-service
+ExecStart=${APP_ROOT}/ml-service/.venv/bin/python -m uvicorn app:app --host 127.0.0.1 --port 9000
 Restart=always
 RestartSec=3
 

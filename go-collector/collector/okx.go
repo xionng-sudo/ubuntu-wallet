@@ -408,7 +408,7 @@ func (o *OKXCollector) GetKlines(symbol, interval string, limit int) ([]models.O
 			Low:       low,
 			Close:     closeP,
 			Volume:    vol,
-			Timestamp: time.UnixMilli(ts),
+			Timestamp: time.UnixMilli(ts).UTC(),
 			Interval:  interval,
 		})
 	}
@@ -441,7 +441,7 @@ func (o *OKXCollector) generateMockTraders(n int) []models.Trader {
 func (o *OKXCollector) generateMockTrades(traderID string, n int) []models.Trade {
 	trades := make([]models.Trade, n)
 	basePrice := 2500.0
-	now := time.Now()
+	now := time.Now().UTC()
 	for i := 0; i < n; i++ {
 		side := "BUY"
 		strategy := "LONG"
