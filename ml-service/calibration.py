@@ -130,6 +130,10 @@ def fit_calibration(
 
         calibrators.append(cal)
 
+    assert len(per_class_methods) == len(calibrators) == n_classes, (
+        f"Invariant violation: per_class_methods length {len(per_class_methods)} "
+        f"!= calibrators length {len(calibrators)} (n_classes={n_classes})"
+    )
     trained_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return CalibratedModel(
         method=method,
@@ -183,7 +187,17 @@ def calibrate_proba(
         elif cls_method == "sigmoid":
             cal_proba[:, cls] = cal.predict_proba(p_cls.reshape(-1, 1))[:, 1]
         else:
-            # Unknown method stored in artifact: pass through raw probability.
+            # Unknown method stored in artifact — fall back to raw probability
+            # and log a warning so operator can diagnose potential version
+            # mismatch or corrupted artifact.
+            import warnings
+            warnings.warn(
+                f"calibrate_proba: unknown method {cls_method!r} for class {cls}; "
+                "passing through raw probability.  Artifact may be from an "
+                "incompatible version.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             cal_proba[:, cls] = p_cls
 
     # normalise rows so they sum to 1
