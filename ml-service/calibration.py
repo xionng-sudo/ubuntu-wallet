@@ -45,6 +45,11 @@ class CalibratedModel:
     calibrators: List[Any]               # one calibrator per class (list of n_classes)
     trained_at: str
     base_model_version: str
+    # per_class_methods stores the actual method used for each class after any
+    # automatic fallback (e.g. isotonic → sigmoid when isotonic is degenerate).
+    # None means all classes used ``method``.  Added in v2; defaults to None so
+    # that previously-serialised artifacts continue to load without error.
+    per_class_methods: Optional[List[str]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -68,6 +73,16 @@ def fit_calibration(
 
     Returns:
         Fitted CalibratedModel.
+
+    Notes:
+        When ``method="isotonic"``, the fitter automatically detects if the
+        fitted isotonic function is degenerate (i.e. its output range on the
+        training data is less than 1e-6, meaning it maps all inputs to the same
+        constant).  In that case it silently falls back to sigmoid (Platt
+        scaling) for that class and records the actual method used in
+        ``CalibratedModel.per_class_methods``.  This prevents the calibrated
+        probabilities from becoming a fixed constant value at inference time
+        while preserving accuracy.
     """
     from sklearn.isotonic import IsotonicRegression
     from sklearn.linear_model import LogisticRegression
@@ -75,6 +90,7 @@ def fit_calibration(
 
     n_classes = y_proba.shape[1]
     calibrators = []
+    per_class_methods: List[str] = []
 
     for cls in range(n_classes):
         y_bin = (y_true == cls).astype(int)
@@ -83,16 +99,41 @@ def fit_calibration(
         if method == "isotonic":
             cal = IsotonicRegression(out_of_bounds="clip")
             cal.fit(p_cls, y_bin)
+            # Detect degenerate isotonic calibrator.  There are two conditions
+            # that cause constant output at inference time:
+            #
+            # 1. The training probabilities are concentrated in a very narrow
+            #    band (< 0.01).  Even if PAVA finds a slightly varying solution
+            #    within that band, new inference inputs will land in the same
+            #    narrow zone and produce effectively constant output.
+            #
+            # 2. The fitted mapping output range on training data is already
+            #    essentially zero (PAVA pooled everything into one block).
+            #
+            # In either case fall back to sigmoid (Platt scaling), which is
+            # a parametric fit that always produces a non-constant monotone
+            # mapping regardless of how narrow the input distribution is.
+            if np.ptp(p_cls) < 0.01 or np.ptp(cal.predict(p_cls)) < 1e-6:
+                cal = LogisticRegression(C=1e10, solver="lbfgs", max_iter=500)
+                cal.fit(p_cls.reshape(-1, 1), y_bin)
+                per_class_methods.append("sigmoid")
+            else:
+                per_class_methods.append("isotonic")
         elif method == "sigmoid":
             # Platt scaling: fit logistic regression directly on raw probabilities.
             # LogisticRegression internally learns the sigmoid mapping (scale/bias).
             cal = LogisticRegression(C=1e10, solver="lbfgs", max_iter=500)
             cal.fit(p_cls.reshape(-1, 1), y_bin)
+            per_class_methods.append("sigmoid")
         else:
             raise ValueError(f"Unknown calibration method: {method!r}. Use 'isotonic' or 'sigmoid'.")
 
         calibrators.append(cal)
 
+    assert len(per_class_methods) == len(calibrators) == n_classes, (
+        f"Invariant violation: per_class_methods length {len(per_class_methods)} "
+        f"!= calibrators length {len(calibrators)} (n_classes={n_classes})"
+    )
     trained_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return CalibratedModel(
         method=method,
@@ -100,6 +141,7 @@ def fit_calibration(
         calibrators=calibrators,
         trained_at=trained_at,
         base_model_version=base_model_version,
+        per_class_methods=per_class_methods,
     )
 
 
@@ -121,16 +163,42 @@ def calibrate_proba(
     Returns:
         Calibrated probabilities (n, n_classes), rows sum approximately to 1
         after normalisation.
+
+    Notes:
+        Each class may use a different underlying calibrator (isotonic or
+        sigmoid) when ``cal_model.per_class_methods`` is set.  This is the
+        case when ``fit_calibration`` automatically fell back from a degenerate
+        isotonic fit to sigmoid for one or more classes.  Older artifacts that
+        do not carry ``per_class_methods`` (``None``) continue to work: the
+        global ``cal_model.method`` is used for every class.
     """
-    n = y_proba.shape[0]
     cal_proba = np.zeros_like(y_proba, dtype=np.float64)
 
     for cls, cal in enumerate(cal_model.calibrators):
         p_cls = y_proba[:, cls]
-        if cal_model.method == "isotonic":
+        # Determine the actual method for this class.
+        if cal_model.per_class_methods is not None and cls < len(cal_model.per_class_methods):
+            cls_method = cal_model.per_class_methods[cls]
+        else:
+            cls_method = cal_model.method
+
+        if cls_method == "isotonic":
             cal_proba[:, cls] = cal.predict(p_cls)
-        elif cal_model.method == "sigmoid":
+        elif cls_method == "sigmoid":
             cal_proba[:, cls] = cal.predict_proba(p_cls.reshape(-1, 1))[:, 1]
+        else:
+            # Unknown method stored in artifact — fall back to raw probability
+            # and log a warning so operator can diagnose potential version
+            # mismatch or corrupted artifact.
+            import warnings
+            warnings.warn(
+                f"calibrate_proba: unknown method {cls_method!r} for class {cls}; "
+                "passing through raw probability.  Artifact may be from an "
+                "incompatible version.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            cal_proba[:, cls] = p_cls
 
     # normalise rows so they sum to 1
     row_sums = cal_proba.sum(axis=1, keepdims=True)
