@@ -1228,4 +1228,33 @@ Always record the `model_version` hash when starting a backtest or live session.
 
 ---
 
+## 17. Probability Architecture
+
+### Inference Decision Probability: raw p_stack
+
+The entry decision threshold is compared against **raw stacking probabilities (`p_long`, `p_short`)**
+output directly from the LogisticRegression stacking meta-model.
+
+**Why NOT calibrated probabilities for thresholding:**
+- Raw p_stack output range: approximately **0.09 – 0.52** per class
+- Isotonic-calibrated range: approximately **0.03 – 0.13** per class
+- Backtest thresholds are tuned on raw p_stack; using calibrated values causes a permanent
+  quantile mismatch where `effective_long ≈ 0.03` can never reach `threshold ≈ 0.42`
+
+**Calibration is kept for monitoring only:**
+- `cal_p_long`, `cal_p_short`, `calibrated_confidence` are returned in `/predict` responses
+- These values reflect true precision estimates and are logged for drift/calibration monitoring
+- They are NOT used for entry decisions
+
+### Probability fields in /predict response
+
+| Field | Source | Used for entry? |
+|-------|--------|----------------|
+| `p_long` / `p_short` | raw LogisticRegression output | ✅ YES — compared to threshold |
+| `effective_long` / `effective_short` | same as p_long/p_short (raw) | ✅ YES |
+| `cal_p_long` / `cal_p_short` | isotonic-calibrated | ❌ monitoring only |
+| `calibrated_confidence` | max calibrated class prob | ❌ monitoring only |
+
+---
+
 *This document reflects the current state of the ubuntu-wallet codebase. Update after any significant architecture change, new training run configuration, or deployment topology change.*

@@ -1295,3 +1295,30 @@ journalctl -u go-collector -n 200 --no-pager
   --sl-pct 0.009 \
   --calibration isotonic
 ```
+
+---
+
+## 概率架构说明
+
+### 入场决策使用的概率：raw p_stack
+
+入场阈值比较使用的是 **stacking LogisticRegression 直接输出的原始概率（`p_long`、`p_short`）**。
+
+**为什么不用校准后的概率做阈值判断：**
+- raw p_stack 输出范围：约 **0.09 – 0.52**（每类）
+- isotonic 校准后范围：约 **0.03 – 0.13**（每类）
+- 回测阈值是在 raw p_stack 上调出的；如果用校准值，会导致 `effective_long ≈ 0.03` 永远无法达到 `threshold ≈ 0.42`，推理全部输出 FLAT
+
+**校准保留用于监控：**
+- `cal_p_long`、`cal_p_short`、`calibrated_confidence` 仍然在 `/predict` 响应中返回
+- 这些值反映真实精度估计，用于漂移监控和校准报告
+- **不参与入场决策**
+
+### /predict 响应中各概率字段说明
+
+| 字段 | 来源 | 是否参与入场判断 |
+|------|------|----------------|
+| `p_long` / `p_short` | stacking LR 原始输出 | ✅ 是 — 与 threshold 比较 |
+| `effective_long` / `effective_short` | 同 p_long/p_short（raw） | ✅ 是 |
+| `cal_p_long` / `cal_p_short` | isotonic 校准后 | ❌ 仅用于监控 |
+| `calibrated_confidence` | 校准概率最大值 | ❌ 仅用于监控 |

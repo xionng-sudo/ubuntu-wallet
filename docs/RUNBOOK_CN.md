@@ -1086,6 +1086,34 @@ ENABLE_DRIFT_MONITOR=true \
 
 ## 19.2 回测工作流
 
+### 回测前置检查
+
+运行多符号回测前，请确认：
+
+1. **pred_cache 已清空**（模型更新后必须执行）：
+   ```bash
+   rm -f data/pred_cache/*.jsonl
+   ```
+
+2. **诊断当前模型的概率分布**（可选，用于确认阈值范围合理性）：
+   ```bash
+   python scripts/diagnose_pred_cache.py --cache-dir data/pred_cache
+   ```
+
+3. **阈值网格覆盖 raw p_stack 实际范围**（0.38-0.60）：
+   - 在 `run_multisymbol_backtest_phased.py` 中确认 `PHASE1_THRESHOLDS` 从 0.38 开始
+   - 不要使用 0.65+ 的阈值，raw p_stack 无法达到该范围
+
+### 概率字段说明
+
+`/predict` 接口返回多个概率字段，用途不同：
+
+| 字段 | 含义 | 入场决策 |
+|------|------|---------|
+| `p_long` | raw stacking 输出 | ✅ 是 |
+| `effective_long` | 同 p_long（raw） | ✅ 是 |
+| `cal_p_long` | isotonic 校准后 | ❌ 仅监控 |
+
 回测脚本通过 HTTP 调用本地 ml-service 完成信号生成，因此 **必须先启动 ml-service**。
 
 ```bash
@@ -1103,7 +1131,7 @@ SYMBOL=BTCUSDT
 ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/backtest_event_v3_http.py \
   --data-dir        data/${SYMBOL} \
   --base-url        http://127.0.0.1:9000 \
-  --thresholds      0.60:0.80:0.02 \
+  --thresholds      0.38:0.60:0.02 \
   --tp-grid         0.010:0.025:0.005 \
   --sl-grid         0.005:0.015:0.005 \
   --horizon-bars    12 \
@@ -1113,7 +1141,7 @@ SYMBOL=BTCUSDT
 # 关键回测参数说明：
 # --data-dir         per-symbol 数据目录（含 klines_1h.json）
 # --base-url         ml-service 地址（默认 http://127.0.0.1:9000）
-# --thresholds       概率阈值网格，格式 min:max:step
+# --thresholds       概率阈值网格，格式 min:max:step（raw p_stack 范围：0.38-0.60）
 # --tp-grid          止盈比例网格，格式 min:max:step
 # --sl-grid          止损比例网格，格式 min:max:step
 # --horizon-bars     持仓最大 bar 数（默认 24）

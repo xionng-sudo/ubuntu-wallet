@@ -1575,3 +1575,29 @@ symbols:
 4. 执行 `bash scripts/train_symbol.sh XRPUSDT`
 5. 验证模型产物：`ls models/XRPUSDT/current/`
 6. 手工验证 drift monitor：`ENABLE_DRIFT_MONITOR=true ~/ubuntu-wallet/ml-service/.venv/bin/python ~/ubuntu-wallet/scripts/report_drift.py --symbol XRPUSDT --dry-run`
+
+---
+
+## 概率校准与阈值配置注意事项
+
+### 重要：校准概率与入场阈值的量纲关系
+
+训练完成后会生成两套概率：
+
+1. **raw p_stack**（`p_long`/`p_short`）：stacking LogisticRegression 的直接输出，范围约 0.09-0.52
+2. **校准概率**（`cal_p_long`/`cal_p_short`）：isotonic 校准后，范围约 0.03-0.13
+
+**入场决策始终使用 raw p_stack。** `configs/symbols.yaml` 中的 `threshold` 字段必须在 raw p_stack 的实际输出范围内（通常 0.38-0.55）。
+
+每次重新训练模型后，必须：
+1. **删除旧的 pred_cache 文件**（`data/pred_cache/*.jsonl`）— 旧缓存中的概率值与新模型不兼容
+2. 重新运行多符号回测以更新 `configs/symbols.yaml` 中的 threshold/tp/sl 参数
+
+### pred_cache 使用注意
+
+pred_cache 文件中存储的概率值（`raw_p_long`、`effective_long` 等）与生成它们的模型版本绑定。切换模型或修改概率架构后，必须清空缓存重建，否则回测结果不可信。
+
+清空方式：
+```bash
+rm -f data/pred_cache/*.jsonl
+```
