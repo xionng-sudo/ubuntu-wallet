@@ -16,6 +16,23 @@
 
 ---
 
+## 重要：概率阈值说明
+
+回测中 `--thresholds` 参数的值必须与 **raw stacking 概率**（`p_stack`）的实际输出范围对齐。
+
+- raw p_stack 正常范围：**0.09 – 0.52**（每类）
+- 合理的阈值范围：**0.38 – 0.55**
+- 不要使用 0.65+ 的阈值，raw p_stack 物理上无法达到该范围
+
+校准后概率（`cal_p_long`）范围更窄（约 0.03-0.13），**不用于入场阈值判断，仅用于日志监控。**
+
+如果发现回测产生大量交易但实盘没有任何入场信号，请检查：
+1. `data/pred_cache/` 是否包含旧缓存（删除后重建）
+2. `ml-service/app.py` 中 `eff_long` 是否是 raw p_long（非 cp_long）
+3. 运行 `python scripts/diagnose_pred_cache.py` 查看概率分布
+
+---
+
 ## 1. 回测脚本与调用方式
 
 脚本路径：

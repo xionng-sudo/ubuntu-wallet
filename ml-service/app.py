@@ -467,9 +467,13 @@ def predict(req: PredictRequest):
         else:
             cp_short = cp_flat = cp_long = None
 
-        # Use calibrated probabilities for thresholding when available
-        eff_long = cp_long if cp_long is not None else p_long
-        eff_short = cp_short if cp_short is not None else p_short
+        # Use RAW stacking probabilities for thresholding.
+        # Calibrated probabilities (cp_long/cp_short) are compressed to a much
+        # smaller range (≈0.03-0.13) by isotonic calibration and CANNOT be used
+        # with thresholds tuned on p_stack (≈0.09-0.52). Calibrated values are
+        # retained in the response solely for logging/monitoring purposes.
+        eff_long = p_long
+        eff_short = p_short
 
         as_of_str = f"as_of_ts={effective_as_of}" if effective_as_of else "as_of_ts=latest"
 

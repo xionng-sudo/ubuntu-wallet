@@ -5,10 +5,14 @@
 #   interval       - primary kline interval used for training and inference
 #   mt_filter_mode - multi-timeframe trend filter mode: off|daily_guard|...
 #   threshold      - minimum per-class probability to enter a trade (p_enter)
+#                    IMPORTANT: must be in the raw p_stack output range (≈0.09–0.52).
+#                    Isotonic-calibrated probabilities (0.03–0.13) are NOT used for
+#                    thresholding — see docs/ARCHITECTURE_CN.md § 概率架构说明.
 #   tp             - take-profit fraction (e.g. 0.0230 = 2.30%)
 #   sl             - stop-loss fraction   (e.g. 0.0090 = 0.90%)
 #   horizon        - forward look-ahead bars for label generation
 #   calibration    - probability calibration method: isotonic | sigmoid | none
+#                    (retained for monitoring/logging only, NOT used for entry decisions)
 
 symbols:
 
@@ -18,17 +22,17 @@ symbols:
     enabled: true
     interval: "1h"
     mt_filter_mode: "off"
-    threshold: 0.66
+    threshold: 0.42    # raw p_stack range, to be re-tuned by backtest
     tp: 0.0230
     sl: 0.0120
     horizon: 12
-    calibration: "isotonic"
+    calibration: "isotonic"  # retained for monitoring/logging only
 
   ETHUSDT:
     enabled: true
     interval: "1h"
     mt_filter_mode: "off"
-    threshold: 0.68
+    threshold: 0.42
     tp: 0.0230
     sl: 0.0110
     horizon: 12
@@ -38,7 +42,7 @@ symbols:
     enabled: true
     interval: "1h"
     mt_filter_mode: "off"
-    threshold: 0.66
+    threshold: 0.42
     tp: 0.0230
     sl: 0.0090
     horizon: 6
@@ -48,7 +52,7 @@ symbols:
     enabled: false
     interval: "1h"
     mt_filter_mode: "off"
-    threshold: 0.55
+    threshold: 0.40
     tp: 0.0230
     sl: 0.0120
     horizon: 8
@@ -60,7 +64,7 @@ symbols:
     enabled: true
     interval: "1h"
     mt_filter_mode: "off"
-    threshold: 0.67
+    threshold: 0.42
     tp: 0.0230
     sl: 0.0120
     horizon: 12
@@ -70,7 +74,7 @@ symbols:
     enabled: true
     interval: "1h"
     mt_filter_mode: "off"
-    threshold: 0.70
+    threshold: 0.42
     tp: 0.0230
     sl: 0.0100
     horizon: 8
@@ -80,8 +84,9 @@ symbols:
     enabled: false
     interval: "1h"
     mt_filter_mode: "daily_guard"
-    threshold: 0.73
+    threshold: 0.42
     tp: 0.0230
     sl: 0.0110
     horizon: 6
     calibration: "isotonic"
+

@@ -138,14 +138,27 @@ def normalize_log_prediction(j: Dict[str, Any]) -> SignalSnapshot:
 
 
 def select_effective_probs(snapshot: SignalSnapshot) -> Tuple[Optional[float], Optional[float], Optional[float], str]:
+    """Return the raw stacking probabilities (p_long, p_short, p_flat) for threshold comparison.
+
+    IMPORTANT: effective_long/cal_p_long (calibrated) are NOT used for thresholding.
+    Isotonic calibration compresses p_stack (0.09-0.52) down to (0.03-0.13), which
+    is incompatible with thresholds tuned on the raw p_stack range.
+    Calibrated probabilities are available via snapshot.cal_p_long for monitoring only.
+    """
+    # Always use raw stacking probabilities for entry decisions.
+    if snapshot.p_long is not None and snapshot.p_short is not None:
+        return snapshot.p_long, snapshot.p_short, snapshot.p_flat, "raw"
+
+    # Fallback: if raw not available, try calibrated (should not happen in normal flow)
+    if snapshot.cal_p_long is not None and snapshot.cal_p_short is not None:
+        return snapshot.cal_p_long, snapshot.cal_p_short, snapshot.cal_p_flat, "calibrated_fallback"
+
+    # Last resort: effective (legacy field)
     if snapshot.effective_long is not None and snapshot.effective_short is not None:
         p_flat = snapshot.cal_p_flat if snapshot.cal_p_flat is not None else snapshot.p_flat
-        return snapshot.effective_long, snapshot.effective_short, p_flat, "effective"
+        return snapshot.effective_long, snapshot.effective_short, p_flat, "effective_fallback"
 
-    if snapshot.cal_p_long is not None and snapshot.cal_p_short is not None:
-        return snapshot.cal_p_long, snapshot.cal_p_short, snapshot.cal_p_flat, "calibrated"
-
-    return snapshot.p_long, snapshot.p_short, snapshot.p_flat, "raw"
+    return None, None, None, "none"
 
 
 def decide_side(p_long: Optional[float], p_short: Optional[float], threshold: float) -> str:

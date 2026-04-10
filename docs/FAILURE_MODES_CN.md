@@ -915,3 +915,25 @@ for line in sys.stdin:
     print('symbol:', row.get('symbol'), 'interval:', row.get('interval'))
 "
 ```
+
+---
+
+## 故障模式：推理全部输出 FLAT，回测有正常交易
+
+**症状：** 实盘/模拟交易从不触发入场，但对同一时间段跑回测时可以产生交易。
+
+**根因：** 回测和推理使用了不同量纲的概率作为阈值比较基准。
+
+- 回测用了 `raw p_stack`（范围 0.09-0.52）
+- 推理返回 `effective_long = calibrated probability`（范围 0.03-0.13）
+- `configs/symbols.yaml` 里的 threshold 是针对 raw p_stack 调出来的（0.40-0.55）
+- 校准概率永远无法达到该阈值，因此全部输出 FLAT
+
+**修复：** 确认 `ml-service/app.py` 中 `eff_long = p_long`（raw），而不是 `cp_long`（calibrated）。
+参见 `docs/ARCHITECTURE_CN.md` 中的"概率架构说明"章节。
+
+**预防：** 每次修改概率架构后，清空 pred_cache 并重新验证回测与推理的概率分布一致。
+```bash
+rm -f data/pred_cache/*.jsonl
+python scripts/diagnose_pred_cache.py --cache-dir data/pred_cache
+```

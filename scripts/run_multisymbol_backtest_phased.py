@@ -23,9 +23,13 @@ DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEU
 # Phase grids
 # ---------------------------
 
-# Phase1: coarse-ish but frequency-friendly.
-# Goal: avoid always picking thr=0.80 "few trades all win" solutions.
-PHASE1_THRESHOLDS = [0.40, 0.43, 0.45, 0.48, 0.50, 0.52, 0.55, 0.58, 0.60, 0.62, 0.65, 0.68, 0.70, 0.72, 0.75]
+# Phase1 threshold grid aligned to raw p_stack output range (0.09-0.52).
+# Raw stacking LR output for a 3-class problem rarely exceeds 0.55 even for
+# strong signals. Do NOT use thresholds above 0.60 — raw p_stack cannot reach
+# that range. Old pred_cache files using calibrated effective_long (0.03-0.13)
+# must be deleted before running backtest after switching to raw probabilities:
+#   rm -f data/pred_cache/*.jsonl
+PHASE1_THRESHOLDS = [0.38, 0.40, 0.42, 0.43, 0.44, 0.45, 0.46, 0.47, 0.48, 0.50, 0.52, 0.54, 0.55, 0.58, 0.60]
 PHASE1_MT_MODES = ["daily_guard", "off"]
 
 # Expand TP/SL a bit so "all TP no SL" doesn't dominate too easily.
