@@ -608,7 +608,7 @@ def main() -> int:
     ap.add_argument("--retry-backoff-s", type=float, default=2.0)
 
     args = ap.parse_args()
-    args.symbols = [s.strip() for s in args.symbols.split(",") if s.strip()]
+    args.symbols = [s.strip() for s in re.split(r"[,\uff0c]+", args.symbols) if s.strip()]
     args.workers = max(1, int(args.workers))
 
     if args.phase == "phase1":
