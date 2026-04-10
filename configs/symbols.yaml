@@ -35,7 +35,7 @@ symbols:
     threshold: 0.42
     tp: 0.0230
     sl: 0.0110
-    horizon: 12
+    horizon: 8
     calibration: "isotonic"
 
   SOLUSDT:
@@ -53,9 +53,9 @@ symbols:
     interval: "1h"
     mt_filter_mode: "off"
     threshold: 0.40
-    tp: 0.0230
-    sl: 0.0120
-    horizon: 8
+    tp: 0.0220
+    sl: 0.0080
+    horizon: 12
     calibration: "isotonic"
 
   # ---------- Phase 2 ----------
@@ -76,8 +76,8 @@ symbols:
     mt_filter_mode: "off"
     threshold: 0.42
     tp: 0.0230
-    sl: 0.0100
-    horizon: 8
+    sl: 0.0090
+    horizon: 6
     calibration: "isotonic"
 
   ADAUSDT:
