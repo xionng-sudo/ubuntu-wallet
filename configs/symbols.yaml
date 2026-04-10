@@ -49,7 +49,7 @@ symbols:
     calibration: "isotonic"
 
   BNBUSDT:
-    enabled: false
+    enabled: true
     interval: "1h"
     mt_filter_mode: "off"
     threshold: 0.40
@@ -81,7 +81,7 @@ symbols:
     calibration: "isotonic"
 
   ADAUSDT:
-    enabled: false
+    enabled: true
     interval: "1h"
     mt_filter_mode: "daily_guard"
     threshold: 0.42
